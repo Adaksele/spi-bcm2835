@@ -39,15 +39,11 @@
 #include <mach/dma.h>
 #include <linux/moduleparam.h>
 
-static short mode = 2;
-module_param(mode, short, 0);
-MODULE_PARM_DESC(mode, "Processing mode: 0=polling, 1=interrupt driven, 2=dma (default)");
-
 static bool realtime = 1;
 module_param(realtime, bool, 0);
 MODULE_PARM_DESC(realtime, "Run the driver with realtime priority");
 
-static unsigned debug;
+static unsigned debug=0;
 module_param(debug, uint, 0);
 MODULE_PARM_DESC(debug, "Turn on debug output");
 
@@ -130,15 +126,21 @@ struct bcm2835_spi_dma {
 struct bcm2835_spi {
 	spinlock_t lock;
 	void __iomem *base;
-	int irq;
 	struct clk *clk;
 	bool stopping;
 
 	struct completion done;
 
 	/* dma buffer structures */
+	/* the dma region for CBs */
 	struct bcm2708_dma_cb *dma_buffer;
 	dma_addr_t dma_buffer_handle;
+
+	/* the dma bounce buffer */
+	void *dma_bouncebuffer;
+	dma_addr_t dma_bouncebuffer_handle;
+
+	/* and the information on the DMA channels we use */
 	struct bcm2835_spi_dma dma_tx;
 	struct bcm2835_spi_dma dma_rx;
 
@@ -148,10 +150,6 @@ struct bcm2835_spi {
 	char *rx_buf;
 	int rx_len;
 	int cs;
-	/* statistics counter */
-	u64 transfers_polling;
-	u64 transfers_irqdriven;
-	u64 transfers_dmadriven;
 };
 
 struct bcm2835_spi_state {
@@ -314,12 +312,28 @@ static int bcm2835_register_dmabuffer(struct platform_device *pdev,
 		dev_err(&pdev->dev, "cannot allocate DMA CBs\n");
 		return -ENOMEM;
 	}
+	/* allocate the dma bounce buffer */
+	bs->dma_bouncebuffer = dma_alloc_writecombine(&pdev->dev,
+					SZ_4K,
+					&bs->dma_bouncebuffer_handle,
+					GFP_KERNEL);
+	if (!bs->dma_bouncebuffer) {
+		dev_err(&pdev->dev, "cannot allocate DMA bounce-buffer\n");
+		dma_free_writecombine(&pdev->dev, SZ_4K,
+				bs->dma_buffer,
+				bs->dma_buffer_handle);
+		bs->dma_buffer = NULL;
+		bs->dma_buffer_handle = 0;
+		return -ENOMEM;
+	}
+	
 	return 0;
 }
 
 static int bcm2835_release_dmabuffer(struct platform_device *pdev,
 				struct bcm2835_spi *bs)
 {
+	/* release the dma buffer */
 	if (!bs->dma_buffer)
 		return 0;
 	dma_free_writecombine(&pdev->dev, SZ_4K,
@@ -327,6 +341,12 @@ static int bcm2835_release_dmabuffer(struct platform_device *pdev,
 			bs->dma_buffer_handle);
 	bs->dma_buffer = NULL;
 	bs->dma_buffer_handle = 0;
+	/* release also the DMA bounce buffer */
+	dma_free_writecombine(&pdev->dev, SZ_4K,
+			bs->dma_bouncebuffer,
+			bs->dma_bouncebuffer_handle);
+	bs->dma_bouncebuffer = NULL;
+	bs->dma_bouncebuffer_handle = 0;
 	return 0;
 }
 
@@ -389,9 +409,7 @@ static int bcm2835_transfer_one_message_dma(struct spi_master *master,
 	if (xfer->len <= 0)
 		return 0;
 
-	/* increment type counter */
-	bs->transfers_dmadriven++;
-
+	/* the length of the package may not be bigger than 64k */
 	if (xfer->len > 65536) {
 		dev_err(&master->dev, "Max allowed package size 64k exceeded");
 		return -EINVAL;
@@ -492,148 +510,6 @@ static int bcm2835_transfer_one_message_dma(struct spi_master *master,
 	return 0;
 }
 
-static irqreturn_t
-bcm2835_transfer_one_message_irqdriven_irqhandler(int irq, void *dev_id)
-{
-
-	struct spi_master *master = dev_id;
-	struct bcm2835_spi *bs = spi_master_get_devdata(master);
-	char b;
-
-	spin_lock(&bs->lock);
-	/* if we got more data then write */
-	while ((bs->tx_len > 0) && (bcm2835_rd(bs, SPI_CS) & SPI_CS_TXD)) {
-		if (bs->tx_buf)
-			b = *bs->tx_buf++;
-		else
-			b = 0;
-		bcm2835_wr(bs, SPI_FIFO, b);
-		bs->tx_len--;
-	}
-	/* check for reads */
-	while (bcm2835_rd(bs, SPI_CS) & SPI_CS_RXD) {
-		/* getting byte from fifo */
-		b = bcm2835_rd(bs, SPI_FIFO);
-		/* store it if requested */
-		if (bs->rx_buf)
-			*bs->rx_buf++ = b;
-		bs->rx_len--;
-	}
-	spin_unlock(&bs->lock);
-
-	/* and if we have rx_len as 0 then wakeup the process */
-	if (bs->rx_len == 0) {
-		/* clean the transfers including all interrupts */
-		bcm2835_wr(bs, SPI_CS, bs->cs);
-		/* and wake up the thread to continue its work */
-		complete(&bs->done);
-	}
-
-	/* return IRQ handled */
-	return IRQ_HANDLED;
-}
-
-static int bcm2835_transfer_one_message_irqdriven(struct spi_master *master,
-						struct bcm2835_spi_state *stp,
-						struct spi_transfer *xfer,
-						int flags)
-{
-	struct bcm2835_spi *bs = spi_master_get_devdata(master);
-	u32 cs;
-	char b;
-	unsigned long iflags;
-
-	/* increment type counter */
-	bs->transfers_irqdriven++;
-
-	/* store the data somewhere where the interrupt handler can see it */
-	bs->tx_buf = xfer->tx_buf;
-	bs->tx_len = xfer->len;
-	bs->rx_buf = xfer->rx_buf;
-	bs->rx_len = xfer->len;
-	bs->cs = stp->cs;
-
-	/* if we are not the last xfer - keep flags when done */
-	if (!(flags | FLAGS_LAST_TRANSFER))
-		bs->cs |= SPI_CS_TA | SPI_CS_INTR | SPI_CS_INTD;
-
-	spin_lock_irqsave(&bs->lock, iflags);
-
-	/* start by setting up the SPI controller */
-	cs = stp->cs | SPI_CS_TA | SPI_CS_INTR | SPI_CS_INTD;
-	bcm2835_wr(bs, SPI_CLK, stp->cdiv);
-	bcm2835_wr(bs, SPI_CS, cs);
-
-	/* fill as much of a buffer as possible */
-	while ((bcm2835_rd(bs, SPI_CS) & SPI_CS_TXD) && (bs->tx_len > 0)) {
-		if (bs->tx_buf)
-			b = *bs->tx_buf++;
-		else
-			b = 0;
-		bcm2835_wr(bs, SPI_FIFO, b);
-		bs->tx_len--;
-	}
-
-	/* now enable the interrupts after we have initialized completion */
-	INIT_COMPLETION(bs->done);
-	spin_unlock_irqrestore(&bs->lock, iflags);
-
-	/* and wait for last interrupt to wake us up */
-	if (wait_for_completion_timeout(&bs->done,
-				msecs_to_jiffies(SPI_TIMEOUT_MS)) == 0) {
-		dev_err(&master->dev, "transfer timed out\n");
-		return -ETIMEDOUT;
-	}
-
-	/* and return */
-	return 0;
-}
-
-static int bcm2835_transfer_one_message_poll(struct spi_master *master,
-					struct bcm2835_spi_state *stp,
-					struct spi_transfer *xfer,
-					int flags)
-{
-	struct bcm2835_spi *bs = spi_master_get_devdata(master);
-	u32 cs;
-	char b;
-	const char *tx_buf = xfer->tx_buf;
-	int tx_len = xfer->len;
-	char *rx_buf = xfer->rx_buf;
-	int rx_len = xfer->len;
-
-	/* increment type counter */
-	bs->transfers_polling++;
-
-	/* start by setting up the SPI controller */
-	cs = stp->cs | SPI_CS_TA;
-	bcm2835_wr(bs, SPI_CLK, stp->cdiv);
-	bcm2835_wr(bs, SPI_CS, cs);
-	while ((rx_len > 0)) {
-		cs = bcm2835_rd(bs, SPI_CS);
-		if (cs & SPI_CS_TXD) {
-			if (tx_len > 0) {
-				if (tx_buf)
-					b = *tx_buf++;
-				else
-					b = 0;
-				bcm2835_wr(bs, SPI_FIFO, b);
-				tx_len--;
-			}
-		}
-		if (cs & SPI_CS_RXD) {
-			b = bcm2835_rd(bs, SPI_FIFO);
-			if (rx_buf)
-				*rx_buf++ = b;
-			rx_len--;
-		}
-	}
-	/* release cs */
-	bcm2835_wr(bs, SPI_CS, stp->cs);
-
-	return 0;
-}
-
 static int bcm2835_transfer_one_message(struct spi_master *master,
 					struct spi_message *msg)
 {
@@ -651,7 +527,7 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 
 	/* loop all the transfer entries to check for transfer issues first */
 	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
-		int can_dma = 1;
+		int use_bounce_buffer = 0;
 		int flags = 0;
 		count++;
 		/* calculate flags */
@@ -663,11 +539,24 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 		}
 		if (count == transfers)
 			flags |= FLAGS_LAST_TRANSFER;
-		/* check if elegable for DMA */
-		if ((xfer->tx_buf) && (!xfer->tx_dma))
-			can_dma = 0;
-		if ((xfer->rx_buf) && (!xfer->rx_dma))
-			can_dma = 0;
+		/* check if elegable for DMA - bounce buffers are a bit bad - need a better way*/
+		if ((xfer->tx_buf) && (!xfer->tx_dma)) {
+			use_bounce_buffer = 1;
+		}
+		if ((xfer->rx_buf) && (!xfer->rx_dma)) {
+			use_bounce_buffer = 1;
+		}
+		/* this is quick & dirty - if one side needs a bounce buffer, then both sides need it... */
+		if (use_bounce_buffer) {
+			if (xfer->tx_buf) {
+				xfer->tx_dma=bs->dma_bouncebuffer_handle;
+				memcpy(bs->dma_bouncebuffer,xfer->tx_buf,xfer->len);
+			}
+			if (xfer->rx_buf) {
+				xfer->rx_dma=bs->dma_bouncebuffer_handle+2048;
+			}
+		}
+
 
 		/* configure SPI - use global settings if not explicitly set */
 		if (xfer->bits_per_word || xfer->speed_hz) {
@@ -687,32 +576,18 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 		/* keep Transfer active until we are triggering the last one */
 		if (!(flags & FLAGS_LAST_TRANSFER))
 			state.cs |= SPI_CS_TA;
-		/* now send the message over SPI */
-		switch (mode) {
-		case 0: /* polling */
-			status = bcm2835_transfer_one_message_poll(
-				master, &state, xfer, flags);
-			break;
-		case 1: /* interrupt driven */
-			status = bcm2835_transfer_one_message_irqdriven(
-				master, &state, xfer, flags);
-			break;
-		case 2: /* dma driven */
-		default:
-			if (can_dma) {
-				status = bcm2835_transfer_one_message_dma(
-					master, &state, xfer, flags
-					);
-				break;
-			} else {
-				status = bcm2835_transfer_one_message_irqdriven(
-					master, &state, xfer, flags
-					);
-				break;
-			}
-		}
+		/* now send the message over SPI using DMA only */
+		status = bcm2835_transfer_one_message_dma(
+			master, &state, xfer, flags
+			);
 		if (status)
 			goto exit;
+		/* again quick and dirty */
+		if (use_bounce_buffer) {
+			if (xfer->rx_buf) {
+				memcpy(xfer->rx_buf,bs->dma_bouncebuffer+2048,xfer->len);
+			}
+		}
 		/* delay if given */
 		if (xfer->delay_usecs)
 			udelay(xfer->delay_usecs);
@@ -784,22 +659,15 @@ static void bcm2835_spi_cleanup(struct spi_device *spi)
 static int bcm2835_spi_probe(struct platform_device *pdev)
 {
 	struct resource *regs;
-	int irq, err = -ENOMEM;
+	int err = -ENOMEM;
 	struct clk *clk;
 	struct spi_master *master;
 	struct bcm2835_spi *bs;
-	const char *modestr;
 
 	regs = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!regs) {
 		dev_err(&pdev->dev, "could not get IO memory\n");
 		return -ENXIO;
-	}
-
-	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		dev_err(&pdev->dev, "could not get IRQ\n");
-		return irq;
 	}
 
 	clk = clk_get(&pdev->dev, NULL);
@@ -831,15 +699,9 @@ static int bcm2835_spi_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, master);
 
-
 	bs = spi_master_get_devdata(master);
 	spin_lock_init(&bs->lock);
 	init_completion(&bs->done);
-
-	/* set counters */
-	bs->transfers_polling = 0;
-	bs->transfers_irqdriven = 0;
-	bs->transfers_dmadriven = 0;
 
 	/* get Register Map */
 	bs->base = ioremap(regs->start, resource_size(regs));
@@ -848,25 +710,15 @@ static int bcm2835_spi_probe(struct platform_device *pdev)
 		goto out_master_put;
 	}
 
-	bs->irq = irq;
 	bs->clk = clk;
 	bs->stopping = false;
-
-	err = request_irq(irq,
-			bcm2835_transfer_one_message_irqdriven_irqhandler,
-			0,
-			dev_name(&pdev->dev),
-			master);
-	if (err) {
-		dev_err(&pdev->dev, "could not request IRQ: %d\n", err);
-		goto out_iounmap;
-	}
 
 	/* enable DMA */
 	/* register memory buffer for DMA */
 	err = bcm2835_register_dmabuffer(pdev, bs);
 	if (err)
-		goto out_free_irq;
+		goto out_iounmap;
+
 	/* register channels and irq */
 	err = bcm2835_register_dma(pdev,
 						&bs->dma_rx,
@@ -903,24 +755,10 @@ static int bcm2835_spi_probe(struct platform_device *pdev)
 		goto out_free_dma_irq;
 	}
 
-	dev_info(&pdev->dev, "SPI Controller at 0x%08lx (irq %d)\n",
-		(unsigned long)regs->start, irq);
+	dev_info(&pdev->dev, "SPI Controller at 0x%08lx\n",
+		(unsigned long)regs->start);
 
-	/* now send the message over SPI */
-	switch (mode) {
-	case 0:
-		modestr = "polling";
-		break;
-	case 1:
-		modestr = "interrupt-driven";
-		break;
-	case 2:
-	default:
-		mode = 2;
-		modestr = "dma";
-		break;
-	}
-	dev_info(&pdev->dev, "SPI Controller running in %s mode\n", modestr);
+	dev_info(&pdev->dev, "SPI Controller running in DMA mode\n");
 	return 0;
 out_free_dma_irq:
 	free_irq(bs->dma_rx.irq, master);
@@ -930,8 +768,6 @@ out_free_dma_rx:
 	bcm2835_release_dma(pdev, &bs->dma_rx);
 out_free_dma_buffer:
 	bcm2835_release_dmabuffer(pdev, bs);
-out_free_irq:
-	free_irq(bs->irq, master);
 out_iounmap:
 	iounmap(bs->base);
 out_master_put:
@@ -946,30 +782,29 @@ static int bcm2835_spi_remove(struct platform_device *pdev)
 	struct spi_master *master = platform_get_drvdata(pdev);
 	struct bcm2835_spi *bs = spi_master_get_devdata(master);
 
-	/* first report on usage */
-	dev_info(&pdev->dev, "SPI Bus statistics: %llu poll %llu interrupt and %llu dma driven messages\n",
-		bs->transfers_polling,
-		bs->transfers_irqdriven,
-		bs->transfers_dmadriven
-		);
-
 	/* reset the hardware and block queue progress */
 	bs->stopping = true;
-	bcm2835_wr(bs, SPI_CS, SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
 
-	clk_disable(bs->clk);
-	clk_put(bs->clk);
-	free_irq(bs->irq, master);
-	iounmap(bs->base);
-
-	/* release DMA */
+	/* release interrupts */
 	free_irq(bs->dma_rx.irq, master);
+	/* release DMA - disabling RX and TX SPI*/
+	bcm2835_wr(bs, SPI_CS, SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
+	/* release buffers and memory */
 	bcm2835_release_dma(pdev, &bs->dma_tx);
 	bcm2835_release_dma(pdev, &bs->dma_rx);
 	bcm2835_release_dmabuffer(pdev, bs);
 
 	/* and unregister device */
 	spi_unregister_master(master);
+
+	/* disable clocks */
+	clk_disable_unprepare(bs->clk);
+	clk_put(bs->clk);
+
+	/* release master */
+	spi_master_put(master);
+	iounmap(bs->base);
+
 
 	return 0;
 }
@@ -1012,8 +847,6 @@ static void __exit bcm2835_spi_exit(void)
 }
 module_exit(bcm2835_spi_exit);
 
-/* module_platform_driver(bcm2835_spi_driver); */
-
 MODULE_DESCRIPTION("SPI controller driver for Broadcom BCM2835");
-MODULE_AUTHOR("Chris Boot <bootc@bootc.net>, Martin Sperl");
+MODULE_AUTHOR("Chris Boot <bootc@bootc.net>, Martin Sperl, Notro");
 MODULE_LICENSE("GPL v2");
