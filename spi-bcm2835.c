@@ -103,16 +103,6 @@ do {                                         \
 /* the Base address for DMA on the (VideoCore) bus */
 #define DMA_SPI_BASE 0x7E204000
 
-/* some offset addresses */
-#ifndef BCM2708_DMA_SADDR
-#define BCM2708_DMA_SADDR 0x0C
-#endif
-#ifndef BCM2708_DMA_DADDR
-#define BCM2708_DMA_DADDR 0x10
-#endif
-#ifndef BCM2708_DMA_TLEN
-#define BCM2708_DMA_TLEN 0x14
-#endif
 /* some flags */
 #ifndef BCM2708_DMA_D_IGNORE
 #define BCM2708_DMA_D_IGNORE (1<<7)
