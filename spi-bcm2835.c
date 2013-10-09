@@ -43,6 +43,10 @@ static bool realtime = 1;
 module_param(realtime, bool, 0);
 MODULE_PARM_DESC(realtime, "Run the driver with realtime priority");
 
+static bool debugio = 0;
+module_param(debugio, bool, 0);
+MODULE_PARM_DESC(debugio, "debug the messages of the specific CS");
+
 static unsigned debug=0;
 module_param(debug, uint, 0);
 MODULE_PARM_DESC(debug, "Turn on debug output");
@@ -588,6 +592,28 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 				memcpy(xfer->rx_buf,bs->dma_bouncebuffer+2048,xfer->len);
 			}
 		}
+
+		if (unlikely(debugio)) {
+			if (unlikely(debugio&(1<<spi->chip_select))) {
+				printk(KERN_DEBUG "spi%i.%i: Transfer\n  Transfer Length=%i\n",
+					master->bus_num,spi->chip_select,
+					xfer->len
+					);
+				if (xfer->tx_buf) {
+					print_hex_dump(KERN_DEBUG,"  TXData=",DUMP_PREFIX_ADDRESS,
+						16,1,
+						xfer->tx_buf,xfer->len,
+						false);
+				}
+				if (xfer->rx_buf) {
+					print_hex_dump(KERN_DEBUG,"  RXData=",DUMP_PREFIX_ADDRESS,
+						16,1,
+						xfer->rx_buf,xfer->len,
+						false);
+				}
+			}
+		}
+
 		/* delay if given */
 		if (xfer->delay_usecs)
 			udelay(xfer->delay_usecs);
