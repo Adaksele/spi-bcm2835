@@ -1,5 +1,5 @@
 
-obj-m := spi-bcm2708.o
+obj-m := spi-bcm2835.o
 KDIR := /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
 

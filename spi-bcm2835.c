@@ -1,5 +1,5 @@
 /*
- * Driver for Broadcom BCM2708 SPI Controllers
+ * Driver for Broadcom BCM2835 SPI Controllers
  *
  * Copyright (C) 2012 Chris Boot, Martin Sperl
  *
@@ -43,7 +43,7 @@ static short mode = 2;
 module_param(mode, short, 0);
 MODULE_PARM_DESC(mode, "Processing mode: 0=polling, 1=interrupt driven, 2=dma (default)");
 
-static bool realtime;
+static bool realtime = 1;
 module_param(realtime, bool, 0);
 MODULE_PARM_DESC(realtime, "Run the driver with realtime priority");
 
@@ -94,7 +94,7 @@ do {                                         \
 
 #define SPI_TIMEOUT_MS	150
 
-#define DRV_NAME	"bcm2708_spi"
+#define DRV_NAME	"bcm2835_spi"
 
 #define FLAGS_FIRST_TRANSFER 0x01
 #define FLAGS_LAST_TRANSFER  0x02
@@ -121,13 +121,13 @@ do {                                         \
 #define BCM2708_DMA_S_IGNORE (1<<11)
 #endif
 
-struct bcm2708_spi_dma {
+struct bcm2835_spi_dma {
 	int chan;
 	int irq;
 	void __iomem *base;
 };
 
-struct bcm2708_spi {
+struct bcm2835_spi {
 	spinlock_t lock;
 	void __iomem *base;
 	int irq;
@@ -139,8 +139,8 @@ struct bcm2708_spi {
 	/* dma buffer structures */
 	struct bcm2708_dma_cb *dma_buffer;
 	dma_addr_t dma_buffer_handle;
-	struct bcm2708_spi_dma dma_tx;
-	struct bcm2708_spi_dma dma_rx;
+	struct bcm2835_spi_dma dma_tx;
+	struct bcm2835_spi_dma dma_rx;
 
 	/* structures from the transfer buffer needed during the transfer */
 	const char *tx_buf;
@@ -154,7 +154,7 @@ struct bcm2708_spi {
 	u64 transfers_dmadriven;
 };
 
-struct bcm2708_spi_state {
+struct bcm2835_spi_state {
 	u32 cs;
 	u16 cdiv;
 };
@@ -165,7 +165,7 @@ struct bcm2708_spi_state {
  *
  * FIXME: This is a hack. Use pinmux / pinctrl.
  */
-static void bcm2708_init_pinmode(void)
+static void bcm2835_init_pinmode(void)
 {
 #define INP_GPIO(g) *(gpio+((g)/10)) &= ~(7<<(((g)%10)*3))
 #define SET_GPIO_ALT(g, a) *(gpio+(((g)/10))) |= (((a) <= 3 ? (a)+4 : (a) == 4 ? 3 : 2)<<(((g)%10)*3))
@@ -185,21 +185,21 @@ static void bcm2708_init_pinmode(void)
 #undef SET_GPIO_ALT
 }
 
-static inline u32 bcm2708_rd(struct bcm2708_spi *bs, unsigned reg)
+static inline u32 bcm2835_rd(struct bcm2835_spi *bs, unsigned reg)
 {
 	return readl(bs->base + reg);
 }
 
-static inline void bcm2708_wr(struct bcm2708_spi *bs, unsigned reg, u32 val)
+static inline void bcm2835_wr(struct bcm2835_spi *bs, unsigned reg, u32 val)
 {
 	writel(val, bs->base + reg);
 }
 
-static int bcm2708_setup_state(struct spi_master *master,
-			struct device *dev, struct bcm2708_spi_state *state,
+static int bcm2835_setup_state(struct spi_master *master,
+			struct device *dev, struct bcm2835_spi_state *state,
 			u32 hz, u8 csel, u8 mode, u8 bpw)
 {
-	struct bcm2708_spi *bs = spi_master_get_devdata(master);
+	struct bcm2835_spi *bs = spi_master_get_devdata(master);
 	int cdiv;
 	unsigned long bus_hz;
 	u32 cs = 0;
@@ -261,8 +261,8 @@ static int bcm2708_setup_state(struct spi_master *master,
 	return 0;
 }
 
-static int bcm2708_register_dma(struct platform_device *pdev,
-				struct bcm2708_spi_dma *d,
+static int bcm2835_register_dma(struct platform_device *pdev,
+				struct bcm2835_spi_dma *d,
 				struct bcm2708_dma_cb *dmabuffer,
 				const char *name)
 {
@@ -280,8 +280,8 @@ static int bcm2708_register_dma(struct platform_device *pdev,
 	return 0;
 }
 
-static int bcm2708_release_dma(struct platform_device *pdev,
-			struct bcm2708_spi_dma *d)
+static int bcm2835_release_dma(struct platform_device *pdev,
+			struct bcm2835_spi_dma *d)
 {
 	if (!d->base)
 		return 0;
@@ -292,11 +292,11 @@ static int bcm2708_release_dma(struct platform_device *pdev,
 	return 0;
 }
 
-static int bcm2708_register_dmabuffer(struct platform_device *pdev,
-				struct bcm2708_spi *bs)
+static int bcm2835_register_dmabuffer(struct platform_device *pdev,
+				struct bcm2835_spi *bs)
 {
 	/* for this to work you need to have set the following:
-	   in the bcm2708_spi_device definition:
+	   in the bcm2835_spi_device definition:
 	   .dev = {
 	   .coherent_dma_mask = DMA_BIT_MASK(DMA_MASK_BITS_COMMON),
 	   },
@@ -317,8 +317,8 @@ static int bcm2708_register_dmabuffer(struct platform_device *pdev,
 	return 0;
 }
 
-static int bcm2708_release_dmabuffer(struct platform_device *pdev,
-				struct bcm2708_spi *bs)
+static int bcm2835_release_dmabuffer(struct platform_device *pdev,
+				struct bcm2835_spi *bs)
 {
 	if (!bs->dma_buffer)
 		return 0;
@@ -330,10 +330,10 @@ static int bcm2708_release_dmabuffer(struct platform_device *pdev,
 	return 0;
 }
 
-irqreturn_t bcm2708_transfer_one_message_dma_irqhandler(int irq, void *dev)
+irqreturn_t bcm2835_transfer_one_message_dma_irqhandler(int irq, void *dev)
 {
 	struct spi_master *master = dev;
-	struct bcm2708_spi *bs = spi_master_get_devdata(master);
+	struct bcm2835_spi *bs = spi_master_get_devdata(master);
 
 	/* mark the rx DMA-interrupt as handled
 	   - it will (level) trigger otherwise again */
@@ -373,12 +373,12 @@ irqreturn_t bcm2708_transfer_one_message_dma_irqhandler(int irq, void *dev)
    - if there is an API allowing that...
 */
 
-static int bcm2708_transfer_one_message_dma(struct spi_master *master,
-					struct bcm2708_spi_state *stp,
+static int bcm2835_transfer_one_message_dma(struct spi_master *master,
+					struct bcm2835_spi_state *stp,
 					struct spi_transfer *xfer,
 					int flags)
 {
-	struct bcm2708_spi *bs = spi_master_get_devdata(master);
+	struct bcm2835_spi *bs = spi_master_get_devdata(master);
 	struct bcm2708_dma_cb *cbs = bs->dma_buffer;
 	u32 cs = 0;
 	/* calculate dma transfer sizes - words */
@@ -399,7 +399,7 @@ static int bcm2708_transfer_one_message_dma(struct spi_master *master,
 	/* on first transfer reset the RX/TX */
 	cs = stp->cs | SPI_CS_DMAEN;
 	if (flags & FLAGS_FIRST_TRANSFER)
-		bcm2708_wr(bs, SPI_CS, cs | SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
+		bcm2835_wr(bs, SPI_CS, cs | SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
 	/* auto deselect CS if it is the last */
 	if (flags & FLAGS_LAST_TRANSFER)
 		cs |= SPI_CS_ADCS;
@@ -412,8 +412,8 @@ static int bcm2708_transfer_one_message_dma(struct spi_master *master,
 	bs->cs = cs;
 
 	/* now set up the Registers */
-	bcm2708_wr(bs, SPI_CLK, stp->cdiv);
-	bcm2708_wr(bs, SPI_CS, cs);
+	bcm2835_wr(bs, SPI_CLK, stp->cdiv);
+	bcm2835_wr(bs, SPI_CS, cs);
 
 	/* start filling in the CBs */
 	/* first set up the flags for the fifo
@@ -493,27 +493,27 @@ static int bcm2708_transfer_one_message_dma(struct spi_master *master,
 }
 
 static irqreturn_t
-bcm2708_transfer_one_message_irqdriven_irqhandler(int irq, void *dev_id)
+bcm2835_transfer_one_message_irqdriven_irqhandler(int irq, void *dev_id)
 {
 
 	struct spi_master *master = dev_id;
-	struct bcm2708_spi *bs = spi_master_get_devdata(master);
+	struct bcm2835_spi *bs = spi_master_get_devdata(master);
 	char b;
 
 	spin_lock(&bs->lock);
 	/* if we got more data then write */
-	while ((bs->tx_len > 0) && (bcm2708_rd(bs, SPI_CS) & SPI_CS_TXD)) {
+	while ((bs->tx_len > 0) && (bcm2835_rd(bs, SPI_CS) & SPI_CS_TXD)) {
 		if (bs->tx_buf)
 			b = *bs->tx_buf++;
 		else
 			b = 0;
-		bcm2708_wr(bs, SPI_FIFO, b);
+		bcm2835_wr(bs, SPI_FIFO, b);
 		bs->tx_len--;
 	}
 	/* check for reads */
-	while (bcm2708_rd(bs, SPI_CS) & SPI_CS_RXD) {
+	while (bcm2835_rd(bs, SPI_CS) & SPI_CS_RXD) {
 		/* getting byte from fifo */
-		b = bcm2708_rd(bs, SPI_FIFO);
+		b = bcm2835_rd(bs, SPI_FIFO);
 		/* store it if requested */
 		if (bs->rx_buf)
 			*bs->rx_buf++ = b;
@@ -524,7 +524,7 @@ bcm2708_transfer_one_message_irqdriven_irqhandler(int irq, void *dev_id)
 	/* and if we have rx_len as 0 then wakeup the process */
 	if (bs->rx_len == 0) {
 		/* clean the transfers including all interrupts */
-		bcm2708_wr(bs, SPI_CS, bs->cs);
+		bcm2835_wr(bs, SPI_CS, bs->cs);
 		/* and wake up the thread to continue its work */
 		complete(&bs->done);
 	}
@@ -533,12 +533,12 @@ bcm2708_transfer_one_message_irqdriven_irqhandler(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static int bcm2708_transfer_one_message_irqdriven(struct spi_master *master,
-						struct bcm2708_spi_state *stp,
+static int bcm2835_transfer_one_message_irqdriven(struct spi_master *master,
+						struct bcm2835_spi_state *stp,
 						struct spi_transfer *xfer,
 						int flags)
 {
-	struct bcm2708_spi *bs = spi_master_get_devdata(master);
+	struct bcm2835_spi *bs = spi_master_get_devdata(master);
 	u32 cs;
 	char b;
 	unsigned long iflags;
@@ -561,16 +561,16 @@ static int bcm2708_transfer_one_message_irqdriven(struct spi_master *master,
 
 	/* start by setting up the SPI controller */
 	cs = stp->cs | SPI_CS_TA | SPI_CS_INTR | SPI_CS_INTD;
-	bcm2708_wr(bs, SPI_CLK, stp->cdiv);
-	bcm2708_wr(bs, SPI_CS, cs);
+	bcm2835_wr(bs, SPI_CLK, stp->cdiv);
+	bcm2835_wr(bs, SPI_CS, cs);
 
 	/* fill as much of a buffer as possible */
-	while ((bcm2708_rd(bs, SPI_CS) & SPI_CS_TXD) && (bs->tx_len > 0)) {
+	while ((bcm2835_rd(bs, SPI_CS) & SPI_CS_TXD) && (bs->tx_len > 0)) {
 		if (bs->tx_buf)
 			b = *bs->tx_buf++;
 		else
 			b = 0;
-		bcm2708_wr(bs, SPI_FIFO, b);
+		bcm2835_wr(bs, SPI_FIFO, b);
 		bs->tx_len--;
 	}
 
@@ -589,12 +589,12 @@ static int bcm2708_transfer_one_message_irqdriven(struct spi_master *master,
 	return 0;
 }
 
-static int bcm2708_transfer_one_message_poll(struct spi_master *master,
-					struct bcm2708_spi_state *stp,
+static int bcm2835_transfer_one_message_poll(struct spi_master *master,
+					struct bcm2835_spi_state *stp,
 					struct spi_transfer *xfer,
 					int flags)
 {
-	struct bcm2708_spi *bs = spi_master_get_devdata(master);
+	struct bcm2835_spi *bs = spi_master_get_devdata(master);
 	u32 cs;
 	char b;
 	const char *tx_buf = xfer->tx_buf;
@@ -607,40 +607,40 @@ static int bcm2708_transfer_one_message_poll(struct spi_master *master,
 
 	/* start by setting up the SPI controller */
 	cs = stp->cs | SPI_CS_TA;
-	bcm2708_wr(bs, SPI_CLK, stp->cdiv);
-	bcm2708_wr(bs, SPI_CS, cs);
+	bcm2835_wr(bs, SPI_CLK, stp->cdiv);
+	bcm2835_wr(bs, SPI_CS, cs);
 	while ((rx_len > 0)) {
-		cs = bcm2708_rd(bs, SPI_CS);
+		cs = bcm2835_rd(bs, SPI_CS);
 		if (cs & SPI_CS_TXD) {
 			if (tx_len > 0) {
 				if (tx_buf)
 					b = *tx_buf++;
 				else
 					b = 0;
-				bcm2708_wr(bs, SPI_FIFO, b);
+				bcm2835_wr(bs, SPI_FIFO, b);
 				tx_len--;
 			}
 		}
 		if (cs & SPI_CS_RXD) {
-			b = bcm2708_rd(bs, SPI_FIFO);
+			b = bcm2835_rd(bs, SPI_FIFO);
 			if (rx_buf)
 				*rx_buf++ = b;
 			rx_len--;
 		}
 	}
 	/* release cs */
-	bcm2708_wr(bs, SPI_CS, stp->cs);
+	bcm2835_wr(bs, SPI_CS, stp->cs);
 
 	return 0;
 }
 
-static int bcm2708_transfer_one_message(struct spi_master *master,
+static int bcm2835_transfer_one_message(struct spi_master *master,
 					struct spi_message *msg)
 {
-	struct bcm2708_spi *bs = spi_master_get_devdata(master);
+	struct bcm2835_spi *bs = spi_master_get_devdata(master);
 	struct spi_transfer *xfer;
 	struct spi_device *spi = msg->spi;
-	struct bcm2708_spi_state state;
+	struct bcm2835_spi_state state;
 	int status = 0;
 	int count = 0;
 	int transfers = 0;
@@ -657,7 +657,7 @@ static int bcm2708_transfer_one_message(struct spi_master *master,
 		/* calculate flags */
 		if (count == 1) {
 			/* clear the queues */
-			bcm2708_wr(bs, SPI_CS, bcm2708_rd(bs, SPI_CS) |
+			bcm2835_wr(bs, SPI_CS, bcm2835_rd(bs, SPI_CS) |
 					SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
 			flags |= FLAGS_FIRST_TRANSFER;
 		}
@@ -671,7 +671,7 @@ static int bcm2708_transfer_one_message(struct spi_master *master,
 
 		/* configure SPI - use global settings if not explicitly set */
 		if (xfer->bits_per_word || xfer->speed_hz) {
-			status = bcm2708_setup_state(spi->master, &spi->dev,
+			status = bcm2835_setup_state(spi->master, &spi->dev,
 				&state,
 				xfer->speed_hz ? xfer->speed_hz :
 							spi->max_speed_hz,
@@ -679,8 +679,8 @@ static int bcm2708_transfer_one_message(struct spi_master *master,
 				xfer->bits_per_word ? xfer->bits_per_word :
 							spi->bits_per_word);
 		} else {
-			state.cs = ((struct bcm2708_spi_state *)spi->controller_state)->cs;
-			state.cdiv = ((struct bcm2708_spi_state *)spi->controller_state)->cdiv;
+			state.cs = ((struct bcm2835_spi_state *)spi->controller_state)->cs;
+			state.cdiv = ((struct bcm2835_spi_state *)spi->controller_state)->cdiv;
 		}
 		if (status)
 			goto exit;
@@ -690,22 +690,22 @@ static int bcm2708_transfer_one_message(struct spi_master *master,
 		/* now send the message over SPI */
 		switch (mode) {
 		case 0: /* polling */
-			status = bcm2708_transfer_one_message_poll(
+			status = bcm2835_transfer_one_message_poll(
 				master, &state, xfer, flags);
 			break;
 		case 1: /* interrupt driven */
-			status = bcm2708_transfer_one_message_irqdriven(
+			status = bcm2835_transfer_one_message_irqdriven(
 				master, &state, xfer, flags);
 			break;
 		case 2: /* dma driven */
 		default:
 			if (can_dma) {
-				status = bcm2708_transfer_one_message_dma(
+				status = bcm2835_transfer_one_message_dma(
 					master, &state, xfer, flags
 					);
 				break;
 			} else {
-				status = bcm2708_transfer_one_message_irqdriven(
+				status = bcm2835_transfer_one_message_irqdriven(
 					master, &state, xfer, flags
 					);
 				break;
@@ -725,20 +725,20 @@ exit:
 	return status;
 }
 
-static int bcm2708_prepare_transfer(struct spi_master *master)
+static int bcm2835_prepare_transfer(struct spi_master *master)
 {
 	return 0;
 }
 
-static int bcm2708_unprepare_transfer(struct spi_master *master)
+static int bcm2835_unprepare_transfer(struct spi_master *master)
 {
 	return 0;
 }
 
-static int bcm2708_spi_setup(struct spi_device *spi)
+static int bcm2835_spi_setup(struct spi_device *spi)
 {
-	struct bcm2708_spi *bs = spi_master_get_devdata(spi->master);
-	struct bcm2708_spi_state *state;
+	struct bcm2835_spi *bs = spi_master_get_devdata(spi->master);
+	struct bcm2835_spi_state *state;
 	int ret;
 
 	/* configure master */
@@ -763,7 +763,7 @@ static int bcm2708_spi_setup(struct spi_device *spi)
 		spi->controller_state = state;
 	}
 
-	ret = bcm2708_setup_state(spi->master, &spi->dev, state,
+	ret = bcm2835_setup_state(spi->master, &spi->dev, state,
 				spi->max_speed_hz, spi->chip_select, spi->mode,
 				spi->bits_per_word);
 	if (ret < 0) {
@@ -775,19 +775,19 @@ static int bcm2708_spi_setup(struct spi_device *spi)
 	return 0;
 }
 
-static void bcm2708_spi_cleanup(struct spi_device *spi)
+static void bcm2835_spi_cleanup(struct spi_device *spi)
 {
 	kfree(spi->controller_state);
 	spi->controller_state = NULL;
 }
 
-static int bcm2708_spi_probe(struct platform_device *pdev)
+static int bcm2835_spi_probe(struct platform_device *pdev)
 {
 	struct resource *regs;
 	int irq, err = -ENOMEM;
 	struct clk *clk;
 	struct spi_master *master;
-	struct bcm2708_spi *bs;
+	struct bcm2835_spi *bs;
 	const char *modestr;
 
 	regs = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -808,7 +808,7 @@ static int bcm2708_spi_probe(struct platform_device *pdev)
 		return PTR_ERR(clk);
 	}
 
-	bcm2708_init_pinmode();
+	bcm2835_init_pinmode();
 
 	master = spi_alloc_master(&pdev->dev, sizeof(*bs));
 	if (!master) {
@@ -821,13 +821,13 @@ static int bcm2708_spi_probe(struct platform_device *pdev)
 
 	master->bus_num = pdev->id;
 	master->num_chipselect = 3;
-	master->setup = bcm2708_spi_setup;
-	master->cleanup = bcm2708_spi_cleanup;
+	master->setup = bcm2835_spi_setup;
+	master->cleanup = bcm2835_spi_cleanup;
 	master->rt = realtime;
 
-	master->prepare_transfer_hardware       = bcm2708_prepare_transfer;
-	master->transfer_one_message            = bcm2708_transfer_one_message;
-	master->unprepare_transfer_hardware     = bcm2708_unprepare_transfer;
+	master->prepare_transfer_hardware       = bcm2835_prepare_transfer;
+	master->transfer_one_message            = bcm2835_transfer_one_message;
+	master->unprepare_transfer_hardware     = bcm2835_unprepare_transfer;
 
 	platform_set_drvdata(pdev, master);
 
@@ -853,7 +853,7 @@ static int bcm2708_spi_probe(struct platform_device *pdev)
 	bs->stopping = false;
 
 	err = request_irq(irq,
-			bcm2708_transfer_one_message_irqdriven_irqhandler,
+			bcm2835_transfer_one_message_irqdriven_irqhandler,
 			0,
 			dev_name(&pdev->dev),
 			master);
@@ -864,18 +864,18 @@ static int bcm2708_spi_probe(struct platform_device *pdev)
 
 	/* enable DMA */
 	/* register memory buffer for DMA */
-	err = bcm2708_register_dmabuffer(pdev, bs);
+	err = bcm2835_register_dmabuffer(pdev, bs);
 	if (err)
 		goto out_free_irq;
 	/* register channels and irq */
-	err = bcm2708_register_dma(pdev,
+	err = bcm2835_register_dma(pdev,
 						&bs->dma_rx,
 						bs->dma_buffer,
 						DRV_NAME "(rxDMA)"
 				);
 	if (err)
 		goto out_free_dma_buffer;
-	err = bcm2708_register_dma(pdev,
+	err = bcm2835_register_dma(pdev,
 						&bs->dma_tx,
 						bs->dma_buffer,
 						DRV_NAME "(txDMA)"
@@ -884,7 +884,7 @@ static int bcm2708_spi_probe(struct platform_device *pdev)
 		goto out_free_dma_rx;
 	/* register IRQ for RX dma channel  */
 	err = request_irq(bs->dma_rx.irq,
-			bcm2708_transfer_one_message_dma_irqhandler,
+			bcm2835_transfer_one_message_dma_irqhandler,
 			0,
 			dev_name(&pdev->dev),
 			master);
@@ -895,7 +895,7 @@ static int bcm2708_spi_probe(struct platform_device *pdev)
 
 	/* initialise the hardware */
 	clk_enable(clk);
-	bcm2708_wr(bs, SPI_CS, SPI_CS_REN | SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
+	bcm2835_wr(bs, SPI_CS, SPI_CS_REN | SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
 
 	err = spi_register_master(master);
 	if (err) {
@@ -925,11 +925,11 @@ static int bcm2708_spi_probe(struct platform_device *pdev)
 out_free_dma_irq:
 	free_irq(bs->dma_rx.irq, master);
 out_free_dma_tx:
-	bcm2708_release_dma(pdev, &bs->dma_tx);
+	bcm2835_release_dma(pdev, &bs->dma_tx);
 out_free_dma_rx:
-	bcm2708_release_dma(pdev, &bs->dma_rx);
+	bcm2835_release_dma(pdev, &bs->dma_rx);
 out_free_dma_buffer:
-	bcm2708_release_dmabuffer(pdev, bs);
+	bcm2835_release_dmabuffer(pdev, bs);
 out_free_irq:
 	free_irq(bs->irq, master);
 out_iounmap:
@@ -941,10 +941,10 @@ out_clk_put:
 	return err;
 }
 
-static int bcm2708_spi_remove(struct platform_device *pdev)
+static int bcm2835_spi_remove(struct platform_device *pdev)
 {
 	struct spi_master *master = platform_get_drvdata(pdev);
-	struct bcm2708_spi *bs = spi_master_get_devdata(master);
+	struct bcm2835_spi *bs = spi_master_get_devdata(master);
 
 	/* first report on usage */
 	dev_info(&pdev->dev, "SPI Bus statistics: %llu poll %llu interrupt and %llu dma driven messages\n",
@@ -955,7 +955,7 @@ static int bcm2708_spi_remove(struct platform_device *pdev)
 
 	/* reset the hardware and block queue progress */
 	bs->stopping = true;
-	bcm2708_wr(bs, SPI_CS, SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
+	bcm2835_wr(bs, SPI_CS, SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
 
 	clk_disable(bs->clk);
 	clk_put(bs->clk);
@@ -964,9 +964,9 @@ static int bcm2708_spi_remove(struct platform_device *pdev)
 
 	/* release DMA */
 	free_irq(bs->dma_rx.irq, master);
-	bcm2708_release_dma(pdev, &bs->dma_tx);
-	bcm2708_release_dma(pdev, &bs->dma_rx);
-	bcm2708_release_dmabuffer(pdev, bs);
+	bcm2835_release_dma(pdev, &bs->dma_tx);
+	bcm2835_release_dma(pdev, &bs->dma_rx);
+	bcm2835_release_dmabuffer(pdev, bs);
 
 	/* and unregister device */
 	spi_unregister_master(master);
@@ -974,31 +974,46 @@ static int bcm2708_spi_remove(struct platform_device *pdev)
 	return 0;
 }
 
-static struct platform_driver bcm2708_spi_driver = {
+/* for Device tree matching */
+static const struct of_device_id bcm2835_spi_match[] = {
+        { .compatible = "bcrm,bcm2708_spi", },
+        {}
+};
+MODULE_DEVICE_TABLE(of, bcm2835_spi_match);
+
+/* and for "compatiblity" */
+static const struct platform_device_id bcm2835_id_table[] = {
+        { "bcm2708_spi",   2708 },
+        { "bcm2835_spi",   2835 },
+        { },
+};
+
+static struct platform_driver bcm2835_spi_driver = {
 	.driver		= {
 		.name	= DRV_NAME,
 		.owner	= THIS_MODULE,
+                .of_match_table = bcm2835_spi_match,
 	},
-	.probe		= bcm2708_spi_probe,
-	.remove		= bcm2708_spi_remove,
+	.id_table       = bcm2835_id_table,
+	.probe		= bcm2835_spi_probe,
+	.remove		= bcm2835_spi_remove,
+
 };
 
-
-static int __init bcm2708_spi_init(void)
+static int __init bcm2835_spi_init(void)
 {
-	return platform_driver_probe(&bcm2708_spi_driver, bcm2708_spi_probe);
+	return platform_driver_probe(&bcm2835_spi_driver, bcm2835_spi_probe);
 }
-module_init(bcm2708_spi_init);
+module_init(bcm2835_spi_init);
 
-static void __exit bcm2708_spi_exit(void)
+static void __exit bcm2835_spi_exit(void)
 {
-	platform_driver_unregister(&bcm2708_spi_driver);
+	platform_driver_unregister(&bcm2835_spi_driver);
 }
-module_exit(bcm2708_spi_exit);
+module_exit(bcm2835_spi_exit);
 
-/* module_platform_driver(bcm2708_spi_driver); */
+/* module_platform_driver(bcm2835_spi_driver); */
 
-MODULE_DESCRIPTION("SPI controller driver for Broadcom BCM2708");
+MODULE_DESCRIPTION("SPI controller driver for Broadcom BCM2835");
 MODULE_AUTHOR("Chris Boot <bootc@bootc.net>, Martin Sperl");
 MODULE_LICENSE("GPL v2");
-MODULE_ALIAS("platform:" DRV_NAME);
