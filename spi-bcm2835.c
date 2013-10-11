@@ -47,6 +47,10 @@ static bool debugio = 0;
 module_param(debugio, bool, 0);
 MODULE_PARM_DESC(debugio, "debug the messages of the specific CS");
 
+static bool debugdma = 1;
+module_param(debugdma, bool, 0);
+MODULE_PARM_DESC(debugdma, "debug the DMA setup");
+
 static unsigned debug=0;
 module_param(debug, uint, 0);
 MODULE_PARM_DESC(debug, "Turn on debug output");
@@ -149,6 +153,10 @@ struct bcm2835_spi {
 struct bcm2835_spi_state {
 	u32 cs;
 	u16 cdiv;
+	u8 bits_per_word;
+	u32 speed_hz;
+	u32 csel;
+	u8 mode;
 };
 
 /*
@@ -244,6 +252,10 @@ static int bcm2835_setup_state(struct spi_master *master,
 	if (state) {
 		state->cs = cs;
 		state->cdiv = cdiv;
+		state->speed_hz=hz;
+		state->bits_per_word=bpw;
+		state->csel=csel;
+		state->mode=mode;
 	}
 
 	dev_dbg(dev, "%s(hz=%d, csel=%d, mode=0x%02X, bpw=%d) => "
@@ -359,151 +371,6 @@ irqreturn_t bcm2835_transfer_one_message_dma_irqhandler(int irq, void *dev)
 	return IRQ_HANDLED;
 }
 
-/* We could improve on DMA options, by chaining individual xfer messages
-   into a more complex CB chain that takes care of all the transfers in
-   one "go" resulting in only one interrupt getting delivered at the end of
-   the sequence. This would reduce the "gap" between transfers to virtually 0
-   (maybe one SPI clock lost) at the cost of possibly saturating the AXI bus.
-   Theoretically it would be possible to chain 63 requests together using
-   a single page that way we could run say 62 4KB DMA requests and by this
-   transfer 248 KB without a single CPU cycle needed - except for the final
-   notification IRQ (assuming that the driver requesting this is doing async
-   transfers). Assuming this, we could at a SPI bus speed of 15.625MHz
-   (core frequency of 250MHz with divider of 16) we could transfer about
-   1.953MB/s with just 7.8 interrupts (and Engine wakeups)
-   (250MHz/16(divider)/8(bit/byte)/(62(CBs we can chain)*4(kb/CB transfer))
-   But before adding this extra complexity to make this possible
-   the driver needing this needs to get written first...
-   Note: that this would also mean that the SPI bus is really dedicated
-   to this one device!!!
-
-   The other thing that could also help was (assuming that DMA in VideoCORE
-   does not have any errata - like on other arm platforms) if there was an
-   API that could map kernel addresses directly to BUS addresses independently
-   from if the xfer block has been allocated in the DMA region (the allocation
-   call of which returning also returns the bus address), then we could also
-   enable DMA by default on all transfers  and not only on selected ones.
-   This could help doing DMA transfers directly to user space without copying
-   - if there is an API allowing that...
-*/
-
-static int bcm2835_transfer_one_message_dma(struct spi_master *master,
-					struct bcm2835_spi_state *stp,
-					struct spi_transfer *xfer,
-					int flags)
-{
-	struct bcm2835_spi *bs = spi_master_get_devdata(master);
-	struct bcm2708_dma_cb *cbs = bs->dma_buffer;
-	u32 cs = 0;
-	/* calculate dma transfer sizes - words */
-	int dmaleninitial = 4;
-	int dmalen = xfer->len;
-
-	/* if size <=0 then return immediately and OK - nothing to do*/
-	if (xfer->len <= 0)
-		return 0;
-
-	/* the length of the package may not be bigger than 64k */
-	if (xfer->len > 65536) {
-		dev_err(&master->dev, "Max allowed package size 64k exceeded");
-		return -EINVAL;
-	}
-	/* on first transfer reset the RX/TX */
-	cs = stp->cs | SPI_CS_DMAEN;
-	if (flags & FLAGS_FIRST_TRANSFER)
-		bcm2835_wr(bs, SPI_CS, cs | SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
-	/* auto deselect CS if it is the last */
-	if (flags & FLAGS_LAST_TRANSFER)
-		cs |= SPI_CS_ADCS;
-
-	/* store data for interrupts and more */
-	bs->rx_buf = xfer->rx_buf;
-	bs->tx_buf = xfer->tx_buf;
-	bs->rx_len = xfer->len;
-	bs->tx_len = xfer->len;
-	bs->cs = cs;
-
-	/* now set up the Registers */
-	bcm2835_wr(bs, SPI_CLK, stp->cdiv);
-	bcm2835_wr(bs, SPI_CS, cs);
-
-	/* start filling in the CBs */
-	/* first set up the flags for the fifo
-	   - needs to be set 256 bit alligned, so abusing the first cb */
-	cbs[0].info = (xfer->len << 16) /* the length in bytes to transfer */
-		| (cs & 0xff) /* the bottom 8 bit flags for the SPI interface */
-		| SPI_CS_TA; /* and enable transfer */
-
-	/* tx info - set len/flags in the first CB */
-	cbs[1].info = BCM2708_DMA_PER_MAP(6) /* DREQ 6 = SPI TX in PERMAP */
-		| BCM2708_DMA_D_DREQ; /* destination DREQ trigger */
-	cbs[1].src = bs->dma_buffer_handle + 0*sizeof(struct bcm2708_dma_cb);
-	cbs[1].dst = (unsigned long)(DMA_SPI_BASE + SPI_FIFO);
-	cbs[1].length = dmaleninitial;
-	cbs[1].stride = 0;
-	cbs[1].next = bs->dma_buffer_handle + 2*sizeof(struct bcm2708_dma_cb);
-	/* and the tx-data in the second CB */
-	cbs[2].info = cbs[1].info | BCM2708_DMA_WAIT_RESP;
-	if (xfer->tx_buf) {
-		cbs[2].info |= BCM2708_DMA_S_INC; /* source increment by 4 */
-		cbs[2].src = (unsigned long)xfer->tx_dma;
-	} else {
-		cbs[3].info |= BCM2708_DMA_S_IGNORE; /* ignore source */
-		cbs[2].src = bs->dma_buffer_handle + 127*sizeof(struct bcm2708_dma_cb);
-	}
-	cbs[2].dst = cbs[1].dst;
-	cbs[2].length = dmalen;
-	cbs[2].stride = 0;
-	cbs[2].next = (unsigned long)0;
-	/* and here the RX Data */
-	/* rx info - set bytes/clock */
-	cbs[3].info = BCM2708_DMA_PER_MAP(7) /* DREQ 7 = SPI RX in PERMAP */
-		| BCM2708_DMA_S_DREQ /* source DREQ trigger */
-		| BCM2708_DMA_INT_EN; /* enable interrupt */
-	if (xfer->rx_buf) {
-		cbs[3].info |= BCM2708_DMA_D_INC; /* destination inc by 4 */
-		cbs[3].dst = (unsigned long)xfer->rx_dma;
-	} else {
-		cbs[3].info |= BCM2708_DMA_D_IGNORE; /* ignore destination */
-	}
-	cbs[3].src = cbs[1].dst;
-	cbs[3].length = xfer->len;
-	cbs[3].stride = 0;
-	cbs[3].next = (unsigned long)0;
-	/* initialize done */
-	INIT_COMPLETION(bs->done);
-	/* write CB to process */
-	writel(
-		bs->dma_buffer_handle + 3*sizeof(struct bcm2708_dma_cb),
-		bs->dma_rx.base + BCM2708_DMA_ADDR
-		);
-	writel(
-		bs->dma_buffer_handle + 1*sizeof(struct bcm2708_dma_cb),
-		bs->dma_tx.base + BCM2708_DMA_ADDR
-		);
-	dsb();
-	/* start DMA - this should also enable the DMA */
-	writel(BCM2708_DMA_ACTIVE, bs->dma_tx.base + BCM2708_DMA_CS);
-	writel(BCM2708_DMA_ACTIVE, bs->dma_rx.base + BCM2708_DMA_CS);
-
-	/* now we are running - waiting to get woken by interrupt */
-	/* the timeout may be too short - depend on amount of data and freq. */
-	if (wait_for_completion_timeout(
-			&bs->done,
-			msecs_to_jiffies(SPI_TIMEOUT_MS*10)) == 0) {
-		/* clear cs */
-
-		/* inform of event and return with error */
-		dev_err(&master->dev, "DMA transfer timed out");
-		/* need to abort Interrupts */
-		bcm_dma_abort(bs->dma_tx.base);
-		bcm_dma_abort(bs->dma_rx.base);
-		return -ETIMEDOUT;
-	}
-	/* and return */
-	return 0;
-}
-
 static int bcm2835_transfer_one_message(struct spi_master *master,
 					struct spi_message *msg)
 {
@@ -512,107 +379,249 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 	struct spi_device *spi = msg->spi;
 	struct bcm2835_spi_state state;
 	int status = 0;
-	int count = 0;
 	int transfers = 0;
+	int totallen=0;
+	int cbs_pos=0;
+	int last_tx_pos=0;
+	int last_rx_pos=0;
+	/* the pointer to the control blocks - ignore the first page */
+	struct bcm2708_dma_cb *cbs = &bs->dma_buffer[1];
+	u32 *dma_cs=(u32*) bs->dma_buffer;
 
+	/* get the settings from the controller */
+	u8 bits_per_word=((struct bcm2835_spi_state *)spi->controller_state)->bits_per_word;
+	u32 speed_hz=((struct bcm2835_spi_state *)spi->controller_state)->speed_hz; 
+
+	/* get some basic stats on the transfers
+	 * * total length
+	 * * speed
+	 * * bits
+	 */
 	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
+		/* check for change in speed,... */
+		if (xfer->bits_per_word) {
+			/* we allow such changes ONLY for the first transfer */
+			if (transfers) {
+				if (xfer->bits_per_word!=bits_per_word) {
+					dev_err(&master->dev, "change of speed/bits only allowed for the first transfer\n");
+					return -EINVAL;
+				}
+			} else {
+				bits_per_word=xfer->bits_per_word;
+			}
+		}
+		if (xfer->speed_hz) {
+			/* we allow such changes ONLY for the first transfer */
+			if (transfers) {
+				if (xfer->speed_hz!=speed_hz) {
+					dev_err(&master->dev, "change of speed/bits only allowed for the first transfer\n");
+					return -EINVAL;
+				}
+			} else {
+				speed_hz=xfer->speed_hz;
+			}
+		}
+		totallen+=xfer->len;
 		transfers++;
 	}
-
-	/* loop all the transfer entries to check for transfer issues first */
-	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
-		int use_bounce_buffer = 0;
-		int flags = 0;
-		count++;
-		/* calculate flags */
-		if (count == 1) {
-			/* clear the queues */
-			bcm2835_wr(bs, SPI_CS, bcm2835_rd(bs, SPI_CS) |
-					SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
-			flags |= FLAGS_FIRST_TRANSFER;
-		}
-		if (count == transfers)
-			flags |= FLAGS_LAST_TRANSFER;
-		/* check if elegable for DMA - bounce buffers are a bit bad - need a better way*/
-		if ((xfer->tx_buf) && (!xfer->tx_dma)) {
-			use_bounce_buffer = 1;
-		}
-		if ((xfer->rx_buf) && (!xfer->rx_dma)) {
-			use_bounce_buffer = 1;
-		}
-		/* this is quick & dirty - if one side needs a bounce buffer, then both sides need it... */
-		if (use_bounce_buffer) {
-			if (xfer->tx_buf) {
-				xfer->tx_dma=bs->dma_bouncebuffer_handle;
-				memcpy(bs->dma_bouncebuffer,xfer->tx_buf,xfer->len);
-			}
-			if (xfer->rx_buf) {
-				xfer->rx_dma=bs->dma_bouncebuffer_handle+2048;
-			}
-		}
-
-
-		/* configure SPI - use global settings if not explicitly set */
-		if (xfer->bits_per_word || xfer->speed_hz) {
-			status = bcm2835_setup_state(spi->master, &spi->dev,
-				&state,
-				xfer->speed_hz ? xfer->speed_hz :
-							spi->max_speed_hz,
-				spi->chip_select, spi->mode,
-				xfer->bits_per_word ? xfer->bits_per_word :
-							spi->bits_per_word);
-		} else {
-			state.cs = ((struct bcm2835_spi_state *)spi->controller_state)->cs;
-			state.cdiv = ((struct bcm2835_spi_state *)spi->controller_state)->cdiv;
-		}
-		if (status)
-			goto exit;
-		/* keep Transfer active until we are triggering the last one */
-		if (!(flags & FLAGS_LAST_TRANSFER))
-			state.cs |= SPI_CS_TA;
-		/* now send the message over SPI using DMA only */
-		status = bcm2835_transfer_one_message_dma(
-			master, &state, xfer, flags
-			);
-		if (status)
-			goto exit;
-		/* again quick and dirty */
-		if (use_bounce_buffer) {
-			if (xfer->rx_buf) {
-				memcpy(xfer->rx_buf,bs->dma_bouncebuffer+2048,xfer->len);
-			}
-		}
-
-		if (unlikely(debugio)) {
-			if (unlikely(debugio&(1<<spi->chip_select))) {
-				printk(KERN_DEBUG "spi%i.%i: Transfer\n  Transfer Length=%i\n",
-					master->bus_num,spi->chip_select,
-					xfer->len
-					);
-				if (xfer->tx_buf) {
-					print_hex_dump(KERN_DEBUG,"  TXData=",DUMP_PREFIX_ADDRESS,
-						16,1,
-						xfer->tx_buf,xfer->len,
-						false);
-				}
-				if (xfer->rx_buf) {
-					print_hex_dump(KERN_DEBUG,"  RXData=",DUMP_PREFIX_ADDRESS,
-						16,1,
-						xfer->rx_buf,xfer->len,
-						false);
-				}
-			}
-		}
-
-		/* delay if given */
-		if (xfer->delay_usecs)
-			udelay(xfer->delay_usecs);
-		/* and add up the result */
-		msg->actual_length += xfer->len;
+	/* we may not exceed the max transfer size - 64k */
+	if (xfer->len >= 65536) {
+		dev_err(&master->dev, "Max allowed package size 64k exceeded");
+		return -EINVAL;
 	}
+	/* calculate our effective cs values */
+	state.cs = ((struct bcm2835_spi_state *)spi->controller_state)->cs;
+	state.cdiv = ((struct bcm2835_spi_state *)spi->controller_state)->cdiv;
+	status = bcm2835_setup_state(spi->master, &spi->dev,
+				&state,
+				speed_hz,
+				spi->chip_select,
+				spi->mode,
+				bits_per_word);
+	if (status)
+		goto exit;
+	
+	/* clear the queues */
+	bcm2835_wr(bs, SPI_CS, bcm2835_rd(bs, SPI_CS) |
+		SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
+
+
+	/* now set up the Registers */
+	bcm2835_wr(bs, SPI_CLK, state.cdiv);
+	bcm2835_wr(bs, SPI_CS, state.cs);
+
+	/* now set up the CS value in DMA space*/
+	*dma_cs=totallen<<16   /* the length in bytes to transfer */
+		| (state.cs & 0xff) /* the bottom 8 bit flags for the SPI interface */
+		| SPI_CS_TA;  /* and enable transfer */
+
+
+	/* the macro that helps us calculate the addresses */
+#define RAM2PHY(addr,base_logic,base_phy) (base_phy+((u32)addr-(u32)base_logic))
+
+
+	/* fill in the first transfer to configure SPI */
+	/* tx info - set len/flags in the first CB */
+	cbs[cbs_pos].info = BCM2708_DMA_PER_MAP(6) /* DREQ 6 = SPI TX in PERMAP */
+		| BCM2708_DMA_D_DREQ; /* destination DREQ trigger */
+	cbs[cbs_pos].src = bs->dma_buffer_handle;
+	cbs[cbs_pos].dst = (unsigned long)(DMA_SPI_BASE + SPI_FIFO);
+	cbs[cbs_pos].length = 4;
+	cbs[cbs_pos].stride = 0;
+	cbs[cbs_pos].next = (u32) 0;
+	last_tx_pos=cbs_pos;
+
+	/* and register as start of transfer */
+	writel(RAM2PHY(&cbs[cbs_pos],bs->dma_buffer,bs->dma_buffer_handle),
+		bs->dma_tx.base + BCM2708_DMA_ADDR
+		);
+	/* and increment */
+	cbs_pos++;
+
+	/* now loop the transfers */
+	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
+		/* todo: 
+		 * * bounce buffer or address translation 
+		 * * check if we need to split this transfer, 
+		 *   because it is split to non-adjectant pages
+		 */
+		/* setting xfer-dma */
+		if ((xfer->rx_buf) && (!xfer->rx_dma)) {
+			xfer->rx_dma=bs->dma_bouncebuffer_handle;
+			memset(bs->dma_bouncebuffer,0,xfer->len);
+		}
+		if ((xfer->tx_buf) && (!xfer->tx_dma)) {
+			xfer->tx_dma=bs->dma_bouncebuffer_handle+1024;
+			memcpy(bs->dma_bouncebuffer+1024,xfer->tx_buf,xfer->len);
+		}
+
+		/* fill in tx */
+		cbs[cbs_pos].info = cbs[last_tx_pos].info | BCM2708_DMA_WAIT_RESP;
+		if (xfer->tx_buf) {
+			cbs[cbs_pos].info |= BCM2708_DMA_S_INC; /* source increment by 4 */
+			cbs[cbs_pos].src = (unsigned long)xfer->tx_dma;
+		} else {
+			cbs[cbs_pos].info |= BCM2708_DMA_S_IGNORE; /* ignore source */
+			cbs[cbs_pos].src = bs->dma_buffer_handle;
+		}
+		cbs[cbs_pos].dst = cbs[last_tx_pos].dst;
+		cbs[cbs_pos].length = xfer->len;
+		cbs[cbs_pos].stride = 0;
+		cbs[cbs_pos].next = (u32)0;
+		/* set the pointer to this */ 
+		cbs[last_tx_pos].next = RAM2PHY(&cbs[cbs_pos],bs->dma_buffer,bs->dma_buffer_handle);
+		last_tx_pos=cbs_pos;
+		cbs_pos++;
+		/* fill in rx */
+		cbs[cbs_pos].info = BCM2708_DMA_PER_MAP(7) /* DREQ 7 = SPI RX in PERMAP */
+			| BCM2708_DMA_S_DREQ;              /* source DREQ trigger */
+		if (xfer->rx_buf) {
+			cbs[cbs_pos].info |= BCM2708_DMA_D_INC; /* destination inc by 4 */
+			cbs[cbs_pos].dst = (unsigned long)xfer->rx_dma;
+		} else {
+			cbs[cbs_pos].info |= BCM2708_DMA_D_IGNORE; /* ignore destination */
+			cbs[cbs_pos].src = bs->dma_buffer_handle;
+		}
+		cbs[cbs_pos].src = cbs[1].dst;
+		cbs[cbs_pos].length = xfer->len;
+		cbs[cbs_pos].stride = 0;
+		cbs[cbs_pos].next = (u32)0;
+		if (last_rx_pos) {
+			cbs[last_tx_pos].next = RAM2PHY(&cbs[cbs_pos],bs->dma_buffer,bs->dma_buffer_handle);
+		} else {
+			/* and register as start of transfer */
+			writel(RAM2PHY(&cbs[cbs_pos],bs->dma_buffer,bs->dma_buffer_handle),
+				bs->dma_rx.base + BCM2708_DMA_ADDR
+				);
+		}
+			
+		last_rx_pos=cbs_pos;
+		cbs_pos++;
+		/* here we need to handle the delay */
+		if (xfer->delay_usecs) {
+			dev_err(&master->dev, "We do not support delay right now...");
+			/* note that we might be able to change the settings via DMA writing to SPI itself - testing would be required */
+		}
+	}
+
+	/* trigger an interrupt when finished - if we got a completion */
+	if ((msg->complete) ) /* for now interrupt always - otherwise we do not need to sleep */
+		cbs[last_rx_pos].info |= BCM2708_DMA_INT_EN;              /* enable interrupt */
+
+
+	/* dump the Control-block structures */
+	if (unlikely(debugdma)) {
+		int i;
+		dev_info(&master->dev,
+			"DMA Control blocks - DMA-CS value: %08x, BounceBuffer at: %08x\n",
+			*dma_cs,bs->dma_bouncebuffer,bs->dma_bouncebuffer_handle);
+		/* and the SPI Registers */
+		print_hex_dump(KERN_DEBUG," SPI-REGS:",DUMP_PREFIX_ADDRESS,
+			16,4,bs->base,32,false);
+		/* and the Control blocks themselves */
+		for(i=0;i<cbs_pos;i++) {
+			char text[16];
+			snprintf(text,16,"  DMA-CB[%i]:",i);
+			dev_info(&master->dev,
+				"DMA Control block at physical address %08x\n",
+				RAM2PHY(&cbs[i],bs->dma_buffer,bs->dma_buffer_handle));
+			print_hex_dump(KERN_DEBUG,text,DUMP_PREFIX_ADDRESS,
+				16,4,&cbs[i],32,false);
+		}
+	}
+
+
+	/* initialize done */
+	INIT_COMPLETION(bs->done);
+
+	/* start DMA - this should also enable the DMA */
+	writel(BCM2708_DMA_ACTIVE, bs->dma_tx.base + BCM2708_DMA_CS);
+	writel(BCM2708_DMA_ACTIVE, bs->dma_rx.base + BCM2708_DMA_CS);
+
+	/* now that are running - waiting to get woken by interrupt */
+	/* the timeout may be too short - depend on amount of data and freq. */
+	if (wait_for_completion_timeout(
+			&bs->done,
+			msecs_to_jiffies(SPI_TIMEOUT_MS*10)) == 0) {
+		/* clear cs */
+
+		/* inform of event and return with error */
+		dev_err(&master->dev, "DMA transfer timed out\n");
+		/* need to abort Interrupts */
+		bcm_dma_abort(bs->dma_tx.base);
+		bcm_dma_abort(bs->dma_rx.base);
+		status= -ETIMEDOUT;
+	}
+	
+	/* handle bounce-buffers - in reverse */
+#if 0
+	if (unlikely(debugio)) {
+		if (unlikely(debugio&(1<<spi->chip_select))) {
+			printk(KERN_DEBUG "spi%i.%i: Transfer\n  Transfer Length=%i\n",
+				master->bus_num,spi->chip_select,
+				xfer->len
+				);
+			if (xfer->tx_buf) {
+				print_hex_dump(KERN_DEBUG,"  TXData=",DUMP_PREFIX_ADDRESS,
+					16,1,
+					xfer->tx_buf,xfer->len,
+					false);
+			}
+			if (xfer->rx_buf) {
+				print_hex_dump(KERN_DEBUG,"  RXData=",DUMP_PREFIX_ADDRESS,
+					16,1,
+					xfer->rx_buf,xfer->len,
+					false);
+			}
+		}
+	}
+#endif
+
 exit:
 	msg->status = status;
+	/* note that this would block other pipelining - so we might want to do it differently */
 	spi_finalize_current_message(master);
+	/* and return */
 	return status;
 }
 
