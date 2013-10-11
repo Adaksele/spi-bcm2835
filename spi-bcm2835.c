@@ -100,9 +100,6 @@ do {                                         \
 
 #define DRV_NAME	"bcm2835_spi"
 
-#define FLAGS_FIRST_TRANSFER 0x01
-#define FLAGS_LAST_TRANSFER  0x02
-
 /* the defines that are missing in arch/arm/mach-bcm2708/include/mach/dma.h */
 /* the Base address for DMA on the (VideoCore) bus */
 #define DMA_SPI_BASE 0x7E204000
@@ -119,6 +116,9 @@ struct bcm2835_spi_dma {
 	int chan;
 	int irq;
 	void __iomem *base;
+	struct bcm2708_dma_cb *last;
+	struct bcm2708_dma_cb *first;
+	dma_addr_t first_phy;
 };
 
 struct bcm2835_spi {
@@ -133,21 +133,18 @@ struct bcm2835_spi {
 	/* the dma region for CBs */
 	struct bcm2708_dma_cb *dma_buffer;
 	dma_addr_t dma_buffer_handle;
+	u8 dma_end;
+/* macro to translate betwee the to pointer */
+#define RAM2PHY(addr,base_logic,base_phy) (base_phy+((u32)addr-(u32)base_logic))
 
 	/* the dma bounce buffer */
 	void *dma_bouncebuffer;
 	dma_addr_t dma_bouncebuffer_handle;
+	u8 value_end;
 
 	/* and the information on the DMA channels we use */
 	struct bcm2835_spi_dma dma_tx;
 	struct bcm2835_spi_dma dma_rx;
-
-	/* structures from the transfer buffer needed during the transfer */
-	const char *tx_buf;
-	int tx_len;
-	char *rx_buf;
-	int rx_len;
-	int cs;
 };
 
 struct bcm2835_spi_state {
@@ -183,11 +180,6 @@ static void bcm2835_init_pinmode(void)
 
 #undef INP_GPIO
 #undef SET_GPIO_ALT
-}
-
-static inline u32 bcm2835_rd(struct bcm2835_spi *bs, unsigned reg)
-{
-	return readl(bs->base + reg);
 }
 
 static inline void bcm2835_wr(struct bcm2835_spi *bs, unsigned reg, u32 val)
@@ -263,6 +255,69 @@ static int bcm2835_setup_state(struct spi_master *master,
 		__func__, hz, csel, mode, bpw, bus_hz, cdiv, bus_hz/cdiv, cs);
 
 	return 0;
+}
+
+
+void bcm2835_spi_dump(struct spi_master *master)
+{
+	struct bcm2835_spi *bs = spi_master_get_devdata(master);
+	printk(KERN_DEBUG"  SPI-REGS\n");
+	/* do NOT read FIFO - even for Debug - it may produce hickups with DMA!!! */
+	print_hex_dump(KERN_DEBUG,"  SPI-REGS:",DUMP_PREFIX_ADDRESS,
+		16,4,bs->base,4,false);
+	print_hex_dump(KERN_DEBUG,"  SPI-REGS:",DUMP_PREFIX_ADDRESS,
+		16,4,bs->base+8,8,false);
+	print_hex_dump(KERN_DEBUG,"  SPI-REGS:",DUMP_PREFIX_ADDRESS,
+		16,4,bs->base+16,16,false);
+}
+
+
+static void bcm2835_dma_dump_channel(struct spi_master *master, const char* prefix,struct bcm2835_spi_dma *dma)
+{
+	struct bcm2835_spi *bs = spi_master_get_devdata(master);
+	struct bcm2708_dma_cb *cb=dma->first;
+	u8 count=0;
+	printk(KERN_DEBUG"%s DMA Registers\n",prefix);
+	print_hex_dump(KERN_DEBUG,"     ",DUMP_PREFIX_ADDRESS,
+		16,4,dma->base,36,false);
+	printk(KERN_DEBUG"%s DMA CBs\n",prefix);
+	while(cb) {
+		u32 virt=RAM2PHY(cb,bs->dma_buffer,bs->dma_buffer_handle);
+		/* dump this cb */
+		printk(KERN_DEBUG "   CB[%i] at address: %08x/%08x\n",count,(u32)cb,virt);
+		print_hex_dump(KERN_DEBUG,"      ",DUMP_PREFIX_ADDRESS,
+			16,4,cb,32,false);
+		/* and calculate next */
+		virt=cb->next;
+		if (virt) {
+			cb=(struct bcm2708_dma_cb*)cb->pad[1];
+			count++;
+		} else {
+			cb=NULL;
+		}
+	}
+}
+
+static void bcm2835_dma_dump(struct spi_master *master, const char* prefix)
+{
+	struct bcm2835_spi *bs = spi_master_get_devdata(master);
+	dev_info(&master->dev,
+		"%s DMA setup: %i\n",
+		prefix,bs->dma_end
+		);
+	/* dump the SPI Registers */
+	bcm2835_spi_dump(master);
+	/* dump channels */
+	bcm2835_dma_dump_channel(master,"  TX",&bs->dma_tx);
+	bcm2835_dma_dump_channel(master,"  RX",&bs->dma_rx);
+	/* the Data registers */
+	dev_info(&master->dev,
+		"%s DMA %i vars start %08x/%08x\n",
+		prefix,bs->value_end,
+		(unsigned int)bs->dma_bouncebuffer,(unsigned int)bs->dma_bouncebuffer_handle
+		);
+	print_hex_dump(KERN_DEBUG,"  ",DUMP_PREFIX_ADDRESS,
+		16,4,bs->dma_bouncebuffer,sizeof(unsigned long)*(bs->value_end),false);
 }
 
 static int bcm2835_register_dma(struct platform_device *pdev,
@@ -362,8 +417,7 @@ irqreturn_t bcm2835_transfer_one_message_dma_irqhandler(int irq, void *dev)
 	struct bcm2835_spi *bs = spi_master_get_devdata(master);
 
 	printk(KERN_DEBUG"DMA-IRQ triggered\n");
-	print_hex_dump(KERN_DEBUG," SPI-REGS:",DUMP_PREFIX_ADDRESS,
-		16,4,bs->base,32,false);
+	//bcm2835_spi_dump(master);
 
 	/* mark the rx DMA-interrupt as handled
 	   - it will (level) trigger otherwise again */
@@ -375,6 +429,83 @@ irqreturn_t bcm2835_transfer_one_message_dma_irqhandler(int irq, void *dev)
 	return IRQ_HANDLED;
 }
 
+
+static void bcm2835_dma_reset(struct bcm2835_spi *bs)
+{
+	bs->dma_end=0;
+	bs->value_end=0;
+	bs->dma_tx.last=NULL;
+	bs->dma_tx.first=NULL;
+	bs->dma_tx.first_phy=0;
+	bs->dma_rx.last=NULL;
+	bs->dma_rx.first=NULL;
+	bs->dma_rx.first_phy=0;
+}
+
+void bcm2835_dma_add(struct bcm2835_spi *bs,
+			struct bcm2835_spi_dma *dma,
+			unsigned long info,
+			unsigned long src,
+			unsigned long dst,
+			unsigned long length,
+			unsigned long stride
+	)
+{
+	/* add the data to the "pool" */
+	/* TODO: use DMA POOL of kernel instead of this list setup */
+	struct bcm2708_dma_cb *cb=&bs->dma_buffer[bs->dma_end++];
+	unsigned long cb_phy=RAM2PHY(cb,bs->dma_buffer,bs->dma_buffer_handle);
+	/* copy the data */
+	cb->info=info;
+	cb->src=src;
+	cb->dst=dst;
+	cb->length=length;
+	cb->stride=stride;
+	cb->next=0;
+	/* now add it to the end one */
+	if (dma->last) {
+		dma->last->next=cb_phy;
+		/* primarily used for debugging */
+		dma->last->pad[1]=(unsigned long)cb;
+	} else {
+		/* otherwise add it to the head */
+		dma->first=cb;
+		dma->first_phy=cb_phy;
+	}
+	/* set this to the last one */
+	dma->last=cb;
+}
+
+dma_addr_t bcm2835_dma_add_value(struct bcm2835_spi *bs,unsigned long v) 
+{
+	/* abusing bounce buffer for now - we do not use it anyway... */
+	/* calculate address */
+	unsigned long *pos=(unsigned long*)(bs->dma_bouncebuffer)+bs->value_end;
+	dma_addr_t virt=RAM2PHY(pos,bs->dma_bouncebuffer,bs->dma_bouncebuffer_handle);
+	bs->value_end++;
+	/* now assign data */
+	*pos=v;
+	/* and return the address */
+	return virt;
+}
+
+void bcm2835_dma_run(struct bcm2835_spi *bs) {
+	/* write the start addresses */
+	writel(bs->dma_tx.first_phy,bs->dma_tx.base + BCM2708_DMA_ADDR);		
+	writel(bs->dma_rx.first_phy,bs->dma_rx.base + BCM2708_DMA_ADDR);		
+	/* memory barrier to make sure everything is "written to ram and not only to cache...*/
+	dsb();
+	/* start DMA - this should also enable the DMA */
+	writel(BCM2708_DMA_ACTIVE, bs->dma_tx.base + BCM2708_DMA_CS);
+	writel(BCM2708_DMA_ACTIVE, bs->dma_rx.base + BCM2708_DMA_CS);
+}
+
+static void bcm2835_dma_abort(struct bcm2835_spi *bs) {
+	/* reset DMA */
+	writel(BCM2708_DMA_RESET, bs->dma_tx.base + BCM2708_DMA_CS);
+	writel(BCM2708_DMA_RESET, bs->dma_rx.base + BCM2708_DMA_CS);
+}
+
 static int bcm2835_transfer_one_message(struct spi_master *master,
 					struct spi_message *msg)
 {
@@ -383,251 +514,147 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 	struct spi_device *spi = msg->spi;
 	struct bcm2835_spi_state state;
 	int status = 0;
-	int transfers = 0;
-	int totallen=0;
-	int cbs_pos=0;
-	int last_tx_pos=0;
-	int last_rx_pos=0;
-	/* the pointer to the control blocks - ignore the first page */
-	struct bcm2708_dma_cb *cbs = &bs->dma_buffer[1];
-	u32 *dma_cs=(u32*) bs->dma_buffer;
+	u32 cs = 0;
+	u32 last_cdiv = 0;
+	int transfers=0;
+	u32 info=0;
 
-	/* get the settings from the controller */
-	u8 bits_per_word=((struct bcm2835_spi_state *)spi->controller_state)->bits_per_word;
-	u32 speed_hz=((struct bcm2835_spi_state *)spi->controller_state)->speed_hz; 
+	/* set up the Registers and clean queues - maybe via DMA as well?*/
+	bcm2835_dma_reset(bs);
 
-	/* get some basic stats on the transfers
-	 * * total length
-	 * * speed
-	 * * bits
-	 */
+	/* loop over all transfers */
 	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
-		/* check for change in speed,... */
-		if (xfer->bits_per_word) {
-			/* we allow such changes ONLY for the first transfer */
-			if (transfers) {
-				if (xfer->bits_per_word!=bits_per_word) {
-					dev_err(&master->dev, "change of speed/bits only allowed for the first transfer\n");
-					status=-EINVAL;
-					goto exit;
-				}
+		u8 is_last = list_is_last(&xfer->transfer_list, &msg->transfers);
+		dma_addr_t rx_dma=0;
+		dma_addr_t tx_dma=0;
+		/* calculate the dma addresses */
+		if (xfer->tx_buf) {
+			if (xfer->tx_dma) {
+				tx_dma=xfer->tx_dma;
 			} else {
-				bits_per_word=xfer->bits_per_word;
+				tx_dma=virt_to_phys(xfer->tx_buf);
 			}
 		}
-		if (xfer->speed_hz) {
-			/* we allow such changes ONLY for the first transfer */
-			if (transfers) {
-				if (xfer->speed_hz!=speed_hz) {
-					dev_err(&master->dev, "change of speed/bits only allowed for the first transfer\n");
-					status=-EINVAL;
-					goto exit;
-				}
+		if (xfer->rx_buf) {
+			if (xfer->rx_dma) {
+				rx_dma=xfer->rx_dma;
 			} else {
-				speed_hz=xfer->speed_hz;
+				rx_dma=virt_to_phys(xfer->rx_buf);
 			}
 		}
-		totallen+=xfer->len;
-		transfers++;
-	}
-	/* we may not exceed the max transfer size - 64k */
-	if (totallen >= 65536) {
-		dev_err(&master->dev, "Max allowed package size 64k exceeded with %i bytes in %i transfers",totallen,transfers);
-		status=-EINVAL;
-		goto exit;
-	}
-	/* calculate our effective cs values */
-	state.cs = ((struct bcm2835_spi_state *)spi->controller_state)->cs;
-	state.cdiv = ((struct bcm2835_spi_state *)spi->controller_state)->cdiv;
-	status = bcm2835_setup_state(spi->master, &spi->dev,
-				&state,
-				speed_hz,
-				spi->chip_select,
-				spi->mode,
-				bits_per_word);
-	if (status)
-		goto exit;
-	
-	/* now set up the Registers and clean queues - maybe via DMA as well?*/
-	bcm2835_wr(bs, SPI_CLK, state.cdiv);
-	bcm2835_wr(bs, SPI_CS, state.cs|SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX|SPI_CS_DMAEN
-//		|SPI_CS_ADCS
-		);
-
-	/* the macro that helps us calculate the addresses */
-#define RAM2PHY(addr,base_logic,base_phy) (base_phy+((u32)addr-(u32)base_logic))
-
-	/* add a write of CS */
-#if 0
-	cbs[cbs_pos].info = BCM2708_DMA_WAIT_RESP;            /* and wait for WRITE response to get received */
-	cbs[cbs_pos].src = (unsigned long)xfer->tx_dma;
-	cbs[cbs_pos].dst = (unsigned long)(DMA_SPI_BASE + SPI_CS);
-	cbs[cbs_pos].length = 4;
-	cbs[cbs_pos].stride = 0;
-	cbs[cbs_pos].next = (u32)0;
-	/* and increment */
-	last_tx_pos=cbs_pos;
-	cbs_pos++;
-#endif
-
-
-	/* now loop the transfers */
-	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
-		/* todo: 
-		 * * bounce buffer or address translation 
-		 * * check if we need to split this transfer, 
-		 *   because it is split to non-adjectant pages
-		 */
-		/* setting xfer-dma */
-		if ((xfer->rx_buf) && (!xfer->rx_dma)) {
-			xfer->rx_dma=bs->dma_bouncebuffer_handle;
-			memset(bs->dma_bouncebuffer,0,xfer->len);
-			xfer->rx_dma=virt_to_phys(xfer->rx_buf);
-		}
-		if ((xfer->tx_buf) && (!xfer->tx_dma)) {
-			xfer->tx_dma=bs->dma_bouncebuffer_handle+1024;
-			memcpy(bs->dma_bouncebuffer+1024,xfer->tx_buf,xfer->len);
-			xfer->tx_dma=virt_to_phys(xfer->tx_buf);
+		/* prepare transfer state */
+		memcpy(&state,(struct bcm2835_spi_state *)spi->controller_state,sizeof(state));
+		if (xfer->bits_per_word)
+			state.bits_per_word=xfer->bits_per_word;
+		if (xfer->speed_hz)
+			state.speed_hz=xfer->speed_hz;
+		/* should improve on the calculation */
+		status = bcm2835_setup_state(spi->master, &spi->dev,
+					&state,
+					state.speed_hz,
+					spi->chip_select,
+					spi->mode,
+					state.bits_per_word);
+		if (status)
+			goto exit;
+		
+		/* if the clock has changed, then set it */
+		if (last_cdiv!=state.cdiv) {
+			bcm2835_dma_add(bs,&bs->dma_tx,
+					BCM2708_DMA_WAIT_RESP,
+					bcm2835_dma_add_value(bs,state.cdiv),
+					(unsigned long)(DMA_SPI_BASE + SPI_CLK),
+					4,0);
+			last_cdiv=state.cdiv;
 		}
 
+		/* calculate cs to use */
+		cs=state.cs|SPI_CS_DMAEN|SPI_CS_TA;
+		/* if we are the first, then reset SPI as well */
+		if (transfers==0) 
+			cs|=SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX;
+		/* if we are the last, then enable deasserting as well */
+		if (is_last) 
+			cs|=SPI_CS_ADCS;
+		/* if we have cs_change enabled, then run it as well */
+		if (xfer->cs_change) 
+			cs|=SPI_CS_ADCS;
+		/* and set cs via DMA - this is an ugly hack and I am not sure if it works */
+		bcm2835_dma_add(bs,&bs->dma_tx,
+				BCM2708_DMA_WAIT_RESP,
+				bcm2835_dma_add_value(bs,cs),
+				(unsigned long)(DMA_SPI_BASE + SPI_CS),
+				4,0);
 
-		/* tx info - set len/flags in the first CB */
-		if (cbs_pos==0) {
-			/* fill in the cbs for transfers */
-			*dma_cs=(totallen)<<16   /* the length in bytes to transfer */
-				| (state.cs & 0xffff)      /* the bottom 8 bit flags for the SPI interface */
-				| SPI_CS_TA;               /* and enable transfer */
-			/* decrement totallen */
-			totallen-=xfer->len;
-			/* set DMACS */
-			cbs[cbs_pos].src = RAM2PHY(dma_cs,bs->dma_buffer,bs->dma_buffer_handle);
-			dma_cs++;
-			/* now set up the CS value in DMA space - "abusing" padding */
-			cbs[cbs_pos].info = BCM2708_DMA_PER_MAP(6) /* DREQ 6 = SPI TX in PERMAP */
-				| BCM2708_DMA_D_DREQ; /* destination DREQ trigger */
-			cbs[cbs_pos].dst = (unsigned long)(DMA_SPI_BASE + SPI_FIFO);
-			cbs[cbs_pos].length = 4;
-			cbs[cbs_pos].stride = 0;
-			cbs[cbs_pos].next = (u32) 0;
-			/* if we are the first frame, then register as start CB for TX */
-			if (cbs_pos==0) {
-				writel(RAM2PHY(&cbs[cbs_pos],bs->dma_buffer,bs->dma_buffer_handle),
-					bs->dma_tx.base + BCM2708_DMA_ADDR
-					);
-			} else {
-				cbs[last_tx_pos].next = RAM2PHY(&cbs[cbs_pos],bs->dma_buffer,bs->dma_buffer_handle);
-			}
-			/* and increment */
-			last_tx_pos=cbs_pos;
-			cbs_pos++;
-		}
-
+		/* now set up the _real_ DMA transfer - not just all the setup above */
+		cs=     (xfer->len<<16) /* length of this transfer */
+			| (cs & 0xff)   /* the relevant flags */
+			| SPI_CS_TA     /* and transfer enable */
+			;
+		printk(KERN_DEBUG"Scheduling %08x\n",cs);
+		bcm2835_dma_add(bs,&bs->dma_tx,
+				BCM2708_DMA_WAIT_RESP,
+				bcm2835_dma_add_value(bs,cs),
+				(unsigned long)(DMA_SPI_BASE + SPI_FIFO),
+				4,0);
+		
 		/* fill in tx */
-		cbs[cbs_pos].info = BCM2708_DMA_PER_MAP(6) /* DREQ 6 = SPI TX in PERMAP */
+		info = BCM2708_DMA_PER_MAP(6)              /* DREQ 6 = SPI TX in PERMAP */
 			| BCM2708_DMA_D_DREQ               /* destination DREQ trigger */
 			| BCM2708_DMA_WAIT_RESP            /* and wait for WRITE response to get received */
 			;
-		if (xfer->tx_buf) {
-			cbs[cbs_pos].info |= BCM2708_DMA_S_INC; /* source increment by 4 */
-			cbs[cbs_pos].src = (unsigned long)xfer->tx_dma;
+		if (tx_dma) {
+			bcm2835_dma_add(bs,&bs->dma_tx,
+					info|BCM2708_DMA_S_INC,
+					tx_dma,
+					(unsigned long)(DMA_SPI_BASE + SPI_FIFO),
+					xfer->len,0);
 		} else {
-			cbs[cbs_pos].info |= BCM2708_DMA_S_IGNORE; /* ignore source */
-			cbs[cbs_pos].src = bs->dma_buffer_handle;
-			cbs[cbs_pos].info |= BCM2708_DMA_S_INC; /* source increment by 4 */
-			cbs[cbs_pos].src = (unsigned long)xfer->rx_dma;
+			bcm2835_dma_add(bs,&bs->dma_tx,
+					info|BCM2708_DMA_S_IGNORE,
+					tx_dma,
+					(unsigned long)(DMA_SPI_BASE + SPI_FIFO),
+					xfer->len,0);
 		}
-		cbs[cbs_pos].dst = (unsigned long)(DMA_SPI_BASE + SPI_FIFO);
-		cbs[cbs_pos].length = xfer->len;
-		cbs[cbs_pos].stride = 0;
-		cbs[cbs_pos].next = (u32)0;
-		/* set the pointer to this */ 
-		cbs[last_tx_pos].next = RAM2PHY(&cbs[cbs_pos],bs->dma_buffer,bs->dma_buffer_handle);
-		last_tx_pos=cbs_pos;
-		cbs_pos++;
 		/* fill in rx */
-		cbs[cbs_pos].info = BCM2708_DMA_PER_MAP(7) /* DREQ 7 = SPI RX in PERMAP */
+		info = BCM2708_DMA_PER_MAP(7)              /* DREQ 7 = SPI RX in PERMAP */
 			| BCM2708_DMA_S_DREQ               /* source DREQ trigger */
 			| BCM2708_DMA_WAIT_RESP            /* and wait for WRITE response to get received */
 			;
-		if (xfer->rx_buf) {
-			cbs[cbs_pos].info |= BCM2708_DMA_D_INC; /* destination inc by 4 */
-			cbs[cbs_pos].dst = (unsigned long)xfer->rx_dma;
+		if (is_last) /* for the last message trigger an IRQ if needed */
+			if ((msg->complete) )
+				info |= BCM2708_DMA_INT_EN;              /* enable interrupt for last transfer */
+		if (tx_dma) {
+			bcm2835_dma_add(bs,&bs->dma_rx,
+					info|BCM2708_DMA_D_INC,
+					(unsigned long)(DMA_SPI_BASE + SPI_FIFO),
+					rx_dma,
+					xfer->len,0);
 		} else {
-			cbs[cbs_pos].info |= BCM2708_DMA_D_IGNORE; /* ignore destination */
-			cbs[cbs_pos].dst = bs->dma_buffer_handle;
+			bcm2835_dma_add(bs,&bs->dma_rx,
+					info|BCM2708_DMA_D_IGNORE,
+					(unsigned long)(DMA_SPI_BASE + SPI_FIFO),
+					rx_dma,
+					xfer->len,0);
 		}
-		cbs[cbs_pos].src = (unsigned long)(DMA_SPI_BASE + SPI_FIFO);
-		cbs[cbs_pos].length = xfer->len;
-		cbs[cbs_pos].stride = 0;
-		cbs[cbs_pos].next = (u32)0;
-		if (last_rx_pos) {
-			cbs[last_rx_pos].next = RAM2PHY(&cbs[cbs_pos],bs->dma_buffer,bs->dma_buffer_handle);
-		} else {
-			/* and register as start of transfer */
-			writel(RAM2PHY(&cbs[cbs_pos],bs->dma_buffer,bs->dma_buffer_handle),
-				bs->dma_rx.base + BCM2708_DMA_ADDR
-				);
-		}
-			
-		last_rx_pos=cbs_pos;
-		cbs_pos++;
 		/* here we need to handle the delay */
 		if (xfer->delay_usecs) {
 			dev_err(&master->dev, "We do not support delay right now...");
 			/* note that we might be able to change the settings via DMA writing to SPI itself - testing would be required */
 		}
-	cbs[last_rx_pos].info |= BCM2708_DMA_INT_EN;              /* enable interrupt */
 	}
-
-	/* the last block needs to get pulled up (typically...) */	
-	if (xfer->cs_change) {
-		/* TODO: support this - we might need to split this into several DMA sections with a restart to make this work - could apply the same for the speed values...*/
-	}
-
-	/* trigger an interrupt when finished - if we got a completion */
-	if ((msg->complete) ) /* for now interrupt always - otherwise we do not need to sleep */
-		cbs[last_rx_pos].info |= BCM2708_DMA_INT_EN;              /* enable interrupt */
-	cbs[last_rx_pos].info |= BCM2708_DMA_INT_EN;              /* enable interrupt */
 		
 	/* dump the Control-block structures */
 	if (unlikely(debugdma)) {
-		int i;
-		dev_info(&master->dev,
-			"DMA Control blocks - DMA-CS value: %08x, BounceBuffer at: %08x/%08x\n",
-			*dma_cs,(u32)bs->dma_bouncebuffer,bs->dma_bouncebuffer_handle);
-		/* and the SPI Registers */
-		print_hex_dump(KERN_DEBUG," SPI-REGS:",DUMP_PREFIX_ADDRESS,
-			16,4,bs->base,32,false);
-		print_hex_dump(KERN_DEBUG," DMACS Values:",DUMP_PREFIX_ADDRESS,
-			16,4, bs->dma_buffer,32,false);
-		/* and the Control blocks themselves */
-		for(i=0;i<cbs_pos;i++) {
-			char text[16];
-			snprintf(text,16,"  DMA-CB[%i]:",i);
-			dev_info(&master->dev,
-				"DMA Control block at physical address %08x\n",
-				RAM2PHY(&cbs[i],bs->dma_buffer,bs->dma_buffer_handle));
-                        print_hex_dump(KERN_DEBUG,text,DUMP_PREFIX_ADDRESS,
-                                16,4,&cbs[i],32,false);
-		}
+		bcm2835_dma_dump(master,"PRE:");
 	}
 
 	/* initialize done */
 	INIT_COMPLETION(bs->done);
 
-	/* memmory barrier to make sure everything is "written to ram and not only to cache...*/
-	dsb();
+	/* run DMA */
+	bcm2835_dma_run(bs);
 
-	print_hex_dump(KERN_DEBUG," SPI-REGS1:",DUMP_PREFIX_ADDRESS,
-		16,4,bs->base,32,false);
-
-
-	/* start DMA - this should also enable the DMA */
-	writel(BCM2708_DMA_ACTIVE, bs->dma_tx.base + BCM2708_DMA_CS);
-	writel(BCM2708_DMA_ACTIVE, bs->dma_rx.base + BCM2708_DMA_CS);
-
-	print_hex_dump(KERN_DEBUG," SPI-REGS2:",DUMP_PREFIX_ADDRESS,
-		16,4,bs->base,32,false);
 
 	/* now that are running - waiting to get woken by interrupt */
 	/* the timeout may be too short - depend on amount of data and freq - better estimate needed? */
@@ -636,25 +663,15 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 			msecs_to_jiffies(SPI_TIMEOUT_MS*10)) == 0) {
 		/* inform of event and return with error */
 		dev_err(&master->dev, "DMA transfer timed out\n");
-		/* dump current set of SPI registers */
-		print_hex_dump(KERN_DEBUG," SPI-REGS3:",DUMP_PREFIX_ADDRESS,
-			16,4,bs->base,32,false);
-		/* dump the DMA registers for debugging purposes */
-		print_hex_dump(KERN_DEBUG,"  DMA-TX:",DUMP_PREFIX_ADDRESS,
-			16,4,bs->dma_tx.base,36,false);
-		print_hex_dump(KERN_DEBUG,"  DMA-RX:",DUMP_PREFIX_ADDRESS,
-			16,4,bs->dma_rx.base,36,false);		
+		/* and dump DMA */
+		bcm2835_dma_dump(master,"TIMEOUT:");
 		/* need to abort Interrupts */
-		bcm_dma_abort(bs->dma_tx.base);
-		bcm_dma_abort(bs->dma_rx.base);
+		bcm2835_dma_abort(bs);
 		/* reset SPI */
 		bcm2835_wr(bs, SPI_CS, state.cs|SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
 
 		status= -ETIMEDOUT;
 	}
-	print_hex_dump(KERN_DEBUG," SPI-REGS3:",DUMP_PREFIX_ADDRESS,
-		16,4,bs->base,32,false);
-	
 	/* transfer debugging - even if we have had an incident*/
 	if (unlikely(debugio)) {
 		if (unlikely(debugio&(1<<spi->chip_select))) {
