@@ -488,14 +488,18 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 		if ((xfer->rx_buf) && (!xfer->rx_dma)) {
 			xfer->rx_dma=bs->dma_bouncebuffer_handle;
 			memset(bs->dma_bouncebuffer,0,xfer->len);
+			xfer->rx_dma=virt_to_phys(xfer->rx_buf);
 		}
 		if ((xfer->tx_buf) && (!xfer->tx_dma)) {
 			xfer->tx_dma=bs->dma_bouncebuffer_handle+1024;
 			memcpy(bs->dma_bouncebuffer+1024,xfer->tx_buf,xfer->len);
+			xfer->tx_dma=virt_to_phys(xfer->tx_buf);
 		}
 
 		/* fill in tx */
-		cbs[cbs_pos].info = cbs[last_tx_pos].info | BCM2708_DMA_WAIT_RESP;
+		cbs[cbs_pos].info = BCM2708_DMA_PER_MAP(6) /* DREQ 6 = SPI TX in PERMAP */
+			| BCM2708_DMA_D_DREQ               /* destination DREQ trigger */
+			| BCM2708_DMA_WAIT_RESP;           /* and wait for WRITE response to get received */
 		if (xfer->tx_buf) {
 			cbs[cbs_pos].info |= BCM2708_DMA_S_INC; /* source increment by 4 */
 			cbs[cbs_pos].src = (unsigned long)xfer->tx_dma;
@@ -503,7 +507,7 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 			cbs[cbs_pos].info |= BCM2708_DMA_S_IGNORE; /* ignore source */
 			cbs[cbs_pos].src = bs->dma_buffer_handle;
 		}
-		cbs[cbs_pos].dst = cbs[last_tx_pos].dst;
+		cbs[cbs_pos].dst = (unsigned long)(DMA_SPI_BASE + SPI_FIFO);
 		cbs[cbs_pos].length = xfer->len;
 		cbs[cbs_pos].stride = 0;
 		cbs[cbs_pos].next = (u32)0;
@@ -513,20 +517,21 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 		cbs_pos++;
 		/* fill in rx */
 		cbs[cbs_pos].info = BCM2708_DMA_PER_MAP(7) /* DREQ 7 = SPI RX in PERMAP */
-			| BCM2708_DMA_S_DREQ;              /* source DREQ trigger */
+			| BCM2708_DMA_S_DREQ               /* source DREQ trigger */
+			| BCM2708_DMA_WAIT_RESP;           /* and wait for WRITE response to get received */
 		if (xfer->rx_buf) {
 			cbs[cbs_pos].info |= BCM2708_DMA_D_INC; /* destination inc by 4 */
 			cbs[cbs_pos].dst = (unsigned long)xfer->rx_dma;
 		} else {
 			cbs[cbs_pos].info |= BCM2708_DMA_D_IGNORE; /* ignore destination */
-			cbs[cbs_pos].src = bs->dma_buffer_handle;
+			cbs[cbs_pos].dst = bs->dma_buffer_handle;
 		}
-		cbs[cbs_pos].src = cbs[1].dst;
+		cbs[cbs_pos].src = (unsigned long)(DMA_SPI_BASE + SPI_FIFO);
 		cbs[cbs_pos].length = xfer->len;
 		cbs[cbs_pos].stride = 0;
 		cbs[cbs_pos].next = (u32)0;
 		if (last_rx_pos) {
-			cbs[last_tx_pos].next = RAM2PHY(&cbs[cbs_pos],bs->dma_buffer,bs->dma_buffer_handle);
+			cbs[last_rx_pos].next = RAM2PHY(&cbs[cbs_pos],bs->dma_buffer,bs->dma_buffer_handle);
 		} else {
 			/* and register as start of transfer */
 			writel(RAM2PHY(&cbs[cbs_pos],bs->dma_buffer,bs->dma_buffer_handle),
@@ -535,6 +540,7 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 		}
 			
 		last_rx_pos=cbs_pos;
+	cbs[last_rx_pos].info |= BCM2708_DMA_INT_EN;              /* enable interrupt */
 		cbs_pos++;
 		/* here we need to handle the delay */
 		if (xfer->delay_usecs) {
@@ -577,12 +583,28 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 	/* initialize done */
 	INIT_COMPLETION(bs->done);
 
+	/* memmory barrier */
+	dsb();
 	/* start DMA - this should also enable the DMA */
 	writel(BCM2708_DMA_ACTIVE, bs->dma_tx.base + BCM2708_DMA_CS);
 	writel(BCM2708_DMA_ACTIVE, bs->dma_rx.base + BCM2708_DMA_CS);
 
 	/* now that are running - waiting to get woken by interrupt */
 	/* the timeout may be too short - depend on amount of data and freq. */
+	if (wait_for_completion_timeout(
+			&bs->done,
+			msecs_to_jiffies(SPI_TIMEOUT_MS*10)) == 0) {
+		/* clear cs */
+		/* inform of event and return with error */
+		dev_err(&master->dev, "DMA transfer timed out\n");
+	}
+
+	/* dump the DMA registers for debugging purposes */
+	print_hex_dump(KERN_DEBUG,"  DMA-TX:",DUMP_PREFIX_ADDRESS,
+		16,4,bs->dma_tx.base,36,false);
+	print_hex_dump(KERN_DEBUG,"  DMA-RX:",DUMP_PREFIX_ADDRESS,
+		16,4,bs->dma_rx.base,36,false);
+	
 	if (wait_for_completion_timeout(
 			&bs->done,
 			msecs_to_jiffies(SPI_TIMEOUT_MS*10)) == 0) {
