@@ -361,6 +361,8 @@ irqreturn_t bcm2835_transfer_one_message_dma_irqhandler(int irq, void *dev)
 	struct spi_master *master = dev;
 	struct bcm2835_spi *bs = spi_master_get_devdata(master);
 
+	printk(KERN_DEBUG"DMA-IRQ triggered\n");
+
 	/* mark the rx DMA-interrupt as handled
 	   - it will (level) trigger otherwise again */
 	writel(BCM2708_DMA_INT, bs->dma_rx.base+BCM2708_DMA_CS);
@@ -404,7 +406,8 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 			if (transfers) {
 				if (xfer->bits_per_word!=bits_per_word) {
 					dev_err(&master->dev, "change of speed/bits only allowed for the first transfer\n");
-					return -EINVAL;
+					status=-EINVAL;
+					goto exit;
 				}
 			} else {
 				bits_per_word=xfer->bits_per_word;
@@ -415,7 +418,8 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 			if (transfers) {
 				if (xfer->speed_hz!=speed_hz) {
 					dev_err(&master->dev, "change of speed/bits only allowed for the first transfer\n");
-					return -EINVAL;
+					status=-EINVAL;
+					goto exit;
 				}
 			} else {
 				speed_hz=xfer->speed_hz;
@@ -425,9 +429,10 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 		transfers++;
 	}
 	/* we may not exceed the max transfer size - 64k */
-	if (xfer->len >= 65536) {
-		dev_err(&master->dev, "Max allowed package size 64k exceeded");
-		return -EINVAL;
+	if (totallen >= 65536) {
+		dev_err(&master->dev, "Max allowed package size 64k exceeded with %i bytes in %i transfers",totallen,transfers);
+		status=-EINVAL;
+		goto exit;
 	}
 	/* calculate our effective cs values */
 	state.cs = ((struct bcm2835_spi_state *)spi->controller_state)->cs;
@@ -441,14 +446,9 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 	if (status)
 		goto exit;
 	
-	/* clear the queues */
-	bcm2835_wr(bs, SPI_CS, bcm2835_rd(bs, SPI_CS) |
-		SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
-
-
-	/* now set up the Registers */
+	/* now set up the Registers and clean queues - maybe via DMA as well?*/
 	bcm2835_wr(bs, SPI_CLK, state.cdiv);
-	bcm2835_wr(bs, SPI_CS, state.cs);
+	bcm2835_wr(bs, SPI_CS, state.cs|SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX|SPI_CS_DMAEN|SPI_CS_ADCS);
 
 	/* now set up the CS value in DMA space*/
 	*dma_cs=totallen<<16   /* the length in bytes to transfer */
@@ -469,13 +469,12 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 	cbs[cbs_pos].length = 4;
 	cbs[cbs_pos].stride = 0;
 	cbs[cbs_pos].next = (u32) 0;
-	last_tx_pos=cbs_pos;
-
 	/* and register as start of transfer */
 	writel(RAM2PHY(&cbs[cbs_pos],bs->dma_buffer,bs->dma_buffer_handle),
 		bs->dma_tx.base + BCM2708_DMA_ADDR
 		);
 	/* and increment */
+	last_tx_pos=cbs_pos;
 	cbs_pos++;
 
 	/* now loop the transfers */
@@ -544,17 +543,22 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 		}
 	}
 
+	/* the last block needs to get pulled up (typically...) */	
+	if (xfer->cs_change) {
+		/* TODO: support this - we might need to split this into several DMA sections with a restart to make this work - could apply the same for the speed values...*/
+	}
+
 	/* trigger an interrupt when finished - if we got a completion */
 	if ((msg->complete) ) /* for now interrupt always - otherwise we do not need to sleep */
 		cbs[last_rx_pos].info |= BCM2708_DMA_INT_EN;              /* enable interrupt */
-
-
+	cbs[last_rx_pos].info |= BCM2708_DMA_INT_EN;              /* enable interrupt */
+		
 	/* dump the Control-block structures */
 	if (unlikely(debugdma)) {
 		int i;
 		dev_info(&master->dev,
-			"DMA Control blocks - DMA-CS value: %08x, BounceBuffer at: %08x\n",
-			*dma_cs,bs->dma_bouncebuffer,bs->dma_bouncebuffer_handle);
+			"DMA Control blocks - DMA-CS value: %08x, BounceBuffer at: %08x/%08x\n",
+			*dma_cs,(u32)bs->dma_bouncebuffer,bs->dma_bouncebuffer_handle);
 		/* and the SPI Registers */
 		print_hex_dump(KERN_DEBUG," SPI-REGS:",DUMP_PREFIX_ADDRESS,
 			16,4,bs->base,32,false);
@@ -569,7 +573,6 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 				16,4,&cbs[i],32,false);
 		}
 	}
-
 
 	/* initialize done */
 	INIT_COMPLETION(bs->done);
@@ -587,6 +590,12 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 
 		/* inform of event and return with error */
 		dev_err(&master->dev, "DMA transfer timed out\n");
+		/* dump the DMA registers for debugging purposes */
+		print_hex_dump(KERN_DEBUG,"  DMA-TX:",DUMP_PREFIX_ADDRESS,
+			16,4,bs->dma_tx.base,36,false);
+		print_hex_dump(KERN_DEBUG,"  DMA-RX:",DUMP_PREFIX_ADDRESS,
+			16,4,bs->dma_rx.base,36,false);
+		
 		/* need to abort Interrupts */
 		bcm_dma_abort(bs->dma_tx.base);
 		bcm_dma_abort(bs->dma_rx.base);
@@ -594,9 +603,11 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 	}
 	
 	/* handle bounce-buffers - in reverse */
-#if 0
+
+	/* transfer debugging */
 	if (unlikely(debugio)) {
 		if (unlikely(debugio&(1<<spi->chip_select))) {
+			/* still todo: 
 			printk(KERN_DEBUG "spi%i.%i: Transfer\n  Transfer Length=%i\n",
 				master->bus_num,spi->chip_select,
 				xfer->len
@@ -613,9 +624,9 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 					xfer->rx_buf,xfer->len,
 					false);
 			}
+			*/
 		}
 	}
-#endif
 
 exit:
 	msg->status = status;
