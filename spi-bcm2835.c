@@ -583,7 +583,7 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 	/* initialize done */
 	INIT_COMPLETION(bs->done);
 
-	/* memmory barrier */
+	/* memmory barrier to make sure everything is "written to ram and not only to cache...*/
 	dsb();
 	/* start DMA - this should also enable the DMA */
 	writel(BCM2708_DMA_ACTIVE, bs->dma_tx.base + BCM2708_DMA_CS);
@@ -591,6 +591,7 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 
 	/* now that are running - waiting to get woken by interrupt */
 	/* the timeout may be too short - depend on amount of data and freq. */
+	if (transfers>99) {
 	if (wait_for_completion_timeout(
 			&bs->done,
 			msecs_to_jiffies(SPI_TIMEOUT_MS*10)) == 0) {
@@ -604,7 +605,7 @@ static int bcm2835_transfer_one_message(struct spi_master *master,
 		16,4,bs->dma_tx.base,36,false);
 	print_hex_dump(KERN_DEBUG,"  DMA-RX:",DUMP_PREFIX_ADDRESS,
 		16,4,bs->dma_rx.base,36,false);
-	
+	}
 	if (wait_for_completion_timeout(
 			&bs->done,
 			msecs_to_jiffies(SPI_TIMEOUT_MS*10)) == 0) {
