@@ -73,6 +73,8 @@
 #define BCM2835_SPI_TIMEOUT_MS	30000
 #define BCM2835_SPI_MODE_BITS	(SPI_CPOL | SPI_CPHA | SPI_CS_HIGH | SPI_NO_CS)
 
+#define BCM2835_SPI_NUM_CS          3
+
 #define DRV_NAME	"spi-bcm2835dma"
 
 struct bcm2835dma_spi {
@@ -83,6 +85,7 @@ struct bcm2835dma_spi {
 	const u8 *tx_buf;
 	u8 *rx_buf;
 	int len;
+	u32 cs_device_flags[BCM2835_SPI_NUM_CS];
 };
 
 static inline u32 bcm2835dma_rd(struct bcm2835dma_spi *bs, unsigned reg)
@@ -203,19 +206,8 @@ static int bcm2835dma_spi_start_transfer(struct spi_device *spi,
 	} else
 		cdiv = 0; /* 0 is the slowest we can go */
 
-	if (spi->mode & SPI_CPOL)
-		cs |= BCM2835_SPI_CS_CPOL;
-	if (spi->mode & SPI_CPHA)
-		cs |= BCM2835_SPI_CS_CPHA;
-
-	if (!(spi->mode & SPI_NO_CS)) {
-		if (spi->mode & SPI_CS_HIGH) {
-			cs |= BCM2835_SPI_CS_CSPOL;
-			cs |= BCM2835_SPI_CS_CSPOL0 << spi->chip_select;
-		}
-
-		cs |= spi->chip_select;
-	}
+	/* take cs from the precalculated version */
+	cs |= bs->cs_device_flags[spi->chip_select];
 
 	INIT_COMPLETION(bs->done);
 	bs->tx_buf = tfr->tx_buf;
@@ -299,7 +291,32 @@ out:
 }
 
 static int bcm2835dma_spi_setup(struct spi_device *spi) {
-	dev_err(&spi->dev, "setup\n");	
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(spi->master);
+	u8 cs = spi->chip_select;
+	u32 mode = spi->mode;
+	bs->cs_device_flags[0]=0;
+
+	/* fill in cs flags based on device configs*/
+	if (!(mode & SPI_NO_CS)) {
+		/* if we are not configured with CS_HIGH */
+                if (mode & SPI_CS_HIGH) {
+			int i;
+			/* fill in the flags for all devices */
+			for (i=0;i<BCM2835_SPI_NUM_CS;i++) {
+				bs->cs_device_flags[i] |= BCM2835_SPI_CS_CSPOL0 << spi->chip_select;
+			}
+			/* and the specific flag for this device */
+			bs->cs_device_flags[cs] |= BCM2835_SPI_CS_CSPOL;
+		}
+		bs->cs_device_flags[cs]|=spi->chip_select;
+	}
+	/* and set up the other stuff */ 
+	if (mode & SPI_CPOL)
+		bs->cs_device_flags[cs] |= BCM2835_SPI_CS_CPOL;
+	if (mode & SPI_CPHA)
+		bs->cs_device_flags[cs] |= BCM2835_SPI_CS_CPHA;
+	/* so from now on we "only" need to take care about speed 
+	 * bs->cs_device_flags[spi->chip_select] can get used for cs */
 	return 0;
 }
 
@@ -315,14 +332,13 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "spi_alloc_master() failed\n");
 		return -ENOMEM;
 	}
-	dev_err(&pdev->dev, "here\n");
 
 	platform_set_drvdata(pdev, master);
 
 	master->mode_bits = BCM2835_SPI_MODE_BITS;
 	master->bits_per_word_mask = BIT(8 - 1);
 	master->bus_num = pdev->id;
-	master->num_chipselect = 3;
+	master->num_chipselect = BCM2835_SPI_NUM_CS;
 	master->transfer_one_message = bcm2835dma_spi_transfer_one;
 	master->dev.of_node = pdev->dev.of_node;
 	master->setup = bcm2835dma_spi_setup;
