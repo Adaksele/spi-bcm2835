@@ -1,5 +1,5 @@
 
-obj-m := spi-bcm2835.o
+obj-m := spi-bcm2835dma.o
 KDIR := /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
 
@@ -11,3 +11,6 @@ clean:
 
 install:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules modules_install
+
+help:
+	$(MAKE) -C $(KDIR) M=$(PWD) help
