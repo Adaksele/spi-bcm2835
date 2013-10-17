@@ -298,6 +298,11 @@ out:
 	return 0;
 }
 
+static int bcm2835_spi_setup(struct spi_device *spi) {
+	dev_err(&spi->dev, "setup\n");	
+	return 0;
+}
+
 static int bcm2835_spi_probe(struct platform_device *pdev)
 {
 	struct spi_master *master;
@@ -310,15 +315,17 @@ static int bcm2835_spi_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "spi_alloc_master() failed\n");
 		return -ENOMEM;
 	}
+	dev_err(&pdev->dev, "here\n");
 
 	platform_set_drvdata(pdev, master);
 
 	master->mode_bits = BCM2835_SPI_MODE_BITS;
 	master->bits_per_word_mask = BIT(8 - 1);
-	master->bus_num = -1;
+	master->bus_num = pdev->id;
 	master->num_chipselect = 3;
 	master->transfer_one_message = bcm2835_spi_transfer_one;
 	master->dev.of_node = pdev->dev.of_node;
+	master->setup = bcm2835_spi_setup;
 
 	bs = spi_master_get_devdata(master);
 
@@ -344,7 +351,9 @@ static int bcm2835_spi_probe(struct platform_device *pdev)
 		goto out_master_put;
 	}
 
-	bs->irq = irq_of_parse_and_map(pdev->dev.of_node, 0);
+	if (!(bs->irq=platform_get_irq(pdev, 0))) {
+		bs->irq = irq_of_parse_and_map(pdev->dev.of_node, 0);
+	}
 	if (bs->irq <= 0) {
 		dev_err(&pdev->dev, "could not get IRQ: %d\n", bs->irq);
 		err = bs->irq ? bs->irq : -ENODEV;
@@ -401,9 +410,17 @@ static int bcm2835_spi_remove(struct platform_device *pdev)
 
 static const struct of_device_id bcm2835_spi_match[] = {
 	{ .compatible = "brcm,bcm2835-spi", },
+	{ .compatible = "brcm,bcm2708-spi", },
 	{}
 };
 MODULE_DEVICE_TABLE(of, bcm2835_spi_match);
+
+/* and "normal" aliases */
+static const struct platform_device_id bcm2835_id_table[] = {
+        { "bcm2835_spi",  2835 },
+        { "bcm2708_spi",  2708 },
+        { },
+};
 
 static struct platform_driver bcm2835_spi_driver = {
 	.driver		= {
@@ -413,9 +430,10 @@ static struct platform_driver bcm2835_spi_driver = {
 	},
 	.probe		= bcm2835_spi_probe,
 	.remove		= bcm2835_spi_remove,
+	.id_table       = bcm2835_id_table,
 };
 module_platform_driver(bcm2835_spi_driver);
 
 MODULE_DESCRIPTION("SPI controller driver for Broadcom BCM2835");
-MODULE_AUTHOR("Chris Boot <bootc@bootc.net>");
+MODULE_AUTHOR("Chris Boot <bootc@bootc.net>, Martin Sperl <kernel@martin.sperl.org>");
 MODULE_LICENSE("GPL v2");
