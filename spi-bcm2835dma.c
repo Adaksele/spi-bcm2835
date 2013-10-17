@@ -73,9 +73,9 @@
 #define BCM2835_SPI_TIMEOUT_MS	30000
 #define BCM2835_SPI_MODE_BITS	(SPI_CPOL | SPI_CPHA | SPI_CS_HIGH | SPI_NO_CS)
 
-#define DRV_NAME	"spi-bcm2835"
+#define DRV_NAME	"spi-bcm2835dma"
 
-struct bcm2835_spi {
+struct bcm2835dma_spi {
 	void __iomem *regs;
 	struct clk *clk;
 	int irq;
@@ -85,28 +85,28 @@ struct bcm2835_spi {
 	int len;
 };
 
-static inline u32 bcm2835_rd(struct bcm2835_spi *bs, unsigned reg)
+static inline u32 bcm2835dma_rd(struct bcm2835dma_spi *bs, unsigned reg)
 {
 	return readl(bs->regs + reg);
 }
 
-static inline void bcm2835_wr(struct bcm2835_spi *bs, unsigned reg, u32 val)
+static inline void bcm2835dma_wr(struct bcm2835dma_spi *bs, unsigned reg, u32 val)
 {
 	writel(val, bs->regs + reg);
 }
 
-static inline void bcm2835_rd_fifo(struct bcm2835_spi *bs, int len)
+static inline void bcm2835dma_rd_fifo(struct bcm2835dma_spi *bs, int len)
 {
 	u8 byte;
 
 	while (len--) {
-		byte = bcm2835_rd(bs, BCM2835_SPI_FIFO);
+		byte = bcm2835dma_rd(bs, BCM2835_SPI_FIFO);
 		if (bs->rx_buf)
 			*bs->rx_buf++ = byte;
 	}
 }
 
-static inline void bcm2835_wr_fifo(struct bcm2835_spi *bs, int len)
+static inline void bcm2835dma_wr_fifo(struct bcm2835dma_spi *bs, int len)
 {
 	u8 byte;
 
@@ -115,16 +115,16 @@ static inline void bcm2835_wr_fifo(struct bcm2835_spi *bs, int len)
 
 	while (len--) {
 		byte = bs->tx_buf ? *bs->tx_buf++ : 0;
-		bcm2835_wr(bs, BCM2835_SPI_FIFO, byte);
+		bcm2835dma_wr(bs, BCM2835_SPI_FIFO, byte);
 		bs->len--;
 	}
 }
 
-static irqreturn_t bcm2835_spi_interrupt(int irq, void *dev_id)
+static irqreturn_t bcm2835dma_spi_interrupt(int irq, void *dev_id)
 {
 	struct spi_master *master = dev_id;
-	struct bcm2835_spi *bs = spi_master_get_devdata(master);
-	u32 cs = bcm2835_rd(bs, BCM2835_SPI_CS);
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+	u32 cs = bcm2835dma_rd(bs, BCM2835_SPI_CS);
 
 	/*
 	 * RXR - RX needs Reading. This means 12 (or more) bytes have been
@@ -137,14 +137,14 @@ static irqreturn_t bcm2835_spi_interrupt(int irq, void *dev_id)
 	 *
 	 * We only check for this case if we have more bytes to TX; at the end
 	 * of the transfer, we ignore this pipelining optimization, and let
-	 * bcm2835_spi_finish_transfer() drain the RX FIFO.
+	 * bcm2835dma_spi_finish_transfer() drain the RX FIFO.
 	 */
 	if (bs->len && (cs & BCM2835_SPI_CS_RXR)) {
 		/* Read 12 bytes of data */
-		bcm2835_rd_fifo(bs, 12);
+		bcm2835dma_rd_fifo(bs, 12);
 
 		/* Write up to 12 bytes */
-		bcm2835_wr_fifo(bs, 12);
+		bcm2835dma_wr_fifo(bs, 12);
 
 		/*
 		 * We must have written something to the TX FIFO due to the
@@ -163,11 +163,11 @@ static irqreturn_t bcm2835_spi_interrupt(int irq, void *dev_id)
 	 */
 	if (cs & BCM2835_SPI_CS_DONE) {
 		if (bs->len) { /* First interrupt in a transfer */
-			bcm2835_wr_fifo(bs, 16);
+			bcm2835dma_wr_fifo(bs, 16);
 		} else { /* Transfer complete */
 			/* Disable SPI interrupts */
 			cs &= ~(BCM2835_SPI_CS_INTR | BCM2835_SPI_CS_INTD);
-			bcm2835_wr(bs, BCM2835_SPI_CS, cs);
+			bcm2835dma_wr(bs, BCM2835_SPI_CS, cs);
 
 			/*
 			 * Wake up bcm2835_spi_transfer_one(), which will call
@@ -182,10 +182,10 @@ static irqreturn_t bcm2835_spi_interrupt(int irq, void *dev_id)
 	return IRQ_NONE;
 }
 
-static int bcm2835_spi_start_transfer(struct spi_device *spi,
+static int bcm2835dma_spi_start_transfer(struct spi_device *spi,
 		struct spi_transfer *tfr)
 {
-	struct bcm2835_spi *bs = spi_master_get_devdata(spi->master);
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(spi->master);
 	unsigned long spi_hz, clk_hz, cdiv;
 	u32 cs = BCM2835_SPI_CS_INTR | BCM2835_SPI_CS_INTD | BCM2835_SPI_CS_TA;
 
@@ -222,28 +222,28 @@ static int bcm2835_spi_start_transfer(struct spi_device *spi,
 	bs->rx_buf = tfr->rx_buf;
 	bs->len = tfr->len;
 
-	bcm2835_wr(bs, BCM2835_SPI_CLK, cdiv);
+	bcm2835dma_wr(bs, BCM2835_SPI_CLK, cdiv);
 	/*
 	 * Enable the HW block. This will immediately trigger a DONE (TX
 	 * empty) interrupt, upon which we will fill the TX FIFO with the
 	 * first TX bytes. Pre-filling the TX FIFO here to avoid the
 	 * interrupt doesn't work:-(
 	 */
-	bcm2835_wr(bs, BCM2835_SPI_CS, cs);
+	bcm2835dma_wr(bs, BCM2835_SPI_CS, cs);
 
 	return 0;
 }
 
-static int bcm2835_spi_finish_transfer(struct spi_device *spi,
+static int bcm2835dma_spi_finish_transfer(struct spi_device *spi,
 		struct spi_transfer *tfr, bool cs_change)
 {
-	struct bcm2835_spi *bs = spi_master_get_devdata(spi->master);
-	u32 cs = bcm2835_rd(bs, BCM2835_SPI_CS);
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(spi->master);
+	u32 cs = bcm2835dma_rd(bs, BCM2835_SPI_CS);
 
 	/* Drain RX FIFO */
 	while (cs & BCM2835_SPI_CS_RXD) {
-		bcm2835_rd_fifo(bs, 1);
-		cs = bcm2835_rd(bs, BCM2835_SPI_CS);
+		bcm2835dma_rd_fifo(bs, 1);
+		cs = bcm2835dma_rd(bs, BCM2835_SPI_CS);
 	}
 
 	if (tfr->delay_usecs)
@@ -251,15 +251,15 @@ static int bcm2835_spi_finish_transfer(struct spi_device *spi,
 
 	if (cs_change)
 		/* Clear TA flag */
-		bcm2835_wr(bs, BCM2835_SPI_CS, cs & ~BCM2835_SPI_CS_TA);
+		bcm2835dma_wr(bs, BCM2835_SPI_CS, cs & ~BCM2835_SPI_CS_TA);
 
 	return 0;
 }
 
-static int bcm2835_spi_transfer_one(struct spi_master *master,
+static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 		struct spi_message *mesg)
 {
-	struct bcm2835_spi *bs = spi_master_get_devdata(master);
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	struct spi_transfer *tfr;
 	struct spi_device *spi = mesg->spi;
 	int err = 0;
@@ -267,7 +267,7 @@ static int bcm2835_spi_transfer_one(struct spi_master *master,
 	bool cs_change;
 
 	list_for_each_entry(tfr, &mesg->transfers, transfer_list) {
-		err = bcm2835_spi_start_transfer(spi, tfr);
+		err = bcm2835dma_spi_start_transfer(spi, tfr);
 		if (err)
 			goto out;
 
@@ -281,7 +281,7 @@ static int bcm2835_spi_transfer_one(struct spi_master *master,
 		cs_change = tfr->cs_change ||
 			list_is_last(&tfr->transfer_list, &mesg->transfers);
 
-		err = bcm2835_spi_finish_transfer(spi, tfr, cs_change);
+		err = bcm2835dma_spi_finish_transfer(spi, tfr, cs_change);
 		if (err)
 			goto out;
 
@@ -290,7 +290,7 @@ static int bcm2835_spi_transfer_one(struct spi_master *master,
 
 out:
 	/* Clear FIFOs, and disable the HW block */
-	bcm2835_wr(bs, BCM2835_SPI_CS,
+	bcm2835dma_wr(bs, BCM2835_SPI_CS,
 		   BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX);
 	mesg->status = err;
 	spi_finalize_current_message(master);
@@ -298,15 +298,15 @@ out:
 	return 0;
 }
 
-static int bcm2835_spi_setup(struct spi_device *spi) {
+static int bcm2835dma_spi_setup(struct spi_device *spi) {
 	dev_err(&spi->dev, "setup\n");	
 	return 0;
 }
 
-static int bcm2835_spi_probe(struct platform_device *pdev)
+static int bcm2835dma_spi_probe(struct platform_device *pdev)
 {
 	struct spi_master *master;
-	struct bcm2835_spi *bs;
+	struct bcm2835dma_spi *bs;
 	struct resource *res;
 	int err;
 
@@ -323,9 +323,9 @@ static int bcm2835_spi_probe(struct platform_device *pdev)
 	master->bits_per_word_mask = BIT(8 - 1);
 	master->bus_num = pdev->id;
 	master->num_chipselect = 3;
-	master->transfer_one_message = bcm2835_spi_transfer_one;
+	master->transfer_one_message = bcm2835dma_spi_transfer_one;
 	master->dev.of_node = pdev->dev.of_node;
-	master->setup = bcm2835_spi_setup;
+	master->setup = bcm2835dma_spi_setup;
 
 	bs = spi_master_get_devdata(master);
 
@@ -362,7 +362,7 @@ static int bcm2835_spi_probe(struct platform_device *pdev)
 
 	clk_prepare_enable(bs->clk);
 
-	err = request_irq(bs->irq, bcm2835_spi_interrupt, 0,
+	err = request_irq(bs->irq, bcm2835dma_spi_interrupt, 0,
 			dev_name(&pdev->dev), master);
 	if (err) {
 		dev_err(&pdev->dev, "could not request IRQ: %d\n", err);
@@ -370,7 +370,7 @@ static int bcm2835_spi_probe(struct platform_device *pdev)
 	}
 
 	/* initialise the hardware */
-	bcm2835_wr(bs, BCM2835_SPI_CS,
+	bcm2835dma_wr(bs, BCM2835_SPI_CS,
 		   BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX);
 
 	err = spi_register_master(master);
@@ -390,16 +390,16 @@ out_master_put:
 	return err;
 }
 
-static int bcm2835_spi_remove(struct platform_device *pdev)
+static int bcm2835dma_spi_remove(struct platform_device *pdev)
 {
 	struct spi_master *master = platform_get_drvdata(pdev);
-	struct bcm2835_spi *bs = spi_master_get_devdata(master);
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 
 	free_irq(bs->irq, master);
 	spi_unregister_master(master);
 
 	/* Clear FIFOs, and disable the HW block */
-	bcm2835_wr(bs, BCM2835_SPI_CS,
+	bcm2835dma_wr(bs, BCM2835_SPI_CS,
 		   BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX);
 
 	clk_disable_unprepare(bs->clk);
@@ -408,31 +408,31 @@ static int bcm2835_spi_remove(struct platform_device *pdev)
 	return 0;
 }
 
-static const struct of_device_id bcm2835_spi_match[] = {
+static const struct of_device_id bcm2835dma_spi_match[] = {
 	{ .compatible = "brcm,bcm2835-spi", },
 	{ .compatible = "brcm,bcm2708-spi", },
 	{}
 };
-MODULE_DEVICE_TABLE(of, bcm2835_spi_match);
+MODULE_DEVICE_TABLE(of, bcm2835dma_spi_match);
 
 /* and "normal" aliases */
-static const struct platform_device_id bcm2835_id_table[] = {
+static const struct platform_device_id bcm2835dma_id_table[] = {
         { "bcm2835_spi",  2835 },
         { "bcm2708_spi",  2708 },
         { },
 };
 
-static struct platform_driver bcm2835_spi_driver = {
+static struct platform_driver bcm2835dma_spi_driver = {
 	.driver		= {
 		.name		= DRV_NAME,
 		.owner		= THIS_MODULE,
-		.of_match_table	= bcm2835_spi_match,
+		.of_match_table	= bcm2835dma_spi_match,
 	},
-	.probe		= bcm2835_spi_probe,
-	.remove		= bcm2835_spi_remove,
-	.id_table       = bcm2835_id_table,
+	.probe		= bcm2835dma_spi_probe,
+	.remove		= bcm2835dma_spi_remove,
+	.id_table       = bcm2835dma_id_table,
 };
-module_platform_driver(bcm2835_spi_driver);
+module_platform_driver(bcm2835dma_spi_driver);
 
 MODULE_DESCRIPTION("SPI controller driver for Broadcom BCM2835");
 MODULE_AUTHOR("Chris Boot <bootc@bootc.net>, Martin Sperl <kernel@martin.sperl.org>");
