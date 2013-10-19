@@ -159,6 +159,70 @@ struct bcm2835dma_dma_cb {
 	struct spi_message* msg;
 };
 
+static void spi_print_debug_message(struct spi_message *mesg,u32 max_dump_len)
+{
+	struct spi_transfer *xfer;
+	/* some statistics to gather */
+	u32 transfers=0;
+	u32 transfers_len=0;
+	u32 transfers_tx_len=0;
+	u32 transfers_rx_len=0;
+	/* first general */
+	dev_info(&mesg->spi->dev,"SPI message:\n");
+	printk(KERN_DEBUG " msg.status         = %i\n",mesg->status);
+	printk(KERN_DEBUG "    .actual_length  = %i\n",mesg->actual_length);
+	printk(KERN_DEBUG "    .is_dma_mapped  = %i\n",mesg->is_dma_mapped);
+	printk(KERN_DEBUG "    .complete       = %pf\n",mesg->complete);
+	printk(KERN_DEBUG "    .context        = %pK\n",mesg->context);
+	/* now iterate over list again */
+	list_for_each_entry(xfer, &mesg->transfers, transfer_list) {
+		/* the max data-length to print */
+		u32 dump_len=(xfer->len<max_dump_len)?xfer->len:max_dump_len;
+		/* first some stats */
+		transfers++;
+		transfers_len+=xfer->len;
+		if (xfer->tx_buf)
+			transfers_tx_len+=xfer->len;
+		if (xfer->rx_buf)
+			transfers_rx_len+=xfer->len;
+		/* now write out details for this transfer */
+		printk(KERN_DEBUG " xfer[%02i].len           = %i\n",transfers,xfer->len);
+		printk(KERN_DEBUG "         .speed_hz      = %i\n",xfer->speed_hz);
+		printk(KERN_DEBUG "         .delay_usecs   = %i\n",xfer->delay_usecs);
+		printk(KERN_DEBUG "         .cs_change     = %i\n",xfer->cs_change);
+		printk(KERN_DEBUG "         .bits_per_word = %i\n",xfer->bits_per_word);
+		printk(KERN_DEBUG "         .tx_buf        = %pK\n",xfer->tx_buf);
+		printk(KERN_DEBUG "         .tx_dma        = %08x\n",xfer->tx_dma);
+		if ((xfer->tx_buf)&&(dump_len)) {
+			print_hex_dump(KERN_DEBUG,
+				"         .tx_data       = ",
+				DUMP_PREFIX_ADDRESS,
+				32,4,
+				xfer->tx_buf,
+				dump_len,
+				false
+				);
+		}
+		printk(KERN_DEBUG "         .rx_buf        = %pK\n",xfer->rx_buf);
+		printk(KERN_DEBUG "         .rx_dma        = %08x\n",xfer->rx_dma);
+		if ((xfer->rx_buf)&&(dump_len)) {
+			print_hex_dump(KERN_DEBUG,
+				"         .rx_data       = ",
+				DUMP_PREFIX_ADDRESS,
+				32,4,
+				xfer->rx_buf,
+				dump_len,
+				false
+				);
+		}
+	}
+	/* the statistics - only after the fact - to avoid unecessary debugging statistics code in the default path */
+	printk(KERN_DEBUG " msg.transfers      = %i\n",transfers);
+	printk(KERN_DEBUG "    .total_len      = %i\n",transfers_len);
+	printk(KERN_DEBUG "    .tx_length      = %i\n",transfers_tx_len);
+	printk(KERN_DEBUG "    .rx_length      = %i\n",transfers_rx_len);
+}
+
 static inline u32 bcm2835dma_rd(struct bcm2835dma_spi *bs, unsigned reg)
 {
 	return readl(bs->regs + reg);
@@ -189,9 +253,49 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 	struct spi_device *spi = mesg->spi;
 	/* the status */
 	u32 status=0;
+	/* the default cs and speed values*/
+	u32 last_cdiv=0;
+	u32 last_cs=0;
+	/* the spi bus speed */
+	u32 clk_hz = clk_get_rate(bs->clk);
 
 	/* loop all transfers */
 	list_for_each_entry(xfer, &mesg->transfers, transfer_list) {
+		/* the chip-select and cdiv */
+		u32 cs=bs->cs_device_flags[spi->chip_select];
+		/* calculate cdiv */
+		u32 speed_hz=(xfer->speed_hz)?xfer->speed_hz:spi->max_speed_hz;
+		u32 cdiv=2; /* by default the max is half the BUS speed */
+		if (speed_hz*2<clk_hz) {
+			if (speed_hz) {
+				cdiv=DIV_ROUND_UP(clk_hz,speed_hz);
+				/* actually the document says that cdiv must be a power of 2,
+				   but empirically (found out by notro) this is found to be not true, so not included:
+				   cdiv = roundup_pow_of_two(cdiv);
+				*/
+			} else { 
+				cdiv=0;
+			}
+			/* if the ratio is too big, then use the slowest we can go... */
+			if (cdiv>65535)
+				cdiv=0; /* the slowest we can go */
+		}
+		/* check if bits/word have changed */
+		if ((xfer->bits_per_word)&&(xfer->bits_per_word!=8)) {
+			dev_err(&spi->dev,"Unsupported bits/word in transfer config - only 8 bits are allowed!!!");
+			status=-EINVAL;
+			goto error_exit;
+		}
+		/* if the values have changed, then set them - we may want to consolidate both into one transfer with strides */
+		if (cdiv!=last_cdiv) {
+			/* configure cdiv via DMA */
+		}
+		if (cs!=last_cs) {
+			/* configure cs via DMA */
+		}
+		/* set the "old" values to the current ones */
+		last_cdiv=cdiv;
+		last_cs=cs;
 	}
 
 	/* wait for us to get woken up again after the transfer */
@@ -202,68 +306,13 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 		status=-ETIMEDOUT;
 	}
 
-	/* set the status */
+	/* set the status - before we run the debug code and before we finalize the message */
+error_exit:
 	mesg->status=status;
 
 	/* write the debug message information */
 	if (unlikely(debug_msg)) {
-		/* some statistics */
-		u32 transfers=0;
-		u32 transfers_len=0;
-		u32 transfers_tx_len=0;
-		u32 transfers_rx_len=0;
-		/* first general */
-		dev_info(&spi->dev,"SPI message:\n");
-		printk(KERN_DEBUG " msg.status         = %i\n",mesg->status);
-		printk(KERN_DEBUG "    .actual_length  = %i\n",mesg->actual_length);
-		printk(KERN_DEBUG "    .is_dma_mapped  = %i\n",mesg->is_dma_mapped);
-		printk(KERN_DEBUG "    .complete       = %pf\n",mesg->complete);
-		printk(KERN_DEBUG "    .context        = %pK\n",mesg->context);
-		/* now iterate over list again */
-		list_for_each_entry(xfer, &mesg->transfers, transfer_list) {
-			/* first some stats */
-			transfers++;
-			transfers_len+=xfer->len;
-			if (xfer->tx_buf)
-				transfers_tx_len+=xfer->len;
-			if (xfer->rx_buf)
-				transfers_rx_len+=xfer->len;
-			/* now write out details for this transfer */
-			printk(KERN_DEBUG " xfer[%02i].len           = %i\n",transfers,xfer->len);
-			printk(KERN_DEBUG "         .speed_hz      = %i\n",xfer->speed_hz);
-			printk(KERN_DEBUG "         .delay_usecs   = %i\n",xfer->delay_usecs);
-			printk(KERN_DEBUG "         .cs_change     = %i\n",xfer->cs_change);
-			printk(KERN_DEBUG "         .bits_per_word = %i\n",xfer->bits_per_word);
-			printk(KERN_DEBUG "         .tx_buf        = %pK\n",xfer->tx_buf);
-			printk(KERN_DEBUG "         .tx_dma        = %08x\n",xfer->tx_dma);
-			if (xfer->tx_buf) {
-				print_hex_dump(KERN_DEBUG,
-					"         .tx_data       = ",
-					DUMP_PREFIX_ADDRESS,
-					32,4,
-					xfer->tx_buf,
-					xfer->len,
-					false
-					);
-			}
-			printk(KERN_DEBUG "         .rx_buf        = %pK\n",xfer->rx_buf);
-			printk(KERN_DEBUG "         .rx_dma        = %08x\n",xfer->rx_dma);
-			if (xfer->rx_buf) {
-				print_hex_dump(KERN_DEBUG,
-					"         .rx_data       = ",
-					DUMP_PREFIX_ADDRESS,
-					32,4,
-					xfer->rx_buf,
-					xfer->len,
-					false
-					);
-			}
-		}
-		/* the statistics - only after the fact - to avoid unecessary debugging statistics code in the default path */
-		printk(KERN_DEBUG " msg.transfers      = %i\n",transfers);
-		printk(KERN_DEBUG "    .total_len      = %i\n",transfers_len);
-		printk(KERN_DEBUG "    .tx_length      = %i\n",transfers_tx_len);
-		printk(KERN_DEBUG "    .rx_length      = %i\n",transfers_rx_len);
+		spi_print_debug_message(mesg,128);
 	}
 
 	/* finalize message */
