@@ -112,7 +112,10 @@ struct bcm2835dma_spi_dma {
 	struct bcm2835_dma_regs __iomem *base;
         int chan;
         int irq;
-	char *desc;
+	irq_handler_t handler;
+	const char *desc;
+	/* the listhead of control blocks we have allocated*/
+	struct list_head cb_list;
 };
 
 /* the spi device data structure */
@@ -123,8 +126,6 @@ struct bcm2835dma_spi {
 	/* the chip-select flags that store the polarities and other flags for transfer */
 	u32 cs_device_flags_idle;
 	u32 cs_device_flags[BCM2835_SPI_NUM_CS];
-	/* the listhead of control blocks we have allocated*/
-	struct list_head cb_list;
 	/* the dmas we require */
 	struct bcm2835dma_spi_dma dma_tx;
 	struct bcm2835dma_spi_dma dma_rx;
@@ -142,25 +143,21 @@ struct bcm2835dma_dma_cb {
 	u32 length;
 	u32 stride;
 	dma_addr_t next;
-	u32 padding[2];
+	u32 pad[2];
 	/* the list of control-blocks*/
 	struct list_head cb_list;
 	/* the physical address */
 	dma_addr_t self;
-	/* if length is <=8 then the union below is used directly (word), 
-	 * otherwise we allocate a frame and use the address in pool_ptr */
-	union {
-		u32 word[2];
-		void *pool_ptr;
-	} src_data;
-	union {
-		u32 word[2];
-		void *pool_ptr;
-	} dst_data;
+	/* some locally allocated data - the rules are as follows:
+	   if length<=8 and we point tho the pointer with src/dst, then it is "embedded"
+	   otherwise the pointer to the data is taken from the pointer
+	   and if it is not allocated from the pool, then it is NULL
+	*/
+	void *src_ptr;u32 src_pad;
+	void *dst_ptr;u32 dst_pad;
 	/* finally there is the pointer to the corresponding SPI message - used for callbacks,... */
 	struct spi_message* msg;
 };
-
 
 /* the following are in need of a rewrite to get them use the
    linux-dma-manager instead */
@@ -171,7 +168,7 @@ static void bcm2835dma_release_dma(struct platform_device *pdev,
 	struct spi_master *master = platform_get_drvdata(pdev);
 	if (!d->base)
                 return;
-	if (d->irq)
+	if (d->handler)
 		free_irq(d->irq,master);
         bcm_dma_chan_free(d->chan);
         d->base = NULL;
@@ -181,7 +178,8 @@ static void bcm2835dma_release_dma(struct platform_device *pdev,
 
 static int bcm2835dma_allocate_dma(struct platform_device *pdev,
                                 struct bcm2835dma_spi_dma *d,
-				irq_handler_t handler
+				irq_handler_t handler,
+				const char* desc
 	)
 {
 	struct spi_master *master = platform_get_drvdata(pdev);
@@ -190,6 +188,9 @@ static int bcm2835dma_allocate_dma(struct platform_device *pdev,
 	d->base=NULL;
 	d->chan=0;
 	d->irq=0;
+	d->handler=NULL;
+	d->desc=NULL;
+	INIT_LIST_HEAD(&d->cb_list);
         /* register DMA channel */
         ret = bcm_dma_chan_alloc(BCM_DMA_FEATURE_FAST, (void**)&d->base, &d->irq);
         if (ret < 0) {
@@ -214,13 +215,86 @@ static int bcm2835dma_allocate_dma(struct platform_device *pdev,
 			bcm2835dma_release_dma(pdev,d);
 			return ret;
 		}
-	} else {
-		/* clear irq, as we do not use it */
-		d->irq=0;
 	}
+	d->desc=desc;
+	d->handler=handler;
         return 0;
 }
 
+static void __bcm2835dma_dump_dmacb(void *base) {
+        printk(KERN_DEBUG "        .info    = %08x\n",readl(base+0x00));
+        printk(KERN_DEBUG "        .src     = %08x\n",readl(base+0x04));
+        printk(KERN_DEBUG "        .dst     = %08x\n",readl(base+0x08));
+        printk(KERN_DEBUG "        .length  = %08x\n",readl(base+0x0c));
+        printk(KERN_DEBUG "        .stride  = %08x\n",readl(base+0x10));
+        printk(KERN_DEBUG "        .next    = %08x\n",readl(base+0x14));
+}
+static void bcm2835dma_dump_dma(struct bcm2835dma_spi_dma* dma,u32 max_dump_len)
+{
+	int count=0;
+	void* data;
+	struct bcm2835dma_dma_cb *cb;
+	/* start with a common header */
+	printk(KERN_DEBUG " DMA[%2s].base    = %pK\n",dma->desc,dma->base);
+	printk(KERN_DEBUG "        .channel = %i\n",dma->chan);
+	printk(KERN_DEBUG "        .irq     = %i\n",dma->irq);
+	printk(KERN_DEBUG "        .handler = %pf\n",dma->handler);
+        printk(KERN_DEBUG "        .status  = %08x\n",readl(&dma->base->cs));
+        printk(KERN_DEBUG "        .cbaddr  = %08x\n",readl(&dma->base->addr));
+	__bcm2835dma_dump_dmacb(&dma->base->ti);
+        printk(KERN_DEBUG "        .debug   = %08x\n",readl(&dma->base->debug));
+
+	/* and also dump the scheduled Control Blocks */
+	list_for_each_entry(cb, &dma->cb_list,cb_list) {
+		u32 dump_len=(cb->length<max_dump_len)?cb->length:max_dump_len;
+		count++;
+                /* dump this cb */
+                printk(KERN_DEBUG " CB[%02i].base     = %pK\n",count,cb);
+                printk(KERN_DEBUG "       .bus-addr = %08x\n",cb->self);
+                printk(KERN_DEBUG "       .msg      = %pK\n",cb->msg);
+		__bcm2835dma_dump_dmacb(cb);
+                printk(KERN_DEBUG "       .pad0     = %08x\n",cb->pad[0]);
+                printk(KERN_DEBUG "       .pad1     = %08x\n",cb->pad[1]);
+		/* and dump the tx-data itself if we have allocated it locally*/
+		if ((cb->length<=8)&&(cb->src==cb->self+offsetof(struct bcm2835dma_dma_cb,src_ptr))) {
+			/* if we store it in the structure itself */
+			data=&cb->src_ptr;
+		} else {
+			/* we use the pointer */
+			data=cb->src_ptr;
+		}
+		/* and print only if we got the pointer */
+		if (data) {
+			print_hex_dump(KERN_DEBUG,
+				"       .src_data       = ",
+				DUMP_PREFIX_ADDRESS,
+				32,4,
+				data,
+				dump_len,
+				false
+				);
+		}
+		/* and dump the rx-data itself if we have allocated it locally*/
+		if ((cb->length<=8)&&(cb->src==cb->self+offsetof(struct bcm2835dma_dma_cb,dst_ptr))) {
+			/* if we store it in the structure itself */
+			data=&cb->dst_ptr;
+		} else {
+			/* we use the pointer */
+			data=cb->dst_ptr;
+		}
+		/* and print only if we got the pointer */
+		if (data) {
+			print_hex_dump(KERN_DEBUG,
+				"       .dst_data       = ",
+				DUMP_PREFIX_ADDRESS,
+				32,4,
+				data,
+				dump_len,
+				false
+				);
+		}
+	}
+}
 
 static void spi_print_debug_message(struct spi_message *mesg,u32 max_dump_len)
 {
@@ -361,6 +435,13 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 		last_cs=cs;
 	}
 
+	/* if debugging dma, then dump what we got */
+	if (unlikely(debug_dma)) {
+		dev_info(&master->dev,"DMA status:\n");
+		bcm2835dma_dump_dma(&bs->dma_tx,32);
+		bcm2835dma_dump_dma(&bs->dma_rx,32);
+	}
+
 	/* wait for us to get woken up again after the transfer */
         if (wait_for_completion_timeout(
                         &bs->done,
@@ -499,10 +580,10 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 	clk_prepare_enable(bs->clk);
 
 	/* allocate DMA */
-	if ((err=bcm2835dma_allocate_dma(pdev,&bs->dma_tx,NULL))) {
+	if ((err=bcm2835dma_allocate_dma(pdev,&bs->dma_tx,NULL,"tx"))) {
 		goto out_release_dma;
 	}
-	if ((err=bcm2835dma_allocate_dma(pdev,&bs->dma_rx,NULL))) {
+	if ((err=bcm2835dma_allocate_dma(pdev,&bs->dma_rx,NULL,"rx"))) {
 		goto out_release_dma;
 	}
 
@@ -557,6 +638,9 @@ static int bcm2835dma_spi_remove(struct platform_device *pdev)
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 
 	spi_unregister_master(master);
+
+	bcm2835dma_release_dma(pdev,&bs->dma_tx);
+	bcm2835dma_release_dma(pdev,&bs->dma_rx);
 
 	/* release pool - also releases all objects */
 	dma_pool_destroy(bs->pool);
