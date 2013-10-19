@@ -70,7 +70,7 @@
 #define BCM2835_SPI_CS_CS_10		0x00000002
 #define BCM2835_SPI_CS_CS_01		0x00000001
 
-#define BCM2835_SPI_TIMEOUT_MS	30000
+#define SPI_TIMEOUT_MS	3000
 #define BCM2835_SPI_MODE_BITS	(SPI_CPOL | SPI_CPHA | SPI_CS_HIGH | SPI_NO_CS)
 
 #define BCM2835_SPI_NUM_CS	3
@@ -81,13 +81,82 @@ static bool realtime = 1;
 module_param(realtime, bool, 0);
 MODULE_PARM_DESC(realtime, "Run the driver with realtime priority");
 
+/* some module-parameters for debugging and corresponding */
+static bool debug_msg = 0;
+module_param(debug_msg, bool, 0);
+MODULE_PARM_DESC(realtime, "Run the driver with message debugging enabled");
+
+static bool debug_dma = 0;
+module_param(debug_dma, bool, 0);
+MODULE_PARM_DESC(realtime, "Run the driver with dma debugging enabled");
+
+/* the layout of the DMA register itself - use writel/readl for it to work correctly */
+struct bcm2835_dma_regs {
+	/* the dma control registers */
+	u32 cs;
+	dma_addr_t addr;
+	u32 ti;
+	dma_addr_t src;
+	dma_addr_t dst;
+	u32 len;
+	u32 stride;
+	dma_addr_t next;
+	u32 debug;
+};
+
+/* the structure that defines the DMAs we use */
+struct bcm2835dma_spi_dma {
+	/* some extra information */
+	struct bcm2835_dma_regs __iomem *base;
+        int chan;
+        int irq;
+	char *desc;
+};
+
+/* the spi device data structure */
 struct bcm2835dma_spi {
 	void __iomem *regs;
 	struct clk *clk;
-	int irq;
 	struct completion done;
+	/* the chip-select flags that store the polarities and other flags for transfer */
 	u32 cs_device_flags_idle;
 	u32 cs_device_flags[BCM2835_SPI_NUM_CS];
+	/* the listhead of control blocks we have allocated*/
+	struct list_head cb_list;
+	/* the dmas we require */
+	struct bcm2835dma_spi_dma dma_tx;
+	struct bcm2835dma_spi_dma dma_rx;
+	/* the DMA-able pool we use to allocate control blocks from */
+	struct dma_pool *pool;
+	/* some helper segments from the dma pool used for transfers */
+};
+
+/* the control block structure - this should be 64 bytes in size*/
+struct bcm2835dma_dma_cb {
+	/* first the "real" control-block used by the DMA - 32 bytes */
+	u32 info;
+	dma_addr_t src;
+	dma_addr_t dst;
+	u32 length;
+	u32 stride;
+	dma_addr_t next;
+	u32 padding[2];
+	/* the list of control-blocks*/
+	struct list_head cb_list;
+	/* the physical address */
+	dma_addr_t self;
+	/* if length is <=8 then the union below is used directly (word), 
+	 * otherwise we allocate a frame and use the address in pool_ptr */
+	union {
+		u32 word[2];
+		void *pool_ptr;
+	} src_data;
+	union {
+		u32 word[2];
+		void *pool_ptr;
+	} dst_data;
+	/* finally there is the pointer to the corresponding SPI message - used for callbacks,... */
+	struct spi_message* msg;
 };
 
 static inline u32 bcm2835dma_rd(struct bcm2835dma_spi *bs, unsigned reg)
@@ -102,10 +171,12 @@ static inline void bcm2835dma_wr(struct bcm2835dma_spi *bs, unsigned reg, u32 va
 
 static irqreturn_t bcm2835dma_spi_interrupt(int irq, void *dev_id) {
 	struct spi_master *master = dev_id;
-	struct bcm2835_spi *bs = spi_master_get_devdata(master);
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 
+	/* wake up task */
+	complete(&bs->done);
 
-	
+	/* and return with the IRQ marked as handled */
 	return IRQ_HANDLED;
 }
 
@@ -114,18 +185,91 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 		struct spi_message *mesg)
 {
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
-	struct spi_transfer *tfr;
+	struct spi_transfer *xfer;
 	struct spi_device *spi = mesg->spi;
-	int err = 0;
-	unsigned int timeout;
+	/* the status */
+	u32 status=0;
 
-	list_for_each_entry(tfr, &mesg->transfers, transfer_list) {
+	/* loop all transfers */
+	list_for_each_entry(xfer, &mesg->transfers, transfer_list) {
+	}
+
+	/* wait for us to get woken up again after the transfer */
+        if (wait_for_completion_timeout(
+                        &bs->done,
+                        msecs_to_jiffies(SPI_TIMEOUT_MS)) == 0) {
+		dev_err(&master->dev,"DMA transfer timed out\n");
+		status=-ETIMEDOUT;
+	}
+
+	/* set the status */
+	mesg->status=status;
+
+	/* write the debug message information */
+	if (unlikely(debug_msg)) {
+		/* some statistics */
+		u32 transfers=0;
+		u32 transfers_len=0;
+		u32 transfers_tx_len=0;
+		u32 transfers_rx_len=0;
+		/* first general */
+		dev_info(&spi->dev,"SPI message:\n");
+		printk(KERN_DEBUG " msg.status         = %i\n",mesg->status);
+		printk(KERN_DEBUG "    .actual_length  = %i\n",mesg->actual_length);
+		printk(KERN_DEBUG "    .is_dma_mapped  = %i\n",mesg->is_dma_mapped);
+		printk(KERN_DEBUG "    .complete       = %pf\n",mesg->complete);
+		printk(KERN_DEBUG "    .context        = %pK\n",mesg->context);
+		/* now iterate over list again */
+		list_for_each_entry(xfer, &mesg->transfers, transfer_list) {
+			/* first some stats */
+			transfers++;
+			transfers_len+=xfer->len;
+			if (xfer->tx_buf)
+				transfers_tx_len+=xfer->len;
+			if (xfer->rx_buf)
+				transfers_rx_len+=xfer->len;
+			/* now write out details for this transfer */
+			printk(KERN_DEBUG " xfer[%02i].len           = %i\n",transfers,xfer->len);
+			printk(KERN_DEBUG "         .speed_hz      = %i\n",xfer->speed_hz);
+			printk(KERN_DEBUG "         .delay_usecs   = %i\n",xfer->delay_usecs);
+			printk(KERN_DEBUG "         .cs_change     = %i\n",xfer->cs_change);
+			printk(KERN_DEBUG "         .bits_per_word = %i\n",xfer->bits_per_word);
+			printk(KERN_DEBUG "         .tx_buf        = %pK\n",xfer->tx_buf);
+			printk(KERN_DEBUG "         .tx_dma        = %08x\n",xfer->tx_dma);
+			if (xfer->tx_buf) {
+				print_hex_dump(KERN_DEBUG,
+					"         .tx_data       = ",
+					DUMP_PREFIX_ADDRESS,
+					32,4,
+					xfer->tx_buf,
+					xfer->len,
+					false
+					);
+			}
+			printk(KERN_DEBUG "         .rx_buf        = %pK\n",xfer->rx_buf);
+			printk(KERN_DEBUG "         .rx_dma        = %08x\n",xfer->rx_dma);
+			if (xfer->rx_buf) {
+				print_hex_dump(KERN_DEBUG,
+					"         .rx_data       = ",
+					DUMP_PREFIX_ADDRESS,
+					32,4,
+					xfer->rx_buf,
+					xfer->len,
+					false
+					);
+			}
+		}
+		/* the statistics - only after the fact - to avoid unecessary debugging statistics code in the default path */
+		printk(KERN_DEBUG " msg.transfers      = %i\n",transfers);
+		printk(KERN_DEBUG "    .total_len      = %i\n",transfers_len);
+		printk(KERN_DEBUG "    .tx_length      = %i\n",transfers_tx_len);
+		printk(KERN_DEBUG "    .rx_length      = %i\n",transfers_rx_len);
 	}
 
 	/* finalize message */
 	spi_finalize_current_message(master);
-
-	return 0;
+	/* and return */
+	return status;
 }
 
 #ifdef CONFIG_MACH_BCM2708
@@ -240,26 +384,7 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 		goto out_master_put;
 	}
 
-	bs->irq = irq_of_parse_and_map(pdev->dev.of_node, 0);
-#ifdef CONFIG_MACH_BCM2708
-	if (bs->irq <= 0) {
-		bs->irq=platform_get_irq(pdev, 0);
-	}
-#endif
-	if (bs->irq <= 0) {
-		dev_err(&pdev->dev, "could not get IRQ: %d\n", bs->irq);
-		err = bs->irq ? bs->irq : -ENODEV;
-		goto out_master_put;
-	}
-
 	clk_prepare_enable(bs->clk);
-
-	err = request_irq(bs->irq, bcm2835dma_spi_interrupt, 0,
-			dev_name(&pdev->dev), master);
-	if (err) {
-		dev_err(&pdev->dev, "could not request IRQ: %d\n", err);
-		goto out_clk_disable;
-	}
 
 #ifdef CONFIG_MACH_BCM2708
 	/* configure pin function for SPI */
@@ -273,13 +398,11 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 	err = spi_register_master(master);
 	if (err) {
 		dev_err(&pdev->dev, "could not register SPI master: %d\n", err);
-		goto out_free_irq;
+		goto out_clk_disable;
 	}
 
 	return 0;
 
-out_free_irq:
-	free_irq(bs->irq, master);
 out_clk_disable:
 	clk_disable_unprepare(bs->clk);
 out_master_put:
@@ -292,7 +415,6 @@ static int bcm2835dma_spi_remove(struct platform_device *pdev)
 	struct spi_master *master = platform_get_drvdata(pdev);
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 
-	free_irq(bs->irq, master);
 	spi_unregister_master(master);
 
 	/* Clear FIFOs, and disable the HW block */
