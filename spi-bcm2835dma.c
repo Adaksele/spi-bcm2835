@@ -73,18 +73,20 @@
 #define BCM2835_SPI_TIMEOUT_MS	30000
 #define BCM2835_SPI_MODE_BITS	(SPI_CPOL | SPI_CPHA | SPI_CS_HIGH | SPI_NO_CS)
 
-#define BCM2835_SPI_NUM_CS          3
+#define BCM2835_SPI_NUM_CS	3
 
 #define DRV_NAME	"spi-bcm2835dma"
+
+static bool realtime = 1;
+module_param(realtime, bool, 0);
+MODULE_PARM_DESC(realtime, "Run the driver with realtime priority");
 
 struct bcm2835dma_spi {
 	void __iomem *regs;
 	struct clk *clk;
 	int irq;
 	struct completion done;
-	const u8 *tx_buf;
-	u8 *rx_buf;
-	int len;
+	u32 cs_device_flags_idle;
 	u32 cs_device_flags[BCM2835_SPI_NUM_CS];
 };
 
@@ -98,156 +100,16 @@ static inline void bcm2835dma_wr(struct bcm2835dma_spi *bs, unsigned reg, u32 va
 	writel(val, bs->regs + reg);
 }
 
-static inline void bcm2835dma_rd_fifo(struct bcm2835dma_spi *bs, int len)
-{
-	u8 byte;
-
-	while (len--) {
-		byte = bcm2835dma_rd(bs, BCM2835_SPI_FIFO);
-		if (bs->rx_buf)
-			*bs->rx_buf++ = byte;
-	}
-}
-
-static inline void bcm2835dma_wr_fifo(struct bcm2835dma_spi *bs, int len)
-{
-	u8 byte;
-
-	if (len > bs->len)
-		len = bs->len;
-
-	while (len--) {
-		byte = bs->tx_buf ? *bs->tx_buf++ : 0;
-		bcm2835dma_wr(bs, BCM2835_SPI_FIFO, byte);
-		bs->len--;
-	}
-}
-
-static irqreturn_t bcm2835dma_spi_interrupt(int irq, void *dev_id)
-{
+static irqreturn_t bcm2835dma_spi_interrupt(int irq, void *dev_id) {
 	struct spi_master *master = dev_id;
-	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
-	u32 cs = bcm2835dma_rd(bs, BCM2835_SPI_CS);
+	struct bcm2835_spi *bs = spi_master_get_devdata(master);
 
-	/*
-	 * RXR - RX needs Reading. This means 12 (or more) bytes have been
-	 * transmitted and hence 12 (or more) bytes have been received.
-	 *
-	 * The FIFO is 16-bytes deep. We check for this interrupt to keep the
-	 * FIFO full; we have a 4-byte-time buffer for IRQ latency. We check
-	 * this before DONE (TX empty) just in case we delayed processing this
-	 * interrupt for some reason.
-	 *
-	 * We only check for this case if we have more bytes to TX; at the end
-	 * of the transfer, we ignore this pipelining optimization, and let
-	 * bcm2835dma_spi_finish_transfer() drain the RX FIFO.
-	 */
-	if (bs->len && (cs & BCM2835_SPI_CS_RXR)) {
-		/* Read 12 bytes of data */
-		bcm2835dma_rd_fifo(bs, 12);
 
-		/* Write up to 12 bytes */
-		bcm2835dma_wr_fifo(bs, 12);
-
-		/*
-		 * We must have written something to the TX FIFO due to the
-		 * bs->len check above, so cannot be DONE. Hence, return
-		 * early. Note that DONE could also be set if we serviced an
-		 * RXR interrupt really late.
-		 */
-		return IRQ_HANDLED;
-	}
-
-	/*
-	 * DONE - TX empty. This occurs when we first enable the transfer
-	 * since we do not pre-fill the TX FIFO. At any other time, given that
-	 * we refill the TX FIFO above based on RXR, and hence ignore DONE if
-	 * RXR is set, DONE really does mean end-of-transfer.
-	 */
-	if (cs & BCM2835_SPI_CS_DONE) {
-		if (bs->len) { /* First interrupt in a transfer */
-			bcm2835dma_wr_fifo(bs, 16);
-		} else { /* Transfer complete */
-			/* Disable SPI interrupts */
-			cs &= ~(BCM2835_SPI_CS_INTR | BCM2835_SPI_CS_INTD);
-			bcm2835dma_wr(bs, BCM2835_SPI_CS, cs);
-
-			/*
-			 * Wake up bcm2835_spi_transfer_one(), which will call
-			 * bcm2835_spi_finish_transfer(), to drain the RX FIFO.
-			 */
-			complete(&bs->done);
-		}
-
-		return IRQ_HANDLED;
-	}
-
-	return IRQ_NONE;
+	
+	return IRQ_HANDLED;
 }
 
-static int bcm2835dma_spi_start_transfer(struct spi_device *spi,
-		struct spi_transfer *tfr)
-{
-	struct bcm2835dma_spi *bs = spi_master_get_devdata(spi->master);
-	unsigned long spi_hz, clk_hz, cdiv;
-	u32 cs = BCM2835_SPI_CS_INTR | BCM2835_SPI_CS_INTD | BCM2835_SPI_CS_TA;
-
-	spi_hz = tfr->speed_hz;
-	clk_hz = clk_get_rate(bs->clk);
-
-	if (spi_hz >= clk_hz / 2) {
-		cdiv = 2; /* clk_hz/2 is the fastest we can go */
-	} else if (spi_hz) {
-		/* CDIV must be a power of two */
-		cdiv = roundup_pow_of_two(DIV_ROUND_UP(clk_hz, spi_hz));
-
-		if (cdiv >= 65536)
-			cdiv = 0; /* 0 is the slowest we can go */
-	} else
-		cdiv = 0; /* 0 is the slowest we can go */
-
-	/* take cs from the precalculated version */
-	cs |= bs->cs_device_flags[spi->chip_select];
-
-	INIT_COMPLETION(bs->done);
-	bs->tx_buf = tfr->tx_buf;
-	bs->rx_buf = tfr->rx_buf;
-	bs->len = tfr->len;
-
-	bcm2835dma_wr(bs, BCM2835_SPI_CLK, cdiv);
-	/*
-	 * Enable the HW block. This will immediately trigger a DONE (TX
-	 * empty) interrupt, upon which we will fill the TX FIFO with the
-	 * first TX bytes. Pre-filling the TX FIFO here to avoid the
-	 * interrupt doesn't work:-(
-	 */
-	bcm2835dma_wr(bs, BCM2835_SPI_CS, cs);
-
-	return 0;
-}
-
-static int bcm2835dma_spi_finish_transfer(struct spi_device *spi,
-		struct spi_transfer *tfr, bool cs_change)
-{
-	struct bcm2835dma_spi *bs = spi_master_get_devdata(spi->master);
-	u32 cs = bcm2835dma_rd(bs, BCM2835_SPI_CS);
-
-	/* Drain RX FIFO */
-	while (cs & BCM2835_SPI_CS_RXD) {
-		bcm2835dma_rd_fifo(bs, 1);
-		cs = bcm2835dma_rd(bs, BCM2835_SPI_CS);
-	}
-
-	if (tfr->delay_usecs)
-		udelay(tfr->delay_usecs);
-
-	if (cs_change)
-		/* Clear TA flag */
-		bcm2835dma_wr(bs, BCM2835_SPI_CS, cs & ~BCM2835_SPI_CS_TA);
-
-	return 0;
-}
-
+/* most likley we will need to move away from the transfer_one at a time approach, if we want to pipeline the Transfers.. */
 static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 		struct spi_message *mesg)
 {
@@ -256,67 +118,72 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 	struct spi_device *spi = mesg->spi;
 	int err = 0;
 	unsigned int timeout;
-	bool cs_change;
 
 	list_for_each_entry(tfr, &mesg->transfers, transfer_list) {
-		err = bcm2835dma_spi_start_transfer(spi, tfr);
-		if (err)
-			goto out;
-
-		timeout = wait_for_completion_timeout(&bs->done,
-				msecs_to_jiffies(BCM2835_SPI_TIMEOUT_MS));
-		if (!timeout) {
-			err = -ETIMEDOUT;
-			goto out;
-		}
-
-		cs_change = tfr->cs_change ||
-			list_is_last(&tfr->transfer_list, &mesg->transfers);
-
-		err = bcm2835dma_spi_finish_transfer(spi, tfr, cs_change);
-		if (err)
-			goto out;
-
-		mesg->actual_length += (tfr->len - bs->len);
 	}
 
-out:
-	/* Clear FIFOs, and disable the HW block */
-	bcm2835dma_wr(bs, BCM2835_SPI_CS,
-		   BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX);
-	mesg->status = err;
+	/* finalize message */
 	spi_finalize_current_message(master);
 
 	return 0;
 }
 
+#ifdef CONFIG_MACH_BCM2708
+static void bcm2835dma_spi_init_pinmode(void) {
+	/* taken from spi-bcm2708.c, where it says: */
+/*
+ * This function sets the ALT mode on the SPI pins so that we can use them with
+ * the SPI hardware.
+ *
+ * FIXME: This is a hack. Use pinmux / pinctrl.
+ */
+	/* maybe someone has an Idea how to fix this... */
+#define INP_GPIO(g) *(gpio+((g)/10)) &= ~(7<<(((g)%10)*3))
+#define SET_GPIO_ALT(g,a) *(gpio+(((g)/10))) |= (((a)<=3?(a)+4:(a)==4?3:2)<<(((g)%10)*3))
+
+	int pin;
+	u32 *gpio = ioremap(0x20200000, SZ_16K);
+
+	/* SPI is on GPIO 7..11 */
+	for (pin = 7; pin <= 11; pin++) {
+		INP_GPIO(pin);		/* set mode to GPIO input first */
+		SET_GPIO_ALT(pin, 0);	/* set mode to ALT 0 */
+	}
+
+	iounmap(gpio);
+
+#undef INP_GPIO
+#undef SET_GPIO_ALT
+}
+#endif
+
 static int bcm2835dma_spi_setup(struct spi_device *spi) {
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(spi->master);
 	u8 cs = spi->chip_select;
 	u32 mode = spi->mode;
-	bs->cs_device_flags[0]=0;
 
 	/* fill in cs flags based on device configs*/
 	if (!(mode & SPI_NO_CS)) {
 		/* if we are not configured with CS_HIGH */
-                if (mode & SPI_CS_HIGH) {
+		if (mode & SPI_CS_HIGH) {
 			int i;
 			/* fill in the flags for all devices */
-			for (i=0;i<BCM2835_SPI_NUM_CS;i++) {
-				bs->cs_device_flags[i] |= BCM2835_SPI_CS_CSPOL0 << spi->chip_select;
+			for (i=0;i<=BCM2835_SPI_NUM_CS;i++) {
+				bs->cs_device_flags[i] |= BCM2835_SPI_CS_CSPOL0 << cs;
 			}
+			/* the idle mode as well */
+			bs->cs_device_flags_idle |= BCM2835_SPI_CS_CSPOL0 << cs;
 			/* and the specific flag for this device */
 			bs->cs_device_flags[cs] |= BCM2835_SPI_CS_CSPOL;
 		}
-		bs->cs_device_flags[cs]|=spi->chip_select;
+		bs->cs_device_flags[cs] |= spi->chip_select;
 	}
 	/* and set up the other stuff */ 
 	if (mode & SPI_CPOL)
 		bs->cs_device_flags[cs] |= BCM2835_SPI_CS_CPOL;
 	if (mode & SPI_CPHA)
 		bs->cs_device_flags[cs] |= BCM2835_SPI_CS_CPHA;
-	/* so from now on we "only" need to take care about speed 
-	 * bs->cs_device_flags[spi->chip_select] can get used for cs */
+	/* we could fail this device here immediately for 8 bit */
 	return 0;
 }
 
@@ -337,11 +204,16 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 
 	master->mode_bits = BCM2835_SPI_MODE_BITS;
 	master->bits_per_word_mask = BIT(8 - 1);
+#ifdef CONFIG_MACH_BCM2708
 	master->bus_num = pdev->id;
+#else
+	master->bus_num = -1;
+#endif
 	master->num_chipselect = BCM2835_SPI_NUM_CS;
+	master->setup = bcm2835dma_spi_setup;
 	master->transfer_one_message = bcm2835dma_spi_transfer_one;
 	master->dev.of_node = pdev->dev.of_node;
-	master->setup = bcm2835dma_spi_setup;
+	master->rt = realtime;
 
 	bs = spi_master_get_devdata(master);
 
@@ -354,9 +226,10 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 		goto out_master_put;
 	}
 
-	bs->regs = devm_ioremap_resource(&pdev->dev, res);
-	if (IS_ERR(bs->regs)) {
-		err = PTR_ERR(bs->regs);
+	bs->regs = devm_request_and_ioremap(&pdev->dev, res);
+	if (!bs->regs) {
+		dev_err(&pdev->dev, "could not request/map memory region\n");
+		err = -ENODEV;
 		goto out_master_put;
 	}
 
@@ -367,9 +240,12 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 		goto out_master_put;
 	}
 
-	if (!(bs->irq=platform_get_irq(pdev, 0))) {
-		bs->irq = irq_of_parse_and_map(pdev->dev.of_node, 0);
+	bs->irq = irq_of_parse_and_map(pdev->dev.of_node, 0);
+#ifdef CONFIG_MACH_BCM2708
+	if (bs->irq <= 0) {
+		bs->irq=platform_get_irq(pdev, 0);
 	}
+#endif
 	if (bs->irq <= 0) {
 		dev_err(&pdev->dev, "could not get IRQ: %d\n", bs->irq);
 		err = bs->irq ? bs->irq : -ENODEV;
@@ -384,6 +260,11 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "could not request IRQ: %d\n", err);
 		goto out_clk_disable;
 	}
+
+#ifdef CONFIG_MACH_BCM2708
+	/* configure pin function for SPI */
+	bcm2835dma_spi_init_pinmode();
+#endif
 
 	/* initialise the hardware */
 	bcm2835dma_wr(bs, BCM2835_SPI_CS,
@@ -426,17 +307,18 @@ static int bcm2835dma_spi_remove(struct platform_device *pdev)
 
 static const struct of_device_id bcm2835dma_spi_match[] = {
 	{ .compatible = "brcm,bcm2835-spi", },
-	{ .compatible = "brcm,bcm2708-spi", },
 	{}
 };
 MODULE_DEVICE_TABLE(of, bcm2835dma_spi_match);
 
 /* and "normal" aliases */
+#ifdef CONFIG_MACH_BCM2708
 static const struct platform_device_id bcm2835dma_id_table[] = {
-        { "bcm2835_spi",  2835 },
-        { "bcm2708_spi",  2708 },
+        { "bcm2835_spi", 2835 },
+        { "bcm2708_spi", 2708 },
         { },
 };
+#endif
 
 static struct platform_driver bcm2835dma_spi_driver = {
 	.driver		= {
@@ -446,7 +328,9 @@ static struct platform_driver bcm2835dma_spi_driver = {
 	},
 	.probe		= bcm2835dma_spi_probe,
 	.remove		= bcm2835dma_spi_remove,
-	.id_table       = bcm2835dma_id_table,
+#ifdef CONFIG_MACH_BCM2708
+        .id_table = bcm2835dma_id_table,
+#endif
 };
 module_platform_driver(bcm2835dma_spi_driver);
 

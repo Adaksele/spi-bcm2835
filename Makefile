@@ -5,6 +5,7 @@ PWD := $(shell pwd)
 
 all:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
+	cp spi-bcm2835dma.c $(KDIR)/drivers/spi
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
