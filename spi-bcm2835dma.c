@@ -35,6 +35,7 @@
 #include <linux/of_irq.h>
 #include <linux/of_device.h>
 #include <linux/spi/spi.h>
+#include <linux/dmapool.h>
 
 /* SPI register offsets */
 #define BCM2835_SPI_CS			0x00
@@ -89,6 +90,7 @@ MODULE_PARM_DESC(realtime, "Run the driver with message debugging enabled");
 static bool debug_dma = 0;
 module_param(debug_dma, bool, 0);
 MODULE_PARM_DESC(realtime, "Run the driver with dma debugging enabled");
+
 
 /* the layout of the DMA register itself - use writel/readl for it to work correctly */
 struct bcm2835_dma_regs {
@@ -158,6 +160,67 @@ struct bcm2835dma_dma_cb {
 	/* finally there is the pointer to the corresponding SPI message - used for callbacks,... */
 	struct spi_message* msg;
 };
+
+
+/* the following are in need of a rewrite to get them use the
+   linux-dma-manager instead */
+#include <mach/dma.h>
+static void bcm2835dma_release_dma(struct platform_device *pdev,
+			struct bcm2835dma_spi_dma *d)
+{
+	struct spi_master *master = platform_get_drvdata(pdev);
+	if (!d->base)
+                return;
+	if (d->irq)
+		free_irq(d->irq,master);
+        bcm_dma_chan_free(d->chan);
+        d->base = NULL;
+        d->chan = 0;
+        d->irq = 0;
+}
+
+static int bcm2835dma_allocate_dma(struct platform_device *pdev,
+                                struct bcm2835dma_spi_dma *d,
+				irq_handler_t handler
+	)
+{
+	struct spi_master *master = platform_get_drvdata(pdev);
+        int ret;
+	/* fill in defaults */
+	d->base=NULL;
+	d->chan=0;
+	d->irq=0;
+        /* register DMA channel */
+        ret = bcm_dma_chan_alloc(BCM_DMA_FEATURE_FAST, (void**)&d->base, &d->irq);
+        if (ret < 0) {
+		d->base=NULL;
+		d->chan=0;
+		d->irq=0;
+                dev_err(&pdev->dev, "couldn't allocate a DMA channel\n");
+                return ret;
+        }
+        d->chan = ret;
+        dev_info(&pdev->dev, "DMA channel %d at address %pK with irq %d and handler at %pf\n",
+                d->chan, d->base, d->irq,handler);
+	/* and the irq handler */
+	if (handler) {
+		ret = request_irq(d->irq,
+				handler,
+				0,
+				dev_name(&pdev->dev),
+				master);
+		if (ret) {
+			dev_err(&pdev->dev, "could not request IRQ: %d\n", d->irq);
+			bcm2835dma_release_dma(pdev,d);
+			return ret;
+		}
+	} else {
+		/* clear irq, as we do not use it */
+		d->irq=0;
+	}
+        return 0;
+}
+
 
 static void spi_print_debug_message(struct spi_message *mesg,u32 max_dump_len)
 {
@@ -435,6 +498,30 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 
 	clk_prepare_enable(bs->clk);
 
+	/* allocate DMA */
+	if ((err=bcm2835dma_allocate_dma(pdev,&bs->dma_tx,NULL))) {
+		goto out_release_dma;
+	}
+	if ((err=bcm2835dma_allocate_dma(pdev,&bs->dma_rx,NULL))) {
+		goto out_release_dma;
+	}
+
+	/* allocate pool */
+	bs->pool=dma_pool_create(
+                DRV_NAME "_dmapool",
+                &pdev->dev,
+                sizeof(struct bcm2835dma_dma_cb),
+                64, 
+                0 
+                );
+	if (!bs->pool) {
+		dev_err(&pdev->dev, "could not allocate memory pool\n");
+		err = -ENOMEM;
+		goto out_clk_disable;
+	}
+	/* allocate some pages from pool for "standard" pages */
+
+
 #ifdef CONFIG_MACH_BCM2708
 	/* configure pin function for SPI */
 	bcm2835dma_spi_init_pinmode();
@@ -447,11 +534,16 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 	err = spi_register_master(master);
 	if (err) {
 		dev_err(&pdev->dev, "could not register SPI master: %d\n", err);
-		goto out_clk_disable;
+		goto out_release_pool;
 	}
 
 	return 0;
-
+out_release_pool:
+	dma_pool_destroy(bs->pool);
+        bs->pool=NULL;
+out_release_dma:
+	bcm2835dma_release_dma(pdev,&bs->dma_tx);
+	bcm2835dma_release_dma(pdev,&bs->dma_rx);
 out_clk_disable:
 	clk_disable_unprepare(bs->clk);
 out_master_put:
@@ -466,6 +558,10 @@ static int bcm2835dma_spi_remove(struct platform_device *pdev)
 
 	spi_unregister_master(master);
 
+	/* release pool - also releases all objects */
+	dma_pool_destroy(bs->pool);
+        bs->pool=NULL;
+	
 	/* Clear FIFOs, and disable the HW block */
 	bcm2835dma_wr(bs, BCM2835_SPI_CS,
 		   BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX);
