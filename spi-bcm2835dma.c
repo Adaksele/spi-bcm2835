@@ -97,7 +97,7 @@ struct bcm2835_dma_regs {
 	/* the dma control registers */
 	u32 cs;
 	dma_addr_t addr;
-	u32 ti;
+	u32 info;
 	dma_addr_t src;
 	dma_addr_t dst;
 	u32 len;
@@ -143,20 +143,17 @@ struct bcm2835dma_dma_cb {
 	u32 length;
 	u32 stride;
 	dma_addr_t next;
-	u32 pad[2];
-	/* the list of control-blocks*/
+	u32 pad[2]; /* can possibly use/abuse it */
+	/* the list of control-blocks used primarily for later cleanup */
 	struct list_head cb_list;
-	/* the physical address */
-	dma_addr_t self;
-	/* some locally allocated data - the rules are as follows:
-	   if length<=8 and we point tho the pointer with src/dst, then it is "embedded"
-	   otherwise the pointer to the data is taken from the pointer
-	   and if it is not allocated from the pool, then it is NULL
-	*/
-	void *src_ptr;u32 src_pad;
-	void *dst_ptr;u32 dst_pad;
-	/* finally there is the pointer to the corresponding SPI message - used for callbacks,... */
+	/* the physical address of this controlblock*/
+	dma_addr_t bus_addr;
+	/* the pointer to the corresponding SPI message - used for callbacks,... - only for the last part of the transaction*/
 	struct spi_message* msg;
+	/* the dma to which this belongs - note that we may not need this*/
+	struct bcm2835dma_spi_dma* dma;
+	/* some locally allocated data - for some short transfers of up to 12 bytes -either source or destination - not both !!! */
+	u32 data[3];
 };
 
 /* the following are in need of a rewrite to get them use the
@@ -221,79 +218,170 @@ static int bcm2835dma_allocate_dma(struct platform_device *pdev,
         return 0;
 }
 
-static void __bcm2835dma_dump_dmacb(void *base) {
-        printk(KERN_DEBUG "        .info    = %08x\n",readl(base+0x00));
-        printk(KERN_DEBUG "        .src     = %08x\n",readl(base+0x04));
-        printk(KERN_DEBUG "        .dst     = %08x\n",readl(base+0x08));
-        printk(KERN_DEBUG "        .length  = %08x\n",readl(base+0x0c));
-        printk(KERN_DEBUG "        .stride  = %08x\n",readl(base+0x10));
-        printk(KERN_DEBUG "        .next    = %08x\n",readl(base+0x14));
+static struct bcm2835dma_dma_cb *bcm2835dma_add_cb(struct bcm2835dma_spi *bs,
+						struct bcm2835dma_spi_dma *dma,
+						struct list_head *list,
+						struct spi_message * msg,
+						unsigned long info,
+						dma_addr_t src,
+						dma_addr_t dst,
+						unsigned long length,
+						unsigned long stride,
+						u8 link_to_last)
+{
+	dma_addr_t bus_addr;
+        struct bcm2835dma_dma_cb *cb;
+	/* first a sanity check */
+	if ((src==-1)&&(dst==-1)) {
+		/* src AND dst set to -1, is not supported - why would we need that anyway? */
+		printk(KERN_ERR " control block that set source and destination is not supported\n");
+		return NULL;
+	}
+
+	/* first allocate structure ans clear it */
+	cb=dma_pool_alloc(bs->pool,GFP_KERNEL,&bus_addr);
+        if (!cb) {
+		printk(KERN_ERR " could not allocate from memory pool");
+                return NULL;
+	}
+	memset(cb,0,sizeof(*cb));
+
+
+	/* see if we need to calculate the address for src/dst in case the value is set to -1 */
+	if (length<=sizeof(cb->data)) {
+		if (src==-1)
+			src=bus_addr+offsetof(struct bcm2835dma_dma_cb,data);
+		if (dst==-1)
+			dst=bus_addr+offsetof(struct bcm2835dma_dma_cb,data);
+	}
+
+	/* assign the values */
+	/* the control block itself */
+        cb->info=info;
+        cb->src=src;
+        cb->dst=dst;
+        cb->length=length;
+        cb->stride=stride;
+        cb->next=0;
+	/* our extra data */
+	INIT_LIST_HEAD(&cb->cb_list);
+	cb->bus_addr=bus_addr;
+	cb->msg=msg;
+	cb->dma=dma;
+	/* and chain this control-block to the last one */
+	if ((link_to_last)&&(!list_empty(list))) {
+		/* get last cb */
+		struct bcm2835dma_dma_cb *last
+			= list_entry(
+				list->prev,
+				struct bcm2835dma_dma_cb,
+				cb_list
+			);
+		/* and chain this control block to it */
+		last->next=bus_addr;
+	}
+	/* and add to list at the end*/
+	if (list) {
+		list_add_tail(&cb->cb_list,list);
+	}
+	/* and return */
+	return cb;
 }
+
+static void bcm2835dma_release_cb(struct bcm2835dma_spi *bs,struct bcm2835dma_dma_cb *cb)
+{
+	/* remove from list */
+	list_del(&cb->cb_list);
+	/* and release the pointer */
+	dma_pool_free(bs->pool,cb,cb->bus_addr);
+}
+
+static void bcm2835dma_release_cb_chain(struct bcm2835dma_spi *bs, struct bcm2835dma_spi_dma *dma) {
+	while(!list_empty(&dma->cb_list)) {
+		struct bcm2835dma_dma_cb *first
+			=list_entry(
+				dma->cb_list.next,
+				struct bcm2835dma_dma_cb,
+				cb_list
+				);
+		bcm2835dma_release_cb(bs,first);
+	}
+}
+
+static void __bcm2835dma_dump_dmacb(void *base) {
+	u32 stride;
+        printk(KERN_DEBUG "        .info      = %08x\n",readl(base+0x00));
+        printk(KERN_DEBUG "        .src       = %08x\n",readl(base+0x04));
+        printk(KERN_DEBUG "        .dst       = %08x\n",readl(base+0x08));
+        printk(KERN_DEBUG "        .length    = %08x\n",readl(base+0x0c));
+	stride=readl(base+0x10);
+        printk(KERN_DEBUG "        .stride    = %08x\n",stride);
+	if (stride) {
+		printk(KERN_DEBUG "        .stridesrc = %08x\n",stride&0xffff);
+		printk(KERN_DEBUG "        .stridedst = %08x\n",stride>>16);
+	}
+        printk(KERN_DEBUG "        .next      = %08x\n",readl(base+0x14));
+}
+
 static void bcm2835dma_dump_dma(struct bcm2835dma_spi_dma* dma,u32 max_dump_len)
 {
 	int count=0;
-	void* data;
 	struct bcm2835dma_dma_cb *cb;
 	/* start with a common header */
-	printk(KERN_DEBUG " DMA[%2s].base    = %pK\n",dma->desc,dma->base);
-	printk(KERN_DEBUG "        .channel = %i\n",dma->chan);
-	printk(KERN_DEBUG "        .irq     = %i\n",dma->irq);
-	printk(KERN_DEBUG "        .handler = %pf\n",dma->handler);
-        printk(KERN_DEBUG "        .status  = %08x\n",readl(&dma->base->cs));
-        printk(KERN_DEBUG "        .cbaddr  = %08x\n",readl(&dma->base->addr));
-	__bcm2835dma_dump_dmacb(&dma->base->ti);
-        printk(KERN_DEBUG "        .debug   = %08x\n",readl(&dma->base->debug));
+	printk(KERN_DEBUG " DMA[%2s].base      = %pK\n",dma->desc,dma->base);
+	printk(KERN_DEBUG "          .channel = %i\n",dma->chan);
+	printk(KERN_DEBUG "          .irq     = %i\n",dma->irq);
+	printk(KERN_DEBUG "          .handler = %pf\n",dma->handler);
+        printk(KERN_DEBUG "          .status  = %08x\n",readl(&dma->base->cs));
+        printk(KERN_DEBUG "          .cbaddr  = %08x\n",readl(&dma->base->addr));
+	__bcm2835dma_dump_dmacb(&dma->base->info);
+        printk(KERN_DEBUG "          .debug   = %08x\n",readl(&dma->base->debug));
 
 	/* and also dump the scheduled Control Blocks */
 	list_for_each_entry(cb, &dma->cb_list,cb_list) {
-		u32 dump_len=(cb->length<max_dump_len)?cb->length:max_dump_len;
 		count++;
                 /* dump this cb */
                 printk(KERN_DEBUG " CB[%02i].base     = %pK\n",count,cb);
-                printk(KERN_DEBUG "       .bus-addr = %08x\n",cb->self);
+                printk(KERN_DEBUG "       .bus_addr = %08x\n",cb->bus_addr);
                 printk(KERN_DEBUG "       .msg      = %pK\n",cb->msg);
 		__bcm2835dma_dump_dmacb(cb);
                 printk(KERN_DEBUG "       .pad0     = %08x\n",cb->pad[0]);
                 printk(KERN_DEBUG "       .pad1     = %08x\n",cb->pad[1]);
 		/* and dump the tx-data itself if we have allocated it locally*/
-		if ((cb->length<=8)&&(cb->src==cb->self+offsetof(struct bcm2835dma_dma_cb,src_ptr))) {
-			/* if we store it in the structure itself */
-			data=&cb->src_ptr;
-		} else {
-			/* we use the pointer */
-			data=cb->src_ptr;
-		}
-		/* and print only if we got the pointer */
-		if (data) {
-			print_hex_dump(KERN_DEBUG,
-				"       .src_data       = ",
-				DUMP_PREFIX_ADDRESS,
-				32,4,
-				data,
-				dump_len,
-				false
-				);
-		}
-		/* and dump the rx-data itself if we have allocated it locally*/
-		if ((cb->length<=8)&&(cb->src==cb->self+offsetof(struct bcm2835dma_dma_cb,dst_ptr))) {
-			/* if we store it in the structure itself */
-			data=&cb->dst_ptr;
-		} else {
-			/* we use the pointer */
-			data=cb->dst_ptr;
-		}
-		/* and print only if we got the pointer */
-		if (data) {
-			print_hex_dump(KERN_DEBUG,
-				"       .dst_data       = ",
-				DUMP_PREFIX_ADDRESS,
-				32,4,
-				data,
-				dump_len,
-				false
-				);
+		if (cb->length<=sizeof(cb->data)) {
+			if (cb->src==cb->bus_addr+offsetof(struct bcm2835dma_dma_cb,data)) {
+				print_hex_dump(KERN_DEBUG,
+					"       .src_data       = ",
+					DUMP_PREFIX_ADDRESS,
+					32,4,
+					cb->data,
+					cb->length,
+					false
+					);
+			}
+			if (cb->dst==cb->bus_addr+offsetof(struct bcm2835dma_dma_cb,data)) {
+				print_hex_dump(KERN_DEBUG,
+					"       .dst_data       = ",
+					DUMP_PREFIX_ADDRESS,
+					32,4,
+					cb->data,
+					cb->length,
+					false
+					);
+			}
 		}
 	}
+}
+
+static void bcm2835dma_dump_spi(struct spi_master* master) {
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+        printk(KERN_DEBUG"  SPI-REGS:\n");
+        printk(KERN_DEBUG"    SPI-CS:   %08x\n",readl(bs->regs + BCM2835_SPI_CS));
+        /* do NOT read FIFO - even for Debug - it may produce hickups with DMA!!! */
+        printk(KERN_DEBUG"    SPI-CLK:  %08x\n",readl(bs->regs + BCM2835_SPI_CLK));
+        printk(KERN_DEBUG"    SPI-DLEN: %08x\n",readl(bs->regs + BCM2835_SPI_DLEN));
+        printk(KERN_DEBUG"    SPI-LOTH: %08x\n",readl(bs->regs + BCM2835_SPI_LTOH));
+        printk(KERN_DEBUG"    SPI-DC:   %08x\n",readl(bs->regs + BCM2835_SPI_DC));
 }
 
 static void spi_print_debug_message(struct spi_message *mesg,u32 max_dump_len)
@@ -374,6 +462,11 @@ static irqreturn_t bcm2835dma_spi_interrupt(int irq, void *dev_id) {
 	struct spi_master *master = dev_id;
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 
+	/* write interrupt message to debug */ 
+	printk(KERN_DEBUG "Interrupt %i triggered...\n",irq);
+
+	/* we potentially need to clean the IRQ flag as well*/
+
 	/* wake up task */
 	complete(&bs->done);
 
@@ -437,6 +530,7 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 
 	/* if debugging dma, then dump what we got */
 	if (unlikely(debug_dma)) {
+		bcm2835dma_dump_spi(master);
 		dev_info(&master->dev,"DMA status:\n");
 		bcm2835dma_dump_dma(&bs->dma_tx,32);
 		bcm2835dma_dump_dma(&bs->dma_rx,32);
@@ -447,7 +541,14 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
                         &bs->done,
                         msecs_to_jiffies(SPI_TIMEOUT_MS)) == 0) {
 		dev_err(&master->dev,"DMA transfer timed out\n");
+		/* and set the error status and goto the exit code */
 		status=-ETIMEDOUT;
+	}
+	if (status || unlikely(debug_dma)) {
+		bcm2835dma_dump_spi(master);
+		dev_info(&master->dev,"DMA status:\n");
+		bcm2835dma_dump_dma(&bs->dma_tx,32);
+		bcm2835dma_dump_dma(&bs->dma_rx,32);
 	}
 
 	/* set the status - before we run the debug code and before we finalize the message */
@@ -458,6 +559,10 @@ error_exit:
 	if (unlikely(debug_msg)) {
 		spi_print_debug_message(mesg,128);
 	}
+
+	/* release the control block chains */
+	bcm2835dma_release_cb_chain(bs, &bs->dma_tx);
+	bcm2835dma_release_cb_chain(bs, &bs->dma_rx);
 
 	/* finalize message */
 	spi_finalize_current_message(master);
@@ -583,7 +688,7 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 	if ((err=bcm2835dma_allocate_dma(pdev,&bs->dma_tx,NULL,"tx"))) {
 		goto out_release_dma;
 	}
-	if ((err=bcm2835dma_allocate_dma(pdev,&bs->dma_rx,NULL,"rx"))) {
+	if ((err=bcm2835dma_allocate_dma(pdev,&bs->dma_rx,bcm2835dma_spi_interrupt,"rx"))) {
 		goto out_release_dma;
 	}
 
