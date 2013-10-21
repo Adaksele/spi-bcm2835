@@ -439,14 +439,20 @@ static void bcm2835dma_add_to_dma_schedule(struct spi_master *master,struct bcm2
 }
 
 static void __bcm2835dma_dump_dmacb(void *base) {
-	u32 stride;
-        printk(KERN_DEBUG "        .info     = %08x\n",readl(base+0x00));
+	u32 stride,info,length;
+	info=readl(base+0x00);
+        printk(KERN_DEBUG "        .info     = %08x\n",info);
         printk(KERN_DEBUG "        .src      = %08x\n",readl(base+0x04));
         printk(KERN_DEBUG "        .dst      = %08x\n",readl(base+0x08));
-        printk(KERN_DEBUG "        .length   = %08x\n",readl(base+0x0c));
+	length=readl(base+0x0c);
+        printk(KERN_DEBUG "        .length   = %08x\n",length);
 	stride=readl(base+0x10);
         printk(KERN_DEBUG "        .stride   = %08x\n",stride);
-	if (stride) {
+	if (info&BCM2708_DMA_TDMODE) {
+		printk(KERN_DEBUG "        .stridelen= %i (%i * %i)\n",
+			(length>>16)*(length&0xffff),
+			(length>>16),(length&0xffff)
+			);		
 		printk(KERN_DEBUG "        .stridesrc= %i\n",(s16)(stride&0xffff));
 		printk(KERN_DEBUG "        .stridedst= %i\n",(s16)(stride>>16));
 	}
@@ -467,10 +473,9 @@ static void bcm2835dma_dump_dma(struct bcm2835dma_spi_dma* dma,u32 max_dump_len)
         printk(KERN_DEBUG "        .cbaddr   = %08x\n",readl(&dma->base->addr));
 	__bcm2835dma_dump_dmacb(&dma->base->info);
         printk(KERN_DEBUG "        .debug    = %08x\n",readl(&dma->base->debug));
-
 	/* and also dump the scheduled Control Blocks */
 	list_for_each_entry(cb, &dma->cb_list,cb_list) {
-		u32 length=(cb->info|BCM2708_DMA_TDMODE)?(cb->length>>16)*(cb->length&0xffff):cb->length;
+		u32 length=(cb->info&BCM2708_DMA_TDMODE)?(cb->length>>16)*(cb->length&0xffff):cb->length;
 		count++;
                 /* dump this cb */
                 printk(KERN_DEBUG "  CB[%02i].base     = %pK\n",count,cb);
@@ -481,7 +486,7 @@ static void bcm2835dma_dump_dma(struct bcm2835dma_spi_dma* dma,u32 max_dump_len)
                 printk(KERN_DEBUG "        .pad1     = %08x\n",cb->pad[1]);
                 printk(KERN_DEBUG "        .flags    = %08x\n",cb->flags);
                 printk(KERN_DEBUG "        .msg      = %pK\n",cb->msg);
-                printk(KERN_DEBUG "        .dma      = %pK\n",cb->dma);
+                printk(KERN_DEBUG "        .dma_info = %pK - %s\n",cb->dma,cb->dma->desc);		
 		/* and dump the rx/tx-data itself if we have allocated it locally*/
 		if (length<=sizeof(cb->data)) {
 			if (cb->src==cb->bus_addr+offsetof(struct bcm2835dma_dma_cb,data)) {
@@ -618,6 +623,7 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 	struct spi_device *spi = mesg->spi;
 	struct list_head cb_tx_list, cb_rx_list;
 	struct bcm2835dma_dma_cb* cb;
+	int transfers=0;
 	/* the status */
 	u32 status=0;
 	/* the default cs and speed values*/
@@ -639,6 +645,7 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 		/* calculate cdiv */
 		u32 speed_hz=(xfer->speed_hz)?xfer->speed_hz:spi->max_speed_hz;
 		u32 cdiv=2; /* by default the max is half the BUS speed */
+		transfers++;
 		if (speed_hz*2<clk_hz) {
 			if (speed_hz) {
 				cdiv=DIV_ROUND_UP(clk_hz,speed_hz);
@@ -663,7 +670,25 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 		cs|=
 			BCM2835_SPI_CS_TA     /* enable transfer */
 			|BCM2835_SPI_CS_DMAEN /* enable DMA */
+			/* unfortunately it seems as if there is some missmatch between the SOC documentation and what the HW actually does
+			 * fact is that DMA transfers do NOT work without having BCM2835_SPI_CS_ADCS set.
+			 * the CS AND MOSI go low, but the clock does NOT start - no feedback so far if this is an errata or similar...
+			 * 
+			 * so we need to do a little bit of workarround to get what we want
+			 * parts of it is:
+			 * setting BCM2835_SPI_CS_ADCS
+			 * using the reserved CS - probably unsupported, but it works
+			 * and modifying CS by "changeing polarity" of the one we really use
+			 */
+			| BCM2835_SPI_CS_ADCS
+			| BCM2835_SPI_CS_CS_10
+			| BCM2835_SPI_CS_CS_01
 			;
+		/* and we toggle the bit CSPOL0/1/2 according to the Chip-select we actually use */
+		if (spi->chip_select<3) {
+			cs^=(BCM2835_SPI_CS_CSPOL0<<spi->chip_select);
+		}
+		cs|=BCM2835_SPI_CS_CSPOL0|BCM2835_SPI_CS_CSPOL1|BCM2835_SPI_CS_CSPOL2;
 		/* if the values have changed, then set them - we may want to consolidate both into one transfer with strides */
 		if (cdiv!=last_cdiv) {
 			/* configure cdiv via DMA */
@@ -759,28 +784,14 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 						BCM2835_SPI_BASE_BUS+BCM2835_SPI_FIFO, /* the SPI address in bus-address */
 						rx_addr,
 						xfer->len,
-						0,1); /* stride 0, link to last */
+						0,0); /* stride 0, don't link to last */
 			if (!rx_dma_cb) {
 				status=-ENOMEM;
 				goto error_exit;
 			}
-			/* and we need to schedule ourself from the TX queue */
-			cb=bcm2835dma_add_cb(bs,&bs->dma_tx,&cb_tx_list,mesg,
-					BCM2708_DMA_WAIT_RESP|BCM2708_DMA_TDMODE,
-					-1, /* take our source */
-					bs->dma_rx.bus_addr+4, /* the DMA Address of the RX buffer */
-					(2<<16)|(4), /* 2 transfers of 4 bytes each */
-					(0xfffc0004), /* 2D stride - Decrement Destination by 4, increment Source by 4 */
-					1); 
-			cb->data[0]=rx_dma_cb->bus_addr;
-			cb->data[1]=BCM2708_DMA_ACTIVE;
-			if (!cb) {
-				status=-ENOMEM;
-				goto error_exit;
-			}
-
 			/* so let us set up the TX queue, which is more complex */
 			/* first configure number of bytes and flags for this transfer */
+#if 0
 			cb=bcm2835dma_add_cb(bs,&bs->dma_tx,&cb_tx_list,NULL,
 					tx_info,
 					-1,
@@ -792,14 +803,43 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 				goto error_exit;
 			}
 			cb->data[0]=xfer->len<<16|(cs&0xff);
-			
-			/* and set up the DMA of the real transfer */
+#else
+			cb=bcm2835dma_add_cb(bs,&bs->dma_tx,&cb_tx_list,NULL,
+					tx_info,
+					-1,
+					BCM2835_SPI_BASE_BUS+BCM2835_SPI_DLEN, /* the SPI address in bus-address */
+					4,
+					0,1); /*length 4, stride 0, link to last */
+			if (!cb) {
+				status=-ENOMEM;
+				goto error_exit;
+			}
+			cb->data[0]=xfer->len;
+#endif
+			/* and set up the DMA of the real tx-transfer */
 			tx_dma_cb=bcm2835dma_add_cb(bs,&bs->dma_tx,&cb_tx_list,NULL,
 						tx_info,
 						tx_addr,
 						BCM2835_SPI_BASE_BUS+BCM2835_SPI_FIFO, /* the SPI address in bus-address */
 						xfer->len,
 						0,1); /*length 4, stride 0, link to last */
+#if 0
+			/* and we need to schedule this RX-DMA from the TX DMA queue */
+			cb=bcm2835dma_add_cb(bs,&bs->dma_tx,&cb_tx_list,mesg,
+					BCM2708_DMA_WAIT_RESP|BCM2708_DMA_TDMODE,
+					-1, /* take our source */
+					bs->dma_rx.bus_addr+4, /* the DMA Address of the RX buffer */
+					(2<<16)|(4), /* 2 transfers of 4 bytes each */
+					(0xfffc0004), /* 2D stride - Decrement Destination by 4, increment Source by 4 */
+					1); 
+			if (!cb) {
+				status=-ENOMEM;
+				goto error_exit;
+			}
+			cb->data[0]=rx_dma_cb->bus_addr;
+			cb->data[1]=BCM2708_DMA_ACTIVE;
+#endif
+			
 		}
 		/* add a delay DMA */
 		if (xfer->delay_usecs) {
