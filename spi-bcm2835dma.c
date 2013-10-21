@@ -80,6 +80,25 @@
 
 #define BCM2835_SPI_NUM_CS	3
 
+
+/* some DMA Register */
+#define BCM2835_DMA_INT_EN              (1 << 0)
+#define BCM2835_DMA_TDMODE              (1 << 1)
+#define BCM2835_DMA_WAIT_RESP           (1 << 3)
+#define BCM2835_DMA_D_INC               (1 << 4)
+#define BCM2835_DMA_D_WIDTH             (1 << 5)
+#define BCM2835_DMA_D_DREQ              (1 << 6)
+#define BCM2835_DMA_D_IGNORE            (1 << 7)
+#define BCM2835_DMA_S_INC               (1 << 8)
+#define BCM2835_DMA_S_WIDTH             (1 << 9)
+#define BCM2835_DMA_S_DREQ              (1 <<10)
+#define BCM2835_DMA_S_IGNORE            (1 <<11)
+#define BCM2835_DMA_BURST(x)            (((x)&0xf) << 12)
+#define BCM2835_DMA_PER_MAP(x)          ((x) << 16)
+#define BCM2835_DMA_WAITS(x)            (((x)&0x1f) << 21)
+#define BCM2835_DMA_NO_WIDE_BURSTS      (1 <<26)
+
+
 #define DRV_NAME	"spi-bcm2835dma"
 
 static bool realtime = 1;
@@ -94,6 +113,12 @@ MODULE_PARM_DESC(realtime, "Run the driver with message debugging enabled");
 static bool debug_dma = 0;
 module_param(debug_dma, bool, 0);
 MODULE_PARM_DESC(realtime, "Run the driver with dma debugging enabled");
+
+static int delay_1us = 889;
+module_param(delay_1us, int, 0);
+MODULE_PARM_DESC(delay_1us, "the value we need to use for a 1 us delay via dma transfers ...");
+/* note that this value has some variation - based on other activities happening on the bus...
+   this also adds memory overhead slowing down the whole system when there is lots of memory access ...*/
 
 /* the layout of the DMA register itself - use writel/readl for it to work correctly */
 struct bcm2835_dma_regs {
@@ -626,9 +651,8 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 	int transfers=0;
 	/* the status */
 	u32 status=0;
-	/* the default cs and speed values*/
+	/* the clock speed value we have used before - to detect if we need to change it... */
 	u32 last_cdiv=-1;
-	u32 last_cs=-1;
 	/* the spi bus speed */
 	u32 clk_hz = clk_get_rate(bs->clk);
 
@@ -666,63 +690,22 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 			status=-EINVAL;
 			goto error_exit;
 		}
-		/* calculate the effective cs */
-		cs|=
-			BCM2835_SPI_CS_TA     /* enable transfer */
-			|BCM2835_SPI_CS_DMAEN /* enable DMA */
-			/* unfortunately it seems as if there is some missmatch between the SOC documentation and what the HW actually does
-			 * fact is that DMA transfers do NOT work without having BCM2835_SPI_CS_ADCS set.
-			 * the CS AND MOSI go low, but the clock does NOT start - no feedback so far if this is an errata or similar...
-			 * 
-			 * so we need to do a little bit of workarround to get what we want
-			 * parts of it is:
-			 * setting BCM2835_SPI_CS_ADCS
-			 * using the reserved CS - probably unsupported, but it works
-			 * and modifying CS by "changeing polarity" of the one we really use
-			 */
-			| BCM2835_SPI_CS_ADCS
-			| BCM2835_SPI_CS_CS_10
-			| BCM2835_SPI_CS_CS_01
-			;
-		/* and we toggle the bit CSPOL0/1/2 according to the Chip-select we actually use */
-		if (spi->chip_select<3) {
-			cs^=(BCM2835_SPI_CS_CSPOL0<<spi->chip_select);
-		}
-		cs|=BCM2835_SPI_CS_CSPOL0|BCM2835_SPI_CS_CSPOL1|BCM2835_SPI_CS_CSPOL2;
 		/* if the values have changed, then set them - we may want to consolidate both into one transfer with strides */
 		if (cdiv!=last_cdiv) {
-			/* configure cdiv via DMA */
+			/* configure cdiv,cs via DMA, but disable DMA */
 			cb=bcm2835dma_add_cb(bs,&bs->dma_tx,&cb_tx_list,NULL,
-					BCM2708_DMA_WAIT_RESP,
+					BCM2708_DMA_WAIT_RESP|BCM2708_DMA_TDMODE,
 					-1, /* allocate in object */
 					BCM2835_SPI_BASE_BUS+BCM2835_SPI_CLK, /* the SPI address in bus-address */
-					4,0,1); /*length 4, stride 0, link to last */
+					(2<<16)|(4), /* 2x4 strides */
+					0xfff80004, /* destinateon increment -8, source increment 4 */
+					1); /* link to last */
 			if (!cb) {
 				status=-EINVAL;
 				goto error_exit;
 			}
 			cb->data[0]=cdiv;
-			/* if we are changing also cs, then use stride */
-			if (cs!=last_cs) {
-				/* change it to 8 bytes and 2D Strides */
-				cb->length=(2<<16)+(4); /* 2 transfers of 4 bytes each */
-				cb->info|=BCM2708_DMA_TDMODE;
-				cb->stride=(0xfff80004); /* 2D stride - Decrement Destination by 8 (skipping FIFO), increment Source by 4 */
-				/* and set the cs value */
-				cb->data[1]=cs;
-			}
-		} else if (cs!=last_cs) {
-			/* configure cs via DMA */
-			cb=bcm2835dma_add_cb(bs,&bs->dma_tx,&cb_tx_list,NULL,
-					BCM2708_DMA_WAIT_RESP,
-					-1, /* allocate in object */
-					BCM2835_SPI_BASE_BUS+BCM2835_SPI_CS, /* the SPI address in bus-address */
-					4,0,1); /*length 4, stride 0, link to last */
-			if (!cb) {
-				status=-EINVAL;
-				goto error_exit;
-			}
-			cb->data[0]=cs;
+			cb->data[1]=cs|BCM2835_SPI_CS_TA;     /* enable transfer */
 		}
 		/* now "programm" the transfer  if the length is NOT NULL...
 		   - this might become "tricky" with transfers that cross page boundries and pages are not necessarily adjactunt on the bus
@@ -790,32 +773,22 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 				goto error_exit;
 			}
 			/* so let us set up the TX queue, which is more complex */
-			/* first configure number of bytes and flags for this transfer */
-#if 0
+			/* set dlen+cs via DMA 
+			   - this avoids the bug in the HW respective CS settings 
+			   - an that at minimal extra overhead: 2 AIX transfers not one! */
 			cb=bcm2835dma_add_cb(bs,&bs->dma_tx,&cb_tx_list,NULL,
-					tx_info,
-					-1,
-					BCM2835_SPI_BASE_BUS+BCM2835_SPI_FIFO, /* the SPI address in bus-address */
-					4,
-					0,1); /*length 4, stride 0, link to last */
-			if (!cb) {
-				status=-ENOMEM;
-				goto error_exit;
-			}
-			cb->data[0]=xfer->len<<16|(cs&0xff);
-#else
-			cb=bcm2835dma_add_cb(bs,&bs->dma_tx,&cb_tx_list,NULL,
-					tx_info,
-					-1,
+					BCM2708_DMA_WAIT_RESP|BCM2708_DMA_TDMODE,
+					-1, /* allocate in object */
 					BCM2835_SPI_BASE_BUS+BCM2835_SPI_DLEN, /* the SPI address in bus-address */
-					4,
-					0,1); /*length 4, stride 0, link to last */
+					(2<<16)+(4),
+					0xfff40004, /* -12 on DST, +4 on SRC */
+					1); /*length 4, stride 0, link to last */
 			if (!cb) {
-				status=-ENOMEM;
+				status=-EINVAL;
 				goto error_exit;
 			}
 			cb->data[0]=xfer->len;
-#endif
+			cb->data[1]=cs|BCM2835_SPI_CS_TA|BCM2835_SPI_CS_DMAEN; /* enable DMA + Transfer */
 			/* and set up the DMA of the real tx-transfer */
 			tx_dma_cb=bcm2835dma_add_cb(bs,&bs->dma_tx,&cb_tx_list,NULL,
 						tx_info,
@@ -823,7 +796,6 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 						BCM2835_SPI_BASE_BUS+BCM2835_SPI_FIFO, /* the SPI address in bus-address */
 						xfer->len,
 						0,1); /*length 4, stride 0, link to last */
-#if 0
 			/* and we need to schedule this RX-DMA from the TX DMA queue */
 			cb=bcm2835dma_add_cb(bs,&bs->dma_tx,&cb_tx_list,mesg,
 					BCM2708_DMA_WAIT_RESP|BCM2708_DMA_TDMODE,
@@ -838,16 +810,40 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 			}
 			cb->data[0]=rx_dma_cb->bus_addr;
 			cb->data[1]=BCM2708_DMA_ACTIVE;
-#endif
-			
 		}
 		/* add a delay DMA */
 		if (xfer->delay_usecs) {
-			/* need to handle a delay */
+			/* we may want to add it here as well in case we reach the end of the transfer */
+			cb=bcm2835dma_add_cb(bs,&bs->dma_rx,&cb_rx_list,NULL,
+					BCM2835_DMA_WAIT_RESP|BCM2835_DMA_WAITS(0x1f)|BCM2835_DMA_NO_WIDE_BURSTS
+					|BCM2835_DMA_S_IGNORE|BCM2835_DMA_D_IGNORE,
+					bs->buffer_read_0xff.bus_addr,
+					bs->buffer_write_dummy.bus_addr,
+					0,
+					0,1); /*length 4, stride 0, link to last */
+			if (!cb) {
+				status=-EINVAL;
+				goto error_exit;
+			}
+			/* now assign the delay - this is taken from an empirical value.
+			   this seems to have a jitter of about 1% (when measuring in the 1ms delay range) 
+			   bigger below, because the initial ControlBlock needs to get loaded as well, adding some overhead
+			*/
+			cb->length=xfer->delay_usecs*delay_1us;
 		}
-		/* if CS change is requested, then add it by shortly disabling TX */
+		/* if CS change is requested, then add it by shortly setting the "idle_flags" */
 		if ((xfer->cs_change)||is_last) {
 			/* we may want to add it here as well in case we reach the end of the transfer */
+			cb=bcm2835dma_add_cb(bs,&bs->dma_rx,&cb_rx_list,NULL,
+					BCM2708_DMA_WAIT_RESP,
+					-1, /* allocate in object */
+					BCM2835_SPI_BASE_BUS+BCM2835_SPI_CS, /* the SPI address in bus-address */
+					4,0,1); /*length 4, stride 0, link to last */
+			if (!cb) {
+				status=-EINVAL;
+				goto error_exit;
+			}
+			cb->data[0]=bs->cs_device_flags_idle;
 		}
 
 		/* we also need to add a link to TX again, as TX-DMA is stopped when we have finished */
@@ -855,7 +851,6 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 
 		/* set the "old" values to the current ones */
 		last_cdiv=cdiv;
-		last_cs=cs;
 	}
 	/* disable CS */
 
