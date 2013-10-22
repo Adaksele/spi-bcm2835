@@ -82,23 +82,44 @@
 
 
 /* some DMA Register */
-#define BCM2835_DMA_INT_EN              (1 << 0)
-#define BCM2835_DMA_TDMODE              (1 << 1)
-#define BCM2835_DMA_WAIT_RESP           (1 << 3)
-#define BCM2835_DMA_D_INC               (1 << 4)
-#define BCM2835_DMA_D_WIDTH             (1 << 5)
-#define BCM2835_DMA_D_DREQ              (1 << 6)
-#define BCM2835_DMA_D_IGNORE            (1 << 7)
-#define BCM2835_DMA_S_INC               (1 << 8)
-#define BCM2835_DMA_S_WIDTH             (1 << 9)
-#define BCM2835_DMA_S_DREQ              (1 <<10)
-#define BCM2835_DMA_S_IGNORE            (1 <<11)
-#define BCM2835_DMA_BURST(x)            (((x)&0xf) << 12)
-#define BCM2835_DMA_PER_MAP(x)          ((x) << 16)
-#define BCM2835_DMA_WAITS(x)            (((x)&0x1f) << 21)
-#define BCM2835_DMA_NO_WIDE_BURSTS      (1 <<26)
 
+/* the control registers */
+#define BCM2835_DMA_INT_EN				(1 << 0)
+#define BCM2835_DMA_TDMODE				(1 << 1)
+/* bit 2: reserved */
+#define BCM2835_DMA_WAIT_RESP				(1 << 3)
+#define BCM2835_DMA_D_INC				(1 << 4)
+#define BCM2835_DMA_D_WIDTH				(1 << 5)
+#define BCM2835_DMA_D_DREQ				(1 << 6)
+#define BCM2835_DMA_D_IGNORE				(1 << 7)
+#define BCM2835_DMA_S_INC				(1 << 8)
+#define BCM2835_DMA_S_WIDTH				(1 << 9)
+#define BCM2835_DMA_S_DREQ				(1 <<10)
+#define BCM2835_DMA_S_IGNORE				(1 <<11)
+#define BCM2835_DMA_BURST(x)				(((x)&0x0f) <<12)
+#define BCM2835_DMA_PER_MAP(x)				(((x)&0x1f) <<16)
+#define BCM2835_DMA_WAITS(x)				(((x)&0x1f) <<21)
+#define BCM2835_DMA_NO_WIDE_BURSTS			(1 <<26)
+/* bit 27-31: reserved */
 
+/* the status registers */
+#define BCM2835_DMA_ACTIVE				(1 << 0)
+#define BCM2835_DMA_END					(1 << 1)
+#define BCM2835_DMA_INT					(1 << 2)
+#define BCM2835_DMA_DREQ				(1 << 3)
+#define BCM2835_DMA_ISPAUSED				(1 << 4)
+#define BCM2835_DMA_ISHELD				(1 << 5)
+#define BCM2835_DMA_WAITING_FOR_OUTSTANDING_WRITES	(1 << 6)
+/* bit 7: reserved */
+#define BCM2835_DMA_ERR					(1 << 8)
+/* bit 9-15: reserved */
+#define BCM2835_DMA_PRIORITY(x)				(((x)&0x0f) <<16)
+#define BCM2835_DMA_PANICPRIORITY(x)			(((x)&0x0f) <<20)
+/* bit 24-27: reserved */
+#define BCM2835_DMA_WAIT_FOR_OUTSTANDING_WRITES		(1 <<28)
+#define BCM2835_DMA_DISDEBUG				(1 <<29)
+#define BCM2835_DMA_ABORT				(1 <<30)
+#define BCM2835_DMA_RESET				(1 <<31)
 #define DRV_NAME	"spi-bcm2835dma"
 
 static bool realtime = 1;
@@ -242,7 +263,7 @@ static int bcm2835dma_allocate_dma(struct platform_device *pdev,
         dev_info(&pdev->dev, "DMA channel %d at address %pK with irq %d and handler at %pf\n",
                 d->chan, d->base, d->irq,handler);
 	/* and reset the DMA */
-	writel(BCM2708_DMA_RESET,&(d->base->cs));
+	writel(BCM2835_DMA_RESET,&(d->base->cs));
 	/* and the irq handler */
 	if (handler) {
 		ret = request_irq(d->irq,
@@ -280,7 +301,7 @@ static struct bcm2835dma_dma_cb *bcm2835dma_add_cb(struct bcm2835dma_spi *bs,
 {
 	dma_addr_t bus_addr;
         struct bcm2835dma_dma_cb *cb;
-	u32 length2d=(info|BCM2708_DMA_TDMODE)?(length>>16)*(length&0xffff):length;
+	u32 length2d=(info|BCM2835_DMA_TDMODE)?(length>>16)*(length&0xffff):length;
 	/* first a sanity check */
 	if ((src==-1)&&(dst==-1)) {
 		/* src AND dst set to -1, is not supported - why would we need that anyway? */
@@ -389,8 +410,8 @@ static void bcm2835dma_add_to_dma_list(struct spi_master *master,struct bcm2835d
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	/* this may need some locking - especially in the case we move away from transfer_one_message to get higher truput */
 	/* check if dma is running */
-        unsigned long state_tx=readl(&bs->dma_tx.base->cs)&BCM2708_DMA_ACTIVE;
-        unsigned long state_rx=readl(&bs->dma_rx.base->cs)&BCM2708_DMA_ACTIVE;	
+        unsigned long state_tx=readl(&bs->dma_tx.base->cs)&BCM2835_DMA_ACTIVE;
+        unsigned long state_rx=readl(&bs->dma_rx.base->cs)&BCM2835_DMA_ACTIVE;	
 	/* clean the existing queues if nothing is running */
 	if (!(state_rx|state_tx)) {
 		/* maybe we need to check twice here, just to be sure? - we leave it for now */
@@ -449,7 +470,7 @@ static void bcm2835dma_add_to_dma_schedule(struct spi_master *master,struct bcm2
 			|
 			readl(&bs->dma_rx.base->cs)
 			)
-		& BCM2708_DMA_ACTIVE
+		& BCM2835_DMA_ACTIVE
 		) {
 		dev_err(&master->dev,"A still running DMA is currently not supported...\n");
 		return;
@@ -460,7 +481,7 @@ static void bcm2835dma_add_to_dma_schedule(struct spi_master *master,struct bcm2
 	/* memory barrier to sync to RAM - not cache */
 	dsb();
 	/* and start DMA */
-	writel(BCM2708_DMA_ACTIVE,&(dma->base->cs));
+	writel(BCM2835_DMA_ACTIVE,&(dma->base->cs));
 }
 
 static void __bcm2835dma_dump_dmacb(void *base) {
@@ -473,7 +494,7 @@ static void __bcm2835dma_dump_dmacb(void *base) {
         printk(KERN_DEBUG "        .length   = %08x\n",length);
 	stride=readl(base+0x10);
         printk(KERN_DEBUG "        .stride   = %08x\n",stride);
-	if (info&BCM2708_DMA_TDMODE) {
+	if (info&BCM2835_DMA_TDMODE) {
 		printk(KERN_DEBUG "        .stridelen= %i (%i * %i)\n",
 			(length>>16)*(length&0xffff),
 			(length>>16),(length&0xffff)
@@ -500,7 +521,7 @@ static void bcm2835dma_dump_dma(struct bcm2835dma_spi_dma* dma,u32 max_dump_len)
         printk(KERN_DEBUG "        .debug    = %08x\n",readl(&dma->base->debug));
 	/* and also dump the scheduled Control Blocks */
 	list_for_each_entry(cb, &dma->cb_list,cb_list) {
-		u32 length=(cb->info&BCM2708_DMA_TDMODE)?(cb->length>>16)*(cb->length&0xffff):cb->length;
+		u32 length=(cb->info&BCM2835_DMA_TDMODE)?(cb->length>>16)*(cb->length&0xffff):cb->length;
 		count++;
                 /* dump this cb */
                 printk(KERN_DEBUG "  CB[%02i].base     = %pK\n",count,cb);
@@ -694,7 +715,7 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 		if (cdiv!=last_cdiv) {
 			/* configure cdiv,cs via DMA, but disable DMA */
 			cb=bcm2835dma_add_cb(bs,&bs->dma_tx,&cb_tx_list,NULL,
-					BCM2708_DMA_WAIT_RESP|BCM2708_DMA_TDMODE,
+					BCM2835_DMA_WAIT_RESP|BCM2835_DMA_TDMODE,
 					-1, /* allocate in object */
 					BCM2835_SPI_BASE_BUS+BCM2835_SPI_CLK, /* the SPI address in bus-address */
 					(2<<16)|(4), /* 2x4 strides */
@@ -714,14 +735,14 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 		if (xfer->len>0) {
 		/* we take the naive approach for now - no segmenting, but then this would make life with CS harder... */
 			u32 rx_info =
-				BCM2708_DMA_PER_MAP(7)            /* DREQ 7 = SPI RX in PERMAP */
-				| BCM2708_DMA_S_DREQ              /* source DREQ trigger */
+				BCM2835_DMA_PER_MAP(7)            /* DREQ 7 = SPI RX in PERMAP */
+				| BCM2835_DMA_S_DREQ              /* source DREQ trigger */
 				;
 			struct bcm2835dma_dma_cb* rx_dma_cb=NULL;
 			dma_addr_t rx_addr=0;
 			u32 tx_info =
-				BCM2708_DMA_PER_MAP(6)              /* DREQ 6 = SPI TX in PERMAP */
-				| BCM2708_DMA_D_DREQ               /* destination DREQ trigger */
+				BCM2835_DMA_PER_MAP(6)              /* DREQ 6 = SPI TX in PERMAP */
+				| BCM2835_DMA_D_DREQ               /* destination DREQ trigger */
 				;
 			struct bcm2835dma_dma_cb* tx_dma_cb=NULL;
 			dma_addr_t tx_addr=0;
@@ -739,7 +760,7 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 						NULL);
 					/* todo: error-handling */
 				}
-				rx_info|=BCM2708_DMA_D_INC;
+				rx_info|=BCM2835_DMA_D_INC;
 			} else {
 				rx_addr=bs->buffer_write_dummy.bus_addr;
 			}
@@ -756,7 +777,7 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 						NULL);
 					/* todo: error-handling */
 				}
-				tx_info|=BCM2708_DMA_S_INC;
+				tx_info|=BCM2835_DMA_S_INC;
 			} else {
 				tx_addr=bs->buffer_read_0xff.bus_addr;
 			}
@@ -777,7 +798,7 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 			   - this avoids the bug in the HW respective CS settings 
 			   - an that at minimal extra overhead: 2 AIX transfers not one! */
 			cb=bcm2835dma_add_cb(bs,&bs->dma_tx,&cb_tx_list,NULL,
-					BCM2708_DMA_WAIT_RESP|BCM2708_DMA_TDMODE,
+					BCM2835_DMA_WAIT_RESP|BCM2835_DMA_TDMODE,
 					-1, /* allocate in object */
 					BCM2835_SPI_BASE_BUS+BCM2835_SPI_DLEN, /* the SPI address in bus-address */
 					(2<<16)+(4),
@@ -798,7 +819,7 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 						0,1); /*length 4, stride 0, link to last */
 			/* and we need to schedule this RX-DMA from the TX DMA queue */
 			cb=bcm2835dma_add_cb(bs,&bs->dma_tx,&cb_tx_list,mesg,
-					BCM2708_DMA_WAIT_RESP|BCM2708_DMA_TDMODE,
+					BCM2835_DMA_WAIT_RESP|BCM2835_DMA_TDMODE,
 					-1, /* take our source */
 					bs->dma_rx.bus_addr+4, /* the DMA Address of the RX buffer */
 					(2<<16)|(4), /* 2 transfers of 4 bytes each */
@@ -809,7 +830,7 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 				goto error_exit;
 			}
 			cb->data[0]=rx_dma_cb->bus_addr;
-			cb->data[1]=BCM2708_DMA_ACTIVE;
+			cb->data[1]=BCM2835_DMA_ACTIVE;
 		}
 		/* add a delay DMA */
 		if (xfer->delay_usecs) {
@@ -835,7 +856,7 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 		if ((xfer->cs_change)||is_last) {
 			/* we may want to add it here as well in case we reach the end of the transfer */
 			cb=bcm2835dma_add_cb(bs,&bs->dma_rx,&cb_rx_list,NULL,
-					BCM2708_DMA_WAIT_RESP,
+					BCM2835_DMA_WAIT_RESP,
 					-1, /* allocate in object */
 					BCM2835_SPI_BASE_BUS+BCM2835_SPI_CS, /* the SPI address in bus-address */
 					4,0,1); /*length 4, stride 0, link to last */
