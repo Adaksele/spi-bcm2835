@@ -121,7 +121,11 @@
 #define BCM2835_DMA_CS_ABORT				(1 <<30)
 #define BCM2835_DMA_CS_RESET				(1 <<31)
 
-#define CALC_LEN_STRIDE(rows,cols,inc_src,inc_dst) (rows<<16|cols),(rows>0)?(((((u32)((int)inc_dest))&0xffff)<<16)|(((u32)((int)inc_src))&0xffff):(0)
+#define CALC_LEN_STRIDE(rows,cols,inc_src,inc_dst) \
+	((rows<<16)|cols),			   \
+		(rows)?\
+		(((((u32)((int)inc_dst))&0xffff)<<16)|(((u32)((int)inc_src))&0xffff)) \
+		:(0)
 
 #define DRV_NAME	"spi-bcm2835dma"
 
@@ -731,8 +735,8 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 					BCM2835_DMA_WAIT_RESP|BCM2835_DMA_TDMODE,
 					-1, /* allocate in object */
 					BCM2835_SPI_BASE_BUS+BCM2835_SPI_CLK, /* the SPI address in bus-address */
-					(2<<16)|(4), /* 2x4 strides */
-					0xfff80004, /* destinateon increment -8, source increment 4 */
+					/* 2x4 byte transfers, source increment 4, destinateon increment -8 */
+					CALC_LEN_STRIDE(2,4,+4,-8),
 					1); /* link to last */
 			if (!cb) {
 				status=-EINVAL;
@@ -811,12 +815,13 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 			   - this avoids the bug in the HW respective CS settings 
 			   - an that at minimal extra overhead: 2 AIX transfers not one! */
 			if (!dma_cb) {
+				
 				dma_cb=bcm2835dma_add_cb(bs,&bs->dma_tx,&cb_tx_list,NULL,
 							BCM2835_DMA_WAIT_RESP|BCM2835_DMA_TDMODE,
 							-1, /* allocate in object */
 							BCM2835_SPI_BASE_BUS+BCM2835_SPI_DLEN, /* the SPI address in bus-address */
-							(2<<16)+(4),
-							0xfff40004, /* -12 on DST, +4 on SRC */
+							/* 2 transfers of 4 bytes, increment Source by 4  Decrement Destination by 12 */
+							CALC_LEN_STRIDE(2,4,+4,-12),
 							1); /*length 4, stride 0, link to last */
 				if (!dma_cb) {
 					status=-EINVAL;
@@ -840,8 +845,8 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 					BCM2835_DMA_WAIT_RESP|BCM2835_DMA_TDMODE,
 					-1, /* take our source */
 					bs->dma_rx.bus_addr+4, /* the DMA Address of the RX buffer */
-					(2<<16)|(4), /* 2 transfers of 4 bytes each */
-					(0xfffc0004), /* 2D stride - Decrement Destination by 4, increment Source by 4 */
+					/* 2 transfers of 4 bytes each, increment Source by 4, Decrement Destination by 4 */
+					CALC_LEN_STRIDE(2,4,+4,-4),
 					1); 
 			if (!cb) {
 				status=-ENOMEM;
@@ -886,6 +891,10 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 			/* we also clean the dma_cb, so that we force a new transfer */
 			/* note that maybe only this + BCM2835_DMA_ADCS might do the magic already */
 			dma_cb=NULL;
+		}
+		/* if the transfer is not mod 4, then we need to reset the DMA - unfortunately */
+		if (xfer->len&0x03) {
+
 		}
 
 		/* we also need to add a link to TX again, as TX-DMA is stopped when we have finished */
