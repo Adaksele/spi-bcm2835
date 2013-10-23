@@ -651,25 +651,295 @@ static inline void bcm2835dma_wr(struct bcm2835dma_spi *bs, unsigned reg, u32 va
 	writel(val, bs->regs + reg);
 }
 
-static irqreturn_t bcm2835dma_spi_interrupt_dma_rx(int irq, void *dev_id) {
+static irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id) 
+{
 	struct spi_master *master = dev_id;
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 
 	/* write interrupt message to debug */ 
-	printk(KERN_DEBUG "Interrupt %i triggered...\n",irq);
+	if (unlikely(debug_dma))
+		printk(KERN_DEBUG "Interrupt %i triggered for message: %08x\n",irq,*((u32*)bs->last_spi_message_finished.addr));
 
 	/* we need to clean the IRQ flag as well 
 	 * otherwise it will trigger again...
 	 * as we are on the READ DMA queue, we should not have an issue setting/clearing WAIT_FOR_OUTSTANDING_WRITES
 	 * and we are not using it for the RX path
 	 */
-	 writel(BCM2835_DMA_CS_INT, bs->dma_rx.base+BCM2708_DMA_CS);
+	 writel(BCM2835_DMA_CS_INT, bs->dma_tx.base+BCM2708_DMA_CS);
 
 	/* wake up task */
 	complete(&bs->done);
 
 	/* and return with the IRQ marked as handled */
 	return IRQ_HANDLED;
+}
+
+static int bcm2835dma_spi_schedule_cdiv_config(struct bcm2835dma_spi *bs, 
+					u32 speed_hz, u32 clk_hz, 
+					struct list_head *cb_tx_list)
+{
+	/* now schedule the cdiv setup */
+	struct bcm2835dma_dma_cb* cb
+		=bcm2835dma_add_cb(bs,&bs->dma_tx,cb_tx_list,NULL,
+				BCM2835_DMA_WAIT_RESP,
+				-1, /* allocate in object */
+				BCM2835_SPI_BASE_BUS+BCM2835_SPI_CLK, /* the SPI address in bus-address */
+				4,0,1); /* 4 bytes, no stride, link with last */
+	if (!cb) 
+		return -ENOMEM;
+	/* and set cdiv default - at half the speed of the bus*/
+	cb->data[0]=2;
+	/* calculate the scaling factor */
+	if (speed_hz*2<clk_hz) {
+		if (speed_hz) {
+			cb->data[0]=DIV_ROUND_UP(clk_hz,speed_hz);
+			/* actually the document says that cdiv must be a power of 2,
+			   but empirically (found out by notro) this is found to be not true, so not included:
+			   cdiv = roundup_pow_of_two(cdiv);
+			*/
+		} else { 
+			cb->data[0]=0;
+		}
+		/* if the ratio is too big, then use the slowest we can go... */
+		if (cb->data[0]>65535) {
+			cb->data[0]=0; /* the slowest we can go */
+		}
+	}
+	return 0;
+}
+static int bcm2835dma_spi_schedule_setup_dma_transfer(struct bcm2835dma_spi *bs,
+						u32 cs,
+						dma_addr_t **link_here,
+						u32 **chain_length,
+						struct list_head *cb_tx_list)
+{
+	/* now schedule the length/cs setup */
+	struct bcm2835dma_dma_cb* cb
+		=bcm2835dma_add_cb(bs,&bs->dma_tx,cb_tx_list,NULL,
+				BCM2835_DMA_WAIT_RESP|BCM2835_DMA_TDMODE,
+				-1, /* allocate in object */
+				BCM2835_SPI_BASE_BUS+BCM2835_SPI_DLEN, /* the SPI address in bus-address */
+				CALC_LEN_STRIDE(2,4,+4,-12),/* 2 transfers of 4 bytes, increase source by 4, decrease destination by 12 */
+				1); /* 4 bytes, no stride, link with last */
+	if (!cb) 
+		return -ENOMEM;
+	/* length */
+	cb->data[0]=0;
+	*chain_length=&cb->data[0];
+	/* and cs - hopefully this works ALL in one go... */
+	cb->data[1]=cs /* the given settings */
+		| BCM2835_SPI_CS_TA /* enable Transfer */
+		| BCM2835_SPI_CS_DMAEN /* enable DMA Transfer*/
+		| BCM2835_SPI_CS_CLEAR_RX /* clear RX buffers */
+		| BCM2835_SPI_CS_CLEAR_TX /* clear TX buffers */
+		;
+	/* and now add the scheduling of RX DMA - the RX dma cb address is a dummy for now, so this will not start the RX DMA */
+	cb=bcm2835dma_add_cb(bs,&bs->dma_tx,cb_tx_list,NULL,
+			BCM2835_DMA_WAIT_RESP|BCM2835_DMA_TDMODE,
+			-1, /* take our source */
+			bs->dma_rx.bus_addr+4, /* the DMA Address of the RX buffer */
+			CALC_LEN_STRIDE(2,4,+4,-4),/* 2 transfers of 4 bytes, increase source by 4, decrease destination by 4 */
+			1); 
+	if (!cb)
+		return -ENOMEM;
+	/* now set up the values for the RX-DMA */
+	cb->data[0]=0;
+	cb->data[1]=BCM2835_DMA_CS_ACTIVE;
+	/* and set the value for the link-address */
+	*link_here=&cb->data[0];
+	/* and return OK */
+	return 0;
+}
+
+static int bcm2835dma_spi_schedule_single_transfer(struct bcm2835dma_spi *bs, 
+						struct spi_master *master,
+						struct spi_transfer* xfer,
+						dma_addr_t *link_here,
+						u32 *chain_length,
+						struct list_head *cb_tx_list,struct list_head *cb_rx_list) 
+{
+	struct bcm2835dma_dma_cb* cb=NULL;
+	/* the rx transfer */
+	u32 rx_info =
+		BCM2835_DMA_PER_MAP(7)            /* DREQ 7 = SPI RX in PERMAP */
+		| BCM2835_DMA_S_DREQ              /* source DREQ trigger */
+		;
+	dma_addr_t rx_addr=0;
+	/* the tx transfer */
+	u32 tx_info =
+		BCM2835_DMA_PER_MAP(6)              /* DREQ 6 = SPI TX in PERMAP */
+		| BCM2835_DMA_D_DREQ               /* destination DREQ trigger */
+		;
+	dma_addr_t tx_addr=0;
+
+	/* map the RX Addresses and set info flags as needed */
+	if (xfer->rx_buf) {
+		if (xfer->rx_dma) {
+			rx_addr=xfer->rx_dma;
+		} else {
+			rx_addr=dma_map_single_attrs(
+				&master->dev,
+				xfer->rx_buf,
+				xfer->len+4,
+				DMA_FROM_DEVICE,
+				NULL);
+			/* todo: error-handling */
+		}
+		rx_info|=BCM2835_DMA_D_INC;
+	} else {
+		rx_addr=bs->buffer_write_dummy.bus_addr;
+	}
+	/* map the TX Addresses and set info flags as needed */
+	if (xfer->tx_buf) {
+		if (xfer->tx_dma) {
+			tx_addr=xfer->tx_dma;
+		} else {
+			tx_addr=dma_map_single_attrs(
+				&master->dev,
+				(void*)xfer->tx_buf,
+				xfer->len,
+				DMA_TO_DEVICE,
+				NULL);
+			/* todo: error-handling */
+		}
+		tx_info|=BCM2835_DMA_S_INC;
+	} else {
+		tx_addr=bs->buffer_read_0xff.bus_addr;
+	}
+
+	/* so let us schedule the TX queue part */
+	cb=bcm2835dma_add_cb(bs,&bs->dma_tx,cb_tx_list,NULL,
+			tx_info,
+			tx_addr,
+			BCM2835_SPI_BASE_BUS+BCM2835_SPI_FIFO, /* the SPI address in bus-address */
+			xfer->len,
+			0,1 /* stride 0, link to last */
+		);
+	if (!cb) 
+		return -ENOMEM;
+	/* so let us schedule the RX queue part */
+	cb=bcm2835dma_add_cb(bs,&bs->dma_rx,cb_rx_list,NULL,
+			rx_info,
+			BCM2835_SPI_BASE_BUS+BCM2835_SPI_FIFO, /* the SPI address in bus-address */
+			rx_addr,
+			xfer->len,
+			0, /* stride 0 */
+			(*link_here)?1:0 /* link to last - depending on if we need to link to the start of the RX-queue */
+		);
+	if (!cb) 
+		return -ENOMEM;
+	/* if we got a pointer to which we should link, then use that */
+	if (!*link_here)
+		*link_here=cb->bus_addr;
+
+	/* and increment the transfer length */
+	*chain_length+=xfer->len;
+	/* and return */
+	return 0;
+}
+
+static int bcm2835dma_spi_schedule_dma_on_tx_plus_delay(struct bcm2835dma_spi *bs,
+					struct list_head *cb_tx_list,struct list_head *cb_rx_list) 
+{
+	struct bcm2835dma_dma_cb *rx_dma_cb,*tx_dma_cb;
+
+	/* add some delay after scheduling - otherwise we stop too early reducing the clock up time - the question is really: how long?*/
+	tx_dma_cb=bcm2835dma_add_cb(bs,&bs->dma_tx,cb_tx_list,NULL,
+				BCM2835_DMA_WAIT_RESP|BCM2835_DMA_WAITS(0x1f)|BCM2835_DMA_NO_WIDE_BURSTS
+				|BCM2835_DMA_S_IGNORE|BCM2835_DMA_D_IGNORE,
+				bs->buffer_read_0xff.bus_addr,
+				bs->buffer_write_dummy.bus_addr,
+				0,0,0);
+	/* assign the delay - this is taken from an empirical value.
+	   we will say about 1/10th of 1us for now - actually we probably should correlate this with the SPI-clock...
+	*/
+	/* tx_dma_cb->length=delay_1us/10; */
+	tx_dma_cb->length=1;
+
+	/* and now add the scheduling of TX DMA - the TX dma cb address is a dummy for now, so this will not start the TX DMA */
+	rx_dma_cb=bcm2835dma_add_cb(bs,&bs->dma_rx,cb_rx_list,NULL,
+				BCM2835_DMA_WAIT_RESP|BCM2835_DMA_TDMODE,
+				-1, /* take our source */
+				bs->dma_tx.bus_addr+4, /* the DMA Address of the TX buffer */
+				CALC_LEN_STRIDE(2,4,+4,-4),/* 2 transfers of 4 bytes, increase source by 4, decrease destination by 4 */
+				1
+		); 
+	if (!rx_dma_cb)
+		return -ENOMEM;
+	/* now set up the values for the RX-DMA */
+	rx_dma_cb->data[0]=tx_dma_cb->bus_addr;
+	rx_dma_cb->data[1]=BCM2835_DMA_CS_ACTIVE;
+	
+	/* and return OK */
+	return 0;
+}
+
+static int bcm2835dma_spi_schedule_delay_usecs(struct bcm2835dma_spi *bs, 
+					u32 delay_usecs,
+					struct list_head *cb_tx_list)
+{
+	struct bcm2835dma_dma_cb* cb;
+	/* schedule a dummy transfer that uses lots of AXI wait cycles */
+	cb=bcm2835dma_add_cb(bs,&bs->dma_tx,cb_tx_list,NULL,
+			BCM2835_DMA_WAIT_RESP|BCM2835_DMA_WAITS(0x1f)|BCM2835_DMA_NO_WIDE_BURSTS
+			|BCM2835_DMA_S_IGNORE|BCM2835_DMA_D_IGNORE,
+			bs->buffer_read_0xff.bus_addr,
+			bs->buffer_write_dummy.bus_addr,
+			0,0,1);
+	if (!cb) 
+		return -ENOMEM;
+	/* now assign the delay - this is taken from an empirical value.
+	   this seems to have a jitter of about 1% (when measuring in the 1ms delay range) 
+	   bigger below, because the initial ControlBlock needs to get loaded as well, adding some overhead
+	*/
+	cb->length=delay_usecs*delay_1us;
+	
+ 	/* and return OK */
+	return 0;
+}
+
+static int bcm2835dma_spi_schedule_cs_change(struct bcm2835dma_spi *bs, 
+					struct list_head *cb_tx_list)
+{
+	struct bcm2835dma_dma_cb* cb;
+	/* schedule a transfer setting CS to the bus-idle state */
+	cb=bcm2835dma_add_cb(bs,&bs->dma_tx,cb_tx_list,NULL,
+			BCM2835_DMA_WAIT_RESP,
+			-1, /* allocate in object */
+			BCM2835_SPI_BASE_BUS+BCM2835_SPI_CS, /* the SPI address in bus-address */
+			4,0,1);
+	if (!cb) 
+		return -ENOMEM;
+	/* now write "shortly" the "idle" state to CS */
+	cb->data[0]=bs->cs_device_flags_idle;
+ 	/* and return OK */
+	return 0;
+}
+static int bcm2835dma_spi_schedule_transfer_end(struct bcm2835dma_spi *bs,
+						struct spi_message* mesg,
+						struct list_head *cb_tx_list)
+{
+	struct bcm2835dma_dma_cb* cb;
+	/* schedule a transfer setting CS to the bus-idle state */
+	cb=bcm2835dma_add_cb(bs,&bs->dma_tx,cb_tx_list,mesg,
+			BCM2835_DMA_WAIT_RESP,
+			-1, /* allocate in object */
+			bs->last_spi_message_finished.bus_addr,
+			4,0,1); /*length 4, stride 0, link to last */
+	if (!cb) 
+		return -ENOMEM;
+	/* now write "shortly" the "idle" state to CS */
+	cb->data[0]=(u32)cb;
+	/* if connection */
+	if (mesg->complete)
+		cb->info|=BCM2835_DMA_INT_EN;
+ 	/* and return OK */
+	return 0;
+}
+static int bcm2835dma_spi_schedule_dma_tail(struct bcm2835dma_spi *bs, 
+					struct list_head *cb_rx_list) 
+{
+	return 0;
 }
 
 /* most likley we will need to move away from the transfer_one at a time approach, if we want to pipeline the Transfers.. */
@@ -679,240 +949,120 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	struct spi_transfer *xfer;
 	struct spi_device *spi = mesg->spi;
+	/* the control-block-lists for rx/tx separately */
 	struct list_head cb_tx_list, cb_rx_list;
-	struct bcm2835dma_dma_cb* cb;
-	int transfers=0;
 	/* the status */
 	u32 status=0;
-	/* the clock speed value we have used before - to detect if we need to change it... */
-	u32 last_cdiv=-1;
 	/* the spi bus speed */
 	u32 clk_hz = clk_get_rate(bs->clk);
-	/* the pointer to the last full control-block that configures dma */
-	struct bcm2835dma_dma_cb *dma_cb=NULL;
+	/* the speed in hz and the last value therof */
+	u32 last_speed_hz=-1,speed_hz=spi->max_speed_hz;
+	/* the pointer to the last length object */
+	u32 *chain_length=NULL;
 
 	/* initialize the temporary lists */
 	INIT_LIST_HEAD(&cb_tx_list);	
 	INIT_LIST_HEAD(&cb_rx_list);	
 
-
-	printk(KERN_DEBUG "=========================================================================\n");
-
-	/* loop all transfers */
+	/* loop all transfers that require changes
+	 * the problem here is that some of those arguments to transfers are:
+	 * requireing a change first: speed_hz (we will ignore that for now )
+	 * while others require a change after there transfer: cs_change, last transfer, delay_usecs, transfers that are not a multiple of 4
+	 */
 	list_for_each_entry(xfer, &mesg->transfers, transfer_list) {
-		/* check if we are the last entry...*/
-		int is_last=list_is_last(&xfer->transfer_list,&mesg->transfers);
-		/* the chip-select and cdiv */
-		u32 cs=bs->cs_device_flags[spi->chip_select];
-		/* calculate cdiv */
-		u32 speed_hz=(xfer->speed_hz)?xfer->speed_hz:spi->max_speed_hz;
-		u32 cdiv=2; /* by default the max is half the BUS speed */
-		transfers++;
-		if (speed_hz*2<clk_hz) {
-			if (speed_hz) {
-				cdiv=DIV_ROUND_UP(clk_hz,speed_hz);
-				/* actually the document says that cdiv must be a power of 2,
-				   but empirically (found out by notro) this is found to be not true, so not included:
-				   cdiv = roundup_pow_of_two(cdiv);
-				*/
-			} else { 
-				cdiv=0;
-			}
-			/* if the ratio is too big, then use the slowest we can go... */
-			if (cdiv>65535)
-				cdiv=0; /* the slowest we can go */
+		dma_addr_t *link_rx_here=0;
+		/* if the speed in hz has changed, then schedule a change */
+		if (xfer->speed_hz)
+			speed_hz=xfer->speed_hz;
+		if (last_speed_hz!=speed_hz) {
+			status=bcm2835dma_spi_schedule_cdiv_config(bs,
+								speed_hz,clk_hz,
+								&cb_tx_list);
+			if (status)
+				goto error_exit;
+			last_speed_hz=speed_hz;
 		}
-		/* check if bits/word have changed */
-		if ((xfer->bits_per_word)&&(xfer->bits_per_word!=8)) {
-			dev_err(&spi->dev,"Unsupported bits/word in transfer config - only 8 bits are allowed!!!");
-			status=-EINVAL;
+		/* first set up RX/TX chains resetting everything */
+		status=bcm2835dma_spi_schedule_setup_dma_transfer(bs,
+								bs->cs_device_flags[spi->chip_select],
+								&link_rx_here,
+								&chain_length,
+								&cb_tx_list);
+		if (status)
 			goto error_exit;
-		}
-		/* if the values have changed, then set them - we may want to consolidate both into one transfer with strides */
-		if (cdiv!=last_cdiv) {
-			/* configure cdiv,cs via DMA, but disable DMA */
-			cb=bcm2835dma_add_cb(bs,&bs->dma_tx,&cb_tx_list,NULL,
-					BCM2835_DMA_WAIT_RESP|BCM2835_DMA_TDMODE,
-					-1, /* allocate in object */
-					BCM2835_SPI_BASE_BUS+BCM2835_SPI_CLK, /* the SPI address in bus-address */
-					/* 2x4 byte transfers, source increment 4, destinateon increment -8 */
-					CALC_LEN_STRIDE(2,4,+4,-8),
-					1); /* link to last */
-			if (!cb) {
-				status=-EINVAL;
+		/* now loop all the transfers that are not different */
+		while (1) {
+			/* schedule the current transfer */
+			struct spi_transfer *next;
+			/* note, that this could become more complex in case
+			 * neighbouring (virtual) kernel-segments not mapping to neighbouring bus-segments
+			 */
+			status=bcm2835dma_spi_schedule_single_transfer(bs,master,
+								xfer,
+								link_rx_here,
+								chain_length,
+								&cb_tx_list,&cb_rx_list);
+			if (status)
 				goto error_exit;
-			}
-			cb->data[0]=cdiv;
-			cb->data[1]=cs|BCM2835_SPI_CS_TA;     /* enable transfer */
+			/* check for inner-loop - exit conditions */
+			/* the condition if the transfer length is NOT a multiple of 4 */
+			if (xfer->len&3)
+				break;			
+			/* the condition if a change of CS is requested (so going up) */
+			if (xfer->cs_change)
+				break;
+			/* the condition if this is the last entry */
+			if (list_is_last(&xfer->transfer_list,&mesg->transfers))
+				break;
+			/* get the next entry - we have already handled the "last" case, and have exited this loop, 
+			   so we can take a peak at the next one without expecting problems...*/
+			next=list_entry(xfer->transfer_list.next,
+				struct spi_transfer,
+				transfer_list
+				);
+			/* and the condition if the next transfer changes speed_hz */
+			if ((next->speed_hz) && (next->speed_hz!=speed_hz))
+				break;
+			/* assign the next one as current in the next loop */
+			xfer=next;
 		}
-		/* now "programm" the transfer  if the length is NOT NULL...
-		   - this might become "tricky" with transfers that cross page boundries and pages are not necessarily adjactunt on the bus
-		   - so we may need to segment the transfer - we will have to see...
-		*/
-		if (xfer->len>0) {
-		/* we take the naive approach for now - no segmenting, but then this would make life with CS harder... */
-			u32 rx_info =
-				BCM2835_DMA_PER_MAP(7)            /* DREQ 7 = SPI RX in PERMAP */
-				| BCM2835_DMA_S_DREQ              /* source DREQ trigger */
-				;
-			struct bcm2835dma_dma_cb* rx_dma_cb=NULL;
-			dma_addr_t rx_addr=0;
-			u32 tx_info =
-				BCM2835_DMA_PER_MAP(6)              /* DREQ 6 = SPI TX in PERMAP */
-				| BCM2835_DMA_D_DREQ               /* destination DREQ trigger */
-				;
-			struct bcm2835dma_dma_cb* tx_dma_cb=NULL;
-			dma_addr_t tx_addr=0;
+		/* ok - end of inner loop */
+		
+		/* now start scheduling next DMA on TX */
+		status=bcm2835dma_spi_schedule_dma_on_tx_plus_delay(bs,
+								&cb_tx_list,&cb_rx_list);
+		if (status)
+			goto error_exit;
 
-			/* map the RX Addresses and set info flags as needed */
-			if (xfer->rx_buf) {
-				if (xfer->rx_dma) {
-					rx_addr=xfer->rx_dma;
-				} else {
-					rx_addr=dma_map_single_attrs(
-						&master->dev,
-						xfer->rx_buf,
-						xfer->len+4,
-						DMA_FROM_DEVICE,
-						NULL);
-					/* todo: error-handling */
-				}
-				rx_info|=BCM2835_DMA_D_INC;
-			} else {
-				rx_addr=bs->buffer_write_dummy.bus_addr;
-			}
-			/* allocate dma mapping if needed */
-			if (xfer->tx_buf) {
-				if (xfer->tx_dma) {
-					tx_addr=xfer->tx_dma;
-				} else {
-					tx_addr=dma_map_single_attrs(
-						&master->dev,
-						(void*)xfer->tx_buf,
-						xfer->len,
-						DMA_TO_DEVICE,
-						NULL);
-					/* todo: error-handling */
-				}
-				tx_info|=BCM2835_DMA_S_INC;
-			} else {
-				tx_addr=bs->buffer_read_0xff.bus_addr;
-			}
-
-			/* so let us set up the RX queue, which is simple */
-			rx_dma_cb=bcm2835dma_add_cb(bs,&bs->dma_rx,&cb_rx_list,NULL,
-						rx_info,
-						BCM2835_SPI_BASE_BUS+BCM2835_SPI_FIFO, /* the SPI address in bus-address */
-						rx_addr,
-						xfer->len,
-						0,0); /* stride 0, don't link to last */
-			if (!rx_dma_cb) {
-				status=-ENOMEM;
-				goto error_exit;
-			}
-			/* so let us set up the TX queue, which is more complex */
-			/* set dlen+cs via DMA 
-			   - this avoids the bug in the HW respective CS settings 
-			   - an that at minimal extra overhead: 2 AIX transfers not one! */
-			if (!dma_cb) {
-				
-				dma_cb=bcm2835dma_add_cb(bs,&bs->dma_tx,&cb_tx_list,NULL,
-							BCM2835_DMA_WAIT_RESP|BCM2835_DMA_TDMODE,
-							-1, /* allocate in object */
-							BCM2835_SPI_BASE_BUS+BCM2835_SPI_DLEN, /* the SPI address in bus-address */
-							/* 2 transfers of 4 bytes, increment Source by 4  Decrement Destination by 12 */
-							CALC_LEN_STRIDE(2,4,+4,-12),
-							1); /*length 4, stride 0, link to last */
-				if (!dma_cb) {
-					status=-EINVAL;
-					goto error_exit;
-				}
-				dma_cb->data[0]=xfer->len;
-				dma_cb->data[1]=cs|BCM2835_SPI_CS_TA|BCM2835_SPI_CS_DMAEN; /* enable DMA + Transfer */
-			} else {
-				/* otherwise just add it */
-				dma_cb->data[0]+=xfer->len;
-			}
-			/* and set up the DMA of the real tx-transfer */
-			tx_dma_cb=bcm2835dma_add_cb(bs,&bs->dma_tx,&cb_tx_list,NULL,
-						tx_info,
-						tx_addr,
-						BCM2835_SPI_BASE_BUS+BCM2835_SPI_FIFO, /* the SPI address in bus-address */
-						xfer->len,
-						0,1); /*length 4, stride 0, link to last */
-			/* and we need to schedule this RX-DMA from the TX DMA queue */
-			cb=bcm2835dma_add_cb(bs,&bs->dma_tx,&cb_tx_list,mesg,
-					BCM2835_DMA_WAIT_RESP|BCM2835_DMA_TDMODE,
-					-1, /* take our source */
-					bs->dma_rx.bus_addr+4, /* the DMA Address of the RX buffer */
-					/* 2 transfers of 4 bytes each, increment Source by 4, Decrement Destination by 4 */
-					CALC_LEN_STRIDE(2,4,+4,-4),
-					1); 
-			if (!cb) {
-				status=-ENOMEM;
-				goto error_exit;
-			}
-			cb->data[0]=rx_dma_cb->bus_addr;
-			cb->data[1]=BCM2835_DMA_CS_ACTIVE;
-		}
-		/* add a delay DMA */
+		/* if we got a delay configured */
 		if (xfer->delay_usecs) {
-			/* we may want to add it here as well in case we reach the end of the transfer */
-			cb=bcm2835dma_add_cb(bs,&bs->dma_rx,&cb_rx_list,NULL,
-					BCM2835_DMA_WAIT_RESP|BCM2835_DMA_WAITS(0x1f)|BCM2835_DMA_NO_WIDE_BURSTS
-					|BCM2835_DMA_S_IGNORE|BCM2835_DMA_D_IGNORE,
-					bs->buffer_read_0xff.bus_addr,
-					bs->buffer_write_dummy.bus_addr,
-					0,
-					0,1); /*length 4, stride 0, link to last */
-			if (!cb) {
-				status=-EINVAL;
+			status=bcm2835dma_spi_schedule_delay_usecs(bs,
+								xfer->delay_usecs,
+								&cb_tx_list);
+			if (status)
 				goto error_exit;
-			}
-			/* now assign the delay - this is taken from an empirical value.
-			   this seems to have a jitter of about 1% (when measuring in the 1ms delay range) 
-			   bigger below, because the initial ControlBlock needs to get loaded as well, adding some overhead
-			*/
-			cb->length=xfer->delay_usecs*delay_1us;
+		} else {
 		}
-		/* if CS change is requested, then add it by shortly setting the "idle_flags" */
-		if ((xfer->cs_change)||is_last) {
-			/* we may want to add it here as well in case we reach the end of the transfer */
-			cb=bcm2835dma_add_cb(bs,&bs->dma_rx,&cb_rx_list,NULL,
-					BCM2835_DMA_WAIT_RESP,
-					-1, /* allocate in object */
-					BCM2835_SPI_BASE_BUS+BCM2835_SPI_CS, /* the SPI address in bus-address */
-					4,0,1); /*length 4, stride 0, link to last */
-			if (!cb) {
-				status=-EINVAL;
+		/* if we got cs_change or an end of transfer */
+		if ((xfer->cs_change)||(list_is_last(&xfer->transfer_list,&mesg->transfers))) {
+			status=bcm2835dma_spi_schedule_cs_change(bs,
+								&cb_tx_list);
+			if (status)
 				goto error_exit;
-			}
-			cb->data[0]=bs->cs_device_flags_idle;
-			/* we also clean the dma_cb, so that we force a new transfer */
-			/* note that maybe only this + BCM2835_DMA_ADCS might do the magic already */
-			dma_cb=NULL;
 		}
-		/* if the transfer is not mod 4, then we need to reset the DMA - unfortunately */
-		if (xfer->len&0x03) {
-
-		}
-
-		/* we also need to add a link to TX again, as TX-DMA is stopped when we have finished */
-		/* TODO */
-
-		/* set the "old" values to the current ones */
-		last_cdiv=cdiv;
 	}
-	/* we now can store the message where we are right now and if needed trigger an interrupt */
-	cb=bcm2835dma_add_cb(bs,&bs->dma_rx,&cb_rx_list,NULL,
-			BCM2835_DMA_WAIT_RESP,
-			-1,
-			bs->last_spi_message_finished.bus_addr,
-			4,0,1); /*length 4, stride 0, link to last */
-	cb->data[0]=(u32)mesg;
-	/* if the message to transfer has a complete code, then trigger an interrupt as well */
-	if (mesg->complete)
-		cb->info|=BCM2835_DMA_INT_EN;
+	/* lastly we need to trigger an interrupt and store where we are at exactly for bookkeeping purposes... */
+	status=bcm2835dma_spi_schedule_transfer_end(bs,
+						mesg,
+						&cb_tx_list);
+	if (status)
+		goto error_exit;
+	/* and we need to set up the dummy-control-block for the next transfer to get easily chained to*/
+	status=bcm2835dma_spi_schedule_dma_tail(bs,
+						&cb_tx_list);
+	if (status)
+		goto error_exit;
+
 
 	/* if debugging dma, then dump what we got so far prior to scheduling */
 	if (unlikely(debug_dma)) {
@@ -954,7 +1104,6 @@ error_exit:
 	bcm2835dma_release_cb_chain(master, &bs->dma_tx);
 	bcm2835dma_release_cb_chain(master, &bs->dma_rx);
 
-	printk(KERN_DEBUG "-------------------------------------------------------------------------\n");
 	/* finalize message */
 	spi_finalize_current_message(master);
 	/* and return */
@@ -1076,10 +1225,10 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 	clk_prepare_enable(bs->clk);
 
 	/* allocate DMA */
-	if ((err=bcm2835dma_allocate_dma(pdev,&bs->dma_tx,NULL,"tx"))) {
+	if ((err=bcm2835dma_allocate_dma(pdev,&bs->dma_tx,bcm2835dma_spi_interrupt_dma_tx,"tx"))) {
 		goto out_release_dma;
 	}
-	if ((err=bcm2835dma_allocate_dma(pdev,&bs->dma_rx,bcm2835dma_spi_interrupt_dma_rx,"rx"))) {
+	if ((err=bcm2835dma_allocate_dma(pdev,&bs->dma_rx,NULL,"rx"))) {
 		goto out_release_dma;
 	}
 
@@ -1114,7 +1263,6 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 		goto out_release_pool;
 	}
 	memset(bs->buffer_read_0x00.addr,0x00,sizeof(struct bcm2835dma_dma_cb));
-
 	bs->last_spi_message_finished.addr=dma_pool_alloc(bs->pool,GFP_KERNEL,&bs->last_spi_message_finished.bus_addr);
         if (!bs->last_spi_message_finished.addr) {
 		printk(KERN_ERR " could not allocate from memory pool");
