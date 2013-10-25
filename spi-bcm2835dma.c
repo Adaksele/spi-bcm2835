@@ -767,8 +767,9 @@ static int bcm2835dma_spi_schedule_single_transfer(struct bcm2835dma_spi *bs,
 	dma_addr_t rx_addr=0;
 	/* the tx transfer */
 	u32 tx_info =
-		BCM2835_DMA_PER_MAP(6)              /* DREQ 6 = SPI TX in PERMAP */
-		| BCM2835_DMA_D_DREQ               /* destination DREQ trigger */
+		BCM2835_DMA_PER_MAP(6)            /* DREQ 6 = SPI TX in PERMAP */
+		| BCM2835_DMA_D_DREQ              /* destination DREQ trigger */
+		| BCM2835_DMA_WAIT_RESP           /* wait for response before continuing */
 		;
 	dma_addr_t tx_addr=0;
 
@@ -854,7 +855,7 @@ static int bcm2835dma_spi_schedule_dma_on_tx_plus_delay(struct bcm2835dma_spi *b
 	   we will say about 1/10th of 1us for now - actually we probably should correlate this with the SPI-clock...
 	*/
 	/* tx_dma_cb->length=delay_1us/10; */
-	tx_dma_cb->length=1;
+	tx_dma_cb->length=0;
 
 	/* and now add the scheduling of TX DMA - the TX dma cb address is a dummy for now, so this will not start the TX DMA */
 	rx_dma_cb=bcm2835dma_add_cb(bs,&bs->dma_rx,cb_rx_list,NULL,
