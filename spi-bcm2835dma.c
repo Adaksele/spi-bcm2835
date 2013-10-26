@@ -932,7 +932,10 @@ static int bcm2835dma_spi_schedule_transfer_end(struct bcm2835dma_spi *bs,
 	/* now write "shortly" the "idle" state to CS */
 	cb->data[0]=(u32)cb;
 	/* if connection */
+#if 0
+	/* not possible in the non-pipelined case - need to set it or we time out */
 	if (mesg->complete)
+#endif
 		cb->info|=BCM2835_DMA_INT_EN;
  	/* and return OK */
 	return 0;
