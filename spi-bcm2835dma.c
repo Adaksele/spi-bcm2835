@@ -676,6 +676,7 @@ static irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
 
 static int bcm2835dma_spi_schedule_cdiv_config(struct bcm2835dma_spi *bs, 
 					u32 speed_hz, u32 clk_hz, 
+					u32* cdiv,
 					struct list_head *cb_tx_list)
 {
 	/* now schedule the cdiv setup */
@@ -705,6 +706,7 @@ static int bcm2835dma_spi_schedule_cdiv_config(struct bcm2835dma_spi *bs,
 			cb->data[0]=0; /* the slowest we can go */
 		}
 	}
+	*cdiv=cb->data[0];
 	return 0;
 }
 static int bcm2835dma_spi_schedule_setup_dma_transfer(struct bcm2835dma_spi *bs,
@@ -840,7 +842,8 @@ static int bcm2835dma_spi_schedule_single_transfer(struct bcm2835dma_spi *bs,
 }
 
 static int bcm2835dma_spi_schedule_dma_on_tx_plus_delay(struct bcm2835dma_spi *bs,
-					struct list_head *cb_tx_list,struct list_head *cb_rx_list) 
+							u32 cdiv,
+							struct list_head *cb_tx_list,struct list_head *cb_rx_list) 
 {
 	struct bcm2835dma_dma_cb *rx_dma_cb,*tx_dma_cb;
 
@@ -851,11 +854,7 @@ static int bcm2835dma_spi_schedule_dma_on_tx_plus_delay(struct bcm2835dma_spi *b
 				bs->buffer_read_0xff.bus_addr,
 				bs->buffer_write_dummy.bus_addr,
 				0,0,0);
-	/* assign the delay - this is taken from an empirical value.
-	   we will say about 1/10th of 1us for now - actually we probably should correlate this with the SPI-clock...
-	*/
-	/* tx_dma_cb->length=delay_1us/10; */
-	tx_dma_cb->length=0;
+	tx_dma_cb->length=cdiv;
 
 	/* and now add the scheduling of TX DMA - the TX dma cb address is a dummy for now, so this will not start the TX DMA */
 	rx_dma_cb=bcm2835dma_add_cb(bs,&bs->dma_rx,cb_rx_list,NULL,
@@ -899,20 +898,41 @@ static int bcm2835dma_spi_schedule_delay_usecs(struct bcm2835dma_spi *bs,
 	return 0;
 }
 
-static int bcm2835dma_spi_schedule_cs_change(struct bcm2835dma_spi *bs, 
+static int bcm2835dma_spi_schedule_cs_change(struct bcm2835dma_spi *bs,
+					u32 cdiv,u8 is_last,
 					struct list_head *cb_tx_list)
 {
 	struct bcm2835dma_dma_cb* cb;
+
 	/* schedule a transfer setting CS to the bus-idle state */
 	cb=bcm2835dma_add_cb(bs,&bs->dma_tx,cb_tx_list,NULL,
 			BCM2835_DMA_WAIT_RESP,
 			-1, /* allocate in object */
 			BCM2835_SPI_BASE_BUS+BCM2835_SPI_CS, /* the SPI address in bus-address */
-			4,0,1);
+			4,
+			0,1);
 	if (!cb) 
 		return -ENOMEM;
 	/* now write "shortly" the "idle" state to CS */
 	cb->data[0]=bs->cs_device_flags_idle;
+
+	/* to make sure the CS is high for a bit of time...
+	   so schedule a dummy transfer that uses lots of AXI wait cycles 
+	   but only if we are not the last transfer - we assume the overhead is bigger, so that we do not need to delay...
+	*/
+	if (!is_last) {
+		cb=bcm2835dma_add_cb(bs,&bs->dma_tx,cb_tx_list,NULL,
+				BCM2835_DMA_WAIT_RESP|BCM2835_DMA_WAITS(0x1f)|BCM2835_DMA_NO_WIDE_BURSTS
+				|BCM2835_DMA_S_IGNORE|BCM2835_DMA_D_IGNORE,
+				bs->buffer_read_0xff.bus_addr,
+				bs->buffer_write_dummy.bus_addr,
+				0,0,1);
+		if (!cb) 
+			return -ENOMEM;
+		/* and a bit of delay */
+		cb->length=cdiv;
+	}
+
  	/* and return OK */
 	return 0;
 }
@@ -961,6 +981,7 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 	u32 clk_hz = clk_get_rate(bs->clk);
 	/* the speed in hz and the last value therof */
 	u32 last_speed_hz=-1,speed_hz=spi->max_speed_hz;
+	u32 cdiv=2;
 	/* the pointer to the last length object */
 	u32 *chain_length=NULL;
 
@@ -975,12 +996,14 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 	 */
 	list_for_each_entry(xfer, &mesg->transfers, transfer_list) {
 		dma_addr_t *link_rx_here=0;
+		u8 is_last=list_is_last(&xfer->transfer_list,&mesg->transfers);
 		/* if the speed in hz has changed, then schedule a change */
 		if (xfer->speed_hz)
 			speed_hz=xfer->speed_hz;
 		if (last_speed_hz!=speed_hz) {
 			status=bcm2835dma_spi_schedule_cdiv_config(bs,
 								speed_hz,clk_hz,
+								&cdiv,
 								&cb_tx_list);
 			if (status)
 				goto error_exit;
@@ -1034,6 +1057,7 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 		
 		/* now start scheduling next DMA on TX */
 		status=bcm2835dma_spi_schedule_dma_on_tx_plus_delay(bs,
+								cdiv,
 								&cb_tx_list,&cb_rx_list);
 		if (status)
 			goto error_exit;
@@ -1048,8 +1072,9 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 		} else {
 		}
 		/* if we got cs_change or an end of transfer */
-		if ((xfer->cs_change)||(list_is_last(&xfer->transfer_list,&mesg->transfers))) {
+		if ((xfer->cs_change)||is_last) {
 			status=bcm2835dma_spi_schedule_cs_change(bs,
+								cdiv,is_last,
 								&cb_tx_list);
 			if (status)
 				goto error_exit;
