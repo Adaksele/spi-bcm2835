@@ -428,7 +428,7 @@ static void bcm2835dma_add_to_dma_list(struct spi_master *master,struct bcm2835d
 	list_splice_tail_init(list,&dma->cb_list);
 }
 
-static void bcm2835dma_add_to_dma_schedule(struct spi_master *master,struct bcm2835dma_spi_dma *dma,struct list_head *list)
+static int bcm2835dma_add_to_dma_schedule(struct spi_master *master,struct bcm2835dma_spi_dma *dma,struct list_head *list)
 {
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	/* retain a copy of the first item in the list */
@@ -442,7 +442,7 @@ static void bcm2835dma_add_to_dma_schedule(struct spi_master *master,struct bcm2
 	bcm2835dma_add_to_dma_list(master,dma,list);
 	/* if the pointer to 1st is NULL, then return */
 	if (!first) 
-		return;
+		return 0;
 
 	/* this now is actually VERY tricky,
 	 * as this can potentially become a race condition 
@@ -480,7 +480,8 @@ static void bcm2835dma_add_to_dma_schedule(struct spi_master *master,struct bcm2
 		& BCM2835_DMA_CS_ACTIVE
 		) {
 		dev_err(&master->dev,"A still running DMA is currently not supported...\n");
-		return;
+		/* and dump what we see */
+		return -ETIMEDOUT;
 	}
 	/* the no DMA running case */
 	/* fill in next control block address */
@@ -489,6 +490,8 @@ static void bcm2835dma_add_to_dma_schedule(struct spi_master *master,struct bcm2
 	dsb();
 	/* and start DMA */
 	writel(BCM2835_DMA_CS_ACTIVE,&(dma->base->cs));
+	/* and return OK */
+	return 0;
 }
 
 static void __bcm2835dma_dump_dmacb(void *base) {
@@ -1103,13 +1106,17 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 
 	/* add list to DMA */
 	bcm2835dma_add_to_dma_list(master,&bs->dma_rx,&cb_rx_list);
-	bcm2835dma_add_to_dma_schedule(master,&bs->dma_tx,&cb_tx_list);
+	status=bcm2835dma_add_to_dma_schedule(master,&bs->dma_tx,&cb_tx_list);
+	if (status) {
+		spi_print_debug_message(mesg,128);
+		goto error_exit;
+	}
 
 	/* wait for us to get woken up again after the transfer */
         if (wait_for_completion_timeout(
                         &bs->done,
                         msecs_to_jiffies(SPI_TIMEOUT_MS)) == 0) {
-		dev_err(&master->dev,"DMA transfer timed out\n");
+		dev_emerg(&master->dev,"DMA transfer timed out\n");
 		/* and set the error status and goto the exit code */
 		status=-ETIMEDOUT;
 	}
