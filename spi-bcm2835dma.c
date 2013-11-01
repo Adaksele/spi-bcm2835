@@ -195,6 +195,9 @@ struct bcm2835dma_spi {
 	} buffer_write_dummy,buffer_read_0xff,buffer_read_0x00,last_spi_message_finished;
 	/* some flags */
 	u32 error_occurred;
+	/* and the prepared statement list - should belong to SPI device or master structure really */
+	struct list_head prepared_list;
+	spinlock_t prepared_lock;
 };
 
 /* the control block structure - this should be 64 bytes in size*/
@@ -1007,6 +1010,111 @@ static int bcm2835dma_spi_schedule_dma_tail(struct bcm2835dma_spi *bs,
 	return 0;
 }
 
+/* these should filter up to spi.c/spi.h */
+struct spi_prepared_message {
+	/* the list in which we store the message */
+	struct list_head prepared_list;
+	/* the identification data for matching */
+	struct spi_device *spi;
+	struct spi_message *message;
+};
+
+static struct spi_prepared_message *bcm2835dmaspi_find_prepared_message_nolock(
+	struct spi_device *spi,
+	struct spi_message *message)
+{
+	struct spi_master *master=spi->master;
+	/* ideally this would be in master */
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+	struct spi_prepared_message *prepared;
+	/* it might be helpfull to have a field that identifies the message as
+	   one that has been prepared or not to avoid the unnecessary iterations
+	   if (!message->is_prepared)
+	         return 0;
+	*/
+	/* now loop the entries */
+	list_for_each_entry(prepared, &bs->prepared_list, prepared_list) {
+		/* if we match, then return */
+		if ((prepared->spi==spi)
+			&& (prepared->message==message))
+			return prepared;
+	}
+	/* return not found */
+	return NULL;
+}
+
+static struct spi_prepared_message *bcm2835dmaspi_find_prepared_message(
+	struct spi_device *spi,
+	struct spi_message *message)
+{
+	struct spi_prepared_message *prepared;
+	struct spi_master *master=spi->master;
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+	unsigned long flags;
+	/* ideally this would be in spi_master structure */
+	spin_lock_irqsave(&bs->prepared_lock,flags);
+	/* try to find it */
+	prepared=bcm2835dmaspi_find_prepared_message_nolock(spi,message);
+	/* and unlock and return */
+	spin_unlock_irqrestore(&bs->prepared_lock,flags);
+	return prepared;
+}
+
+static int bcm2835dma_spi_add_prepared_message(
+	struct spi_prepared_message * prepared)
+{
+	struct spi_device *spi=prepared->spi;
+	struct spi_master *master=spi->master;
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+	struct spi_message *message=prepared->message;
+	unsigned long flags;
+	/* ideally this would be in spi_master structure */
+	spin_lock_irqsave(&bs->prepared_lock,flags);
+
+	/* try to find the message in the list first - to avoid duplicates 
+	   same as above - we could also check the flag in spi_message structure
+	   in the end, this check should maybe be done in the driver itself...
+	 */
+	
+	if (bcm2835dmaspi_find_prepared_message_nolock(spi,message)) {
+		spin_unlock_irqrestore(&bs->prepared_lock,flags);
+		dev_err(&spi->dev,"SPI message has already been prepared once\n");
+		return -EPERM;
+	}
+	/* now add it to the list at tail*/
+	INIT_LIST_HEAD(&prepared->prepared_list);
+	list_add_tail(&prepared->prepared_list,&bs->prepared_list);
+	
+	/* unlock and return */
+	spin_unlock_irqrestore(&bs->prepared_lock,flags);
+	return 0;
+}
+
+static void* bcm2835dma_spi_remove_prepared_message(struct spi_device *spi,
+						struct spi_message *mesg,
+						void *prepared)
+{
+	return NULL;
+}
+struct bcm2835dma_prepared_message {
+	struct spi_prepared_message list;
+};
+
+static int bcm2835_spi_prepare_message(struct spi_device *spi,
+				struct spi_message *mesg)
+{
+	/* try to find the message in the "pool" */
+	return 0;
+}
+EXPORT_SYMBOL_GPL(bcm2835_spi_prepare_message);
+
+static int bcm2835_spi_unprepare_message(struct spi_device *spi,
+				struct spi_message *mesg)
+{
+	return 0;
+}
+EXPORT_SYMBOL_GPL(bcm2835_spi_unprepare_message);
+
 /* most likley we will need to move away from the transfer_one at a time approach, if we want to pipeline the Transfers.. */
 static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 		struct spi_message *mesg)
@@ -1025,6 +1133,8 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 	u32 cdiv=2;
 	/* the pointer to the last length object */
 	u32 *chain_length=NULL;
+
+	//writel(bs->cs_device_flags[spi->chip_select]|BCM2835_SPI_CS_CSPOL1 ,bs->regs+BCM2835_SPI_CS);
 
 	/* initialize the temporary lists */
 	INIT_LIST_HEAD(&cb_tx_list);	
@@ -1139,6 +1249,7 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 	if (status)
 		goto error_exit;
 
+	//writel(bs->cs_device_flags_idle,bs->regs+BCM2835_SPI_CS);
 
 	/* if debugging dma, then dump what we got so far prior to scheduling */
 	if (unlikely(debug_dma)) 
@@ -1279,6 +1390,10 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 	bs = spi_master_get_devdata(master);
 
 	init_completion(&bs->done);
+	
+	/* initialize the prepared statements list and lock*/
+	spin_lock_init(&bs->prepared_lock);
+	INIT_LIST_HEAD(&bs->prepared_list);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res) {
