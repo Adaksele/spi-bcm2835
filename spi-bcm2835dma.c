@@ -1043,7 +1043,7 @@ static struct spi_prepared_message *bcm2835dmaspi_find_prepared_message_nolock(
 	return NULL;
 }
 
-static struct spi_prepared_message *bcm2835dmaspi_find_prepared_message(
+static struct spi_prepared_message *bcm2835dma_spi_find_prepared_message(
 	struct spi_device *spi,
 	struct spi_message *message)
 {
@@ -1100,20 +1100,22 @@ struct bcm2835dma_prepared_message {
 	struct spi_prepared_message list;
 };
 
-static int bcm2835_spi_prepare_message(struct spi_device *spi,
-				struct spi_message *mesg)
+int bcm2835dma_spi_prepare_message(struct spi_device *spi,
+				struct spi_message *message)
 {
+	dev_err(&spi->dev,"Preparing message at address %pK\n",message);
 	/* try to find the message in the "pool" */
 	return 0;
 }
-EXPORT_SYMBOL_GPL(bcm2835_spi_prepare_message);
+EXPORT_SYMBOL_GPL(bcm2835dma_spi_prepare_message);
 
-static int bcm2835_spi_unprepare_message(struct spi_device *spi,
-				struct spi_message *mesg)
+int bcm2835dma_spi_unprepare_message(struct spi_device *spi,
+				struct spi_message *message)
 {
+	dev_err(&spi->dev,"Unpreparing message at address %pK\n",message);
 	return 0;
 }
-EXPORT_SYMBOL_GPL(bcm2835_spi_unprepare_message);
+EXPORT_SYMBOL_GPL(bcm2835dma_spi_unprepare_message);
 
 /* most likley we will need to move away from the transfer_one at a time approach, if we want to pipeline the Transfers.. */
 static int bcm2835dma_spi_transfer_one(struct spi_master *master,
