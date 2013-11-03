@@ -386,6 +386,10 @@ static struct bcm2835dma_dma_cb *bcm2835dma_add_cb(struct bcm2835dma_spi *bs,
 static void bcm2835dma_release_cb(struct spi_master *master,struct bcm2835dma_dma_cb *cb)
 {
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+	/* if the device is prepared, then release it differently...*/
+	if (cb->is_prepared) 
+		return;
+
 	/* unmap the dma-mapped-memory if we got the address*/
 	if (cb->mmapped_source) { /* we did map the source */
 		dma_unmap_single_attrs(
@@ -572,8 +576,8 @@ static void bcm2835dma_dump_dma(struct spi_master *master,struct bcm2835dma_spi_
 		__bcm2835dma_dump_dmacb(cb);
                 printk(KERN_DEBUG "        .pad0     = %08x\n",cb->pad[0]);
                 printk(KERN_DEBUG "        .pad1     = %08x\n",cb->pad[1]);
-                printk(KERN_DEBUG "        .mmappeds = %i\n",cb->mmapped_source);
-                printk(KERN_DEBUG "        .mmappedd = %i\n",cb->mmapped_destination);
+                printk(KERN_DEBUG "        .mmap_src = %i\n",cb->mmapped_source);
+                printk(KERN_DEBUG "        .mmap_dst = %i\n",cb->mmapped_destination);
                 printk(KERN_DEBUG "        .prepared = %i\n",cb->is_prepared);
                 printk(KERN_DEBUG "        .msg      = %pK\n",cb->msg);
                 printk(KERN_DEBUG "        .dma_info = %pK - %s\n",cb->dma,cb->dma->desc);		
@@ -1243,15 +1247,69 @@ static void* bcm2835dma_spi_remove_prepared_message(struct spi_device *spi,
 	return NULL;
 }
 struct bcm2835dma_prepared_message {
-	struct spi_prepared_message list;
+	struct spi_prepared_message prepared;
+	struct list_head cb_chain;
 };
 
 int bcm2835dma_spi_prepare_message(struct spi_device *spi,
 				struct spi_message *message)
 {
+	struct bcm2835dma_prepared_message *prep;
+        struct bcm2835dma_dma_cb *cb;
+	int status=0;
+
 	dev_err(&spi->dev,"Preparing message at address %pK\n",message);
+	
+	/* no preparation if not FULLY DMA mapped! */
+	if (!message->is_dma_mapped) {
+		dev_err(&spi->dev,"preparing a message, that is not dma mapped - not supported\n");
+		return -EPERM;
+	}
+
+	/* allocate structure */
+	prep=kmalloc(sizeof(struct bcm2835dma_prepared_message),GFP_KERNEL);
+	if (!prep)
+               return -ENOMEM;
+	/* now prepare the message */
+	memset(prep,0,sizeof(*prep));
+	INIT_LIST_HEAD(&prep->cb_chain);
+	prep->prepared.spi=spi;
+	prep->prepared.message=message;	
+
+	/* to make it work we first need to set SPI - maybe a code change below? */
+	message->spi=spi;
+
+	/* and calculate dma chain */
+	status=bcm2835dma_spi_message_to_dmachain(
+		spi->master,
+		message,
+		&prep->cb_chain);
+	/* and reset it */
+	message->spi=NULL;
+	/* now handle errors */
+	if (!status)
+		goto err_release;
+	/* mark all members as prepared */
+	list_for_each_entry(cb,&prep->cb_chain,cb_chain) {
+		cb->is_prepared=1;
+	}
+
+
+	/* prepared */
+
 	/* try to find the message in the "pool" */
 	return 0;
+
+err_release:
+        bcm2835dma_release_cb_chain(
+                spi->master,
+                &prep->cb_chain
+                );
+        /* and release the memory allocated before */
+        kfree(prep);
+	/* and return witnh the error given */
+	return status;
+
 }
 EXPORT_SYMBOL_GPL(bcm2835dma_spi_prepare_message);
 
