@@ -215,14 +215,15 @@ struct bcm2835dma_dma_cb {
 	dma_addr_t bus_addr;
 	/* the dma to which this belongs - note that we may not need this*/
 	struct bcm2835dma_spi_dma* dma;
-	/* some FLAGS */
-#define BCM2835DMA_DMA_TO_DEVICE   (1<<0)
-#define BCM2835DMA_DMA_FROM_DEVICE (1<<1)
-	u32 flags;
 	/* the pointer to the corresponding SPI message - used for callbacks,... - only for the last part of the transaction*/
 	struct spi_message* msg;
 	/* some locally allocated data - for some short transfers of up to 8 bytes -either source or destination - not both !!! */
 	u32 data[2];
+	/* some FLAGS - to a full 32 bit*/
+	bool mmapped_source:1;
+	bool mmapped_destination:1;
+	bool is_prepared:1;
+	u32 padding:29;
 };
 
 static void bcm2835dma_dump_state(struct spi_master *master);
@@ -351,7 +352,9 @@ static struct bcm2835dma_dma_cb *bcm2835dma_add_cb(struct bcm2835dma_spi *bs,
 	cb->bus_addr=bus_addr;
 	cb->msg=msg;
 	cb->dma=dma;
-	cb->flags=0;
+	cb->mmapped_source=0;
+	cb->mmapped_destination=0;
+	cb->is_prepared=0;
 	/* return early if no list */
 	if (!list)
 		return cb;
@@ -384,21 +387,23 @@ static void bcm2835dma_release_cb(struct spi_master *master,struct bcm2835dma_dm
 {
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	/* unmap the dma-mapped-memory if we got the address*/
-	if (cb->flags & BCM2835DMA_DMA_TO_DEVICE) { /* we did map the source */
+	if (cb->mmapped_source) { /* we did map the source */
 		dma_unmap_single_attrs(
 			&master->dev,
 			cb->src,
 			cb->length,
 			DMA_TO_DEVICE,
 			NULL);
+		cb->mmapped_source=0;
 	}
-	if (cb->flags & BCM2835DMA_DMA_FROM_DEVICE) { /* we did map the destination */
+	if (cb->mmapped_destination) { /* we did map the destination */
 		dma_unmap_single_attrs(
 			&master->dev,
 			cb->dst,
 			cb->length,
 			DMA_FROM_DEVICE,
 			NULL);
+		cb->mmapped_destination=0;
 	}
 #if 0
 	/* possibly run the callbacks from here as well
@@ -567,7 +572,9 @@ static void bcm2835dma_dump_dma(struct spi_master *master,struct bcm2835dma_spi_
 		__bcm2835dma_dump_dmacb(cb);
                 printk(KERN_DEBUG "        .pad0     = %08x\n",cb->pad[0]);
                 printk(KERN_DEBUG "        .pad1     = %08x\n",cb->pad[1]);
-                printk(KERN_DEBUG "        .flags    = %08x\n",cb->flags);
+                printk(KERN_DEBUG "        .mmappeds = %i\n",cb->mmapped_source);
+                printk(KERN_DEBUG "        .mmappedd = %i\n",cb->mmapped_destination);
+                printk(KERN_DEBUG "        .prepared = %i\n",cb->is_prepared);
                 printk(KERN_DEBUG "        .msg      = %pK\n",cb->msg);
                 printk(KERN_DEBUG "        .dma_info = %pK - %s\n",cb->dma,cb->dma->desc);		
 		/* and dump the rx/tx-data itself if we have allocated it locally*/
@@ -848,6 +855,8 @@ static int bcm2835dma_spi_schedule_single_transfer(struct bcm2835dma_spi *bs,
 		| BCM2835_DMA_WAIT_RESP           /* wait for response before continuing */
 		;
 	dma_addr_t tx_addr=0;
+	bool mmapped_source=0;
+	bool mmapped_destination=0;
 
 	/* map the RX Addresses and set info flags as needed */
 	if (xfer->rx_buf) {
@@ -861,6 +870,7 @@ static int bcm2835dma_spi_schedule_single_transfer(struct bcm2835dma_spi *bs,
 				DMA_FROM_DEVICE,
 				NULL);
 			/* todo: error-handling */
+			mmapped_destination=1;
 		}
 		rx_info|=BCM2835_DMA_D_INC;
 	} else {
@@ -878,6 +888,7 @@ static int bcm2835dma_spi_schedule_single_transfer(struct bcm2835dma_spi *bs,
 				DMA_TO_DEVICE,
 				NULL);
 			/* todo: error-handling */
+			mmapped_source=1;
 		}
 		tx_info|=BCM2835_DMA_S_INC;
 	} else {
@@ -894,6 +905,8 @@ static int bcm2835dma_spi_schedule_single_transfer(struct bcm2835dma_spi *bs,
 		);
 	if (!cb) 
 		return -ENOMEM;
+	/* set mmapped_source correctly */
+	cb->mmapped_source=mmapped_source;
 	/* if we got a pointer to which we should link, then use that */
 	if (!**link_here)
 		**link_here=cb->bus_addr;
@@ -908,6 +921,8 @@ static int bcm2835dma_spi_schedule_single_transfer(struct bcm2835dma_spi *bs,
 		);
 	if (!cb) 
 		return -ENOMEM;
+	/* set mmapped_destination correctly */
+	cb->mmapped_destination=mmapped_destination;
 
 	/* and increment the transfer length */
 	*chain_length+=xfer->len;
