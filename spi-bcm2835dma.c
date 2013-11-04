@@ -1018,14 +1018,14 @@ static int bcm2835dma_spi_schedule_dma_tail(struct bcm2835dma_spi *bs,
 /*
  * create DMA chain for used with prepared messages and "normal" operation
  */
- int bcm2835dma_spi_message_to_dmachain(struct spi_master *master,
-					struct spi_message *mesg,
-					struct list_head *cb_chain
+ int bcm2835dma_spi_message_to_cbchain(struct spi_master *master,
+				 struct spi_device *spi,
+				 struct spi_message *mesg,
+				 struct list_head *cb_chain
 	)
 {
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	struct spi_transfer *xfer;
-	struct spi_device *spi = mesg->spi;
 	/* the status */
 	u32 status=0;
 	/* the spi bus speed */
@@ -1259,7 +1259,7 @@ int bcm2835dma_spi_prepare_message(struct spi_device *spi,
 	int status=0;
 
 	dev_err(&spi->dev,"Preparing message at address %pK\n",message);
-	
+
 	/* no preparation if not FULLY DMA mapped! */
 	if (!message->is_dma_mapped) {
 		dev_err(&spi->dev,"preparing a message, that is not dma mapped - not supported\n");
@@ -1276,16 +1276,12 @@ int bcm2835dma_spi_prepare_message(struct spi_device *spi,
 	prep->prepared.spi=spi;
 	prep->prepared.message=message;	
 
-	/* to make it work we first need to set SPI - maybe a code change below? */
-	message->spi=spi;
-
 	/* and calculate dma chain */
-	status=bcm2835dma_spi_message_to_dmachain(
+	status=bcm2835dma_spi_message_to_cbchain(
 		spi->master,
+		spi,
 		message,
 		&prep->cb_chain);
-	/* and reset it */
-	message->spi=NULL;
 	/* now handle errors */
 	if (!status)
 		goto err_release;
@@ -1293,7 +1289,6 @@ int bcm2835dma_spi_prepare_message(struct spi_device *spi,
 	list_for_each_entry(cb,&prep->cb_chain,cb_chain) {
 		cb->is_prepared=1;
 	}
-
 
 	/* prepared */
 
@@ -1323,15 +1318,19 @@ EXPORT_SYMBOL_GPL(bcm2835dma_spi_unprepare_message);
 
 /* most likley we will need to move away from the transfer_one at a time approach, if we want to pipeline the Transfers.. */
 static int bcm2835dma_spi_transfer_one(struct spi_master *master,
-		struct spi_message *mesg)
+		struct spi_message *message)
 {
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	LIST_HEAD(cb_chain);
 	u32 status=0;
 
 	/* prepare DMA chain */
-	writel(bs->cs_device_flags[mesg->spi->chip_select]|BCM2835_SPI_CS_CSPOL1 ,bs->regs+BCM2835_SPI_CS);
-	status=bcm2835dma_spi_message_to_dmachain(master,mesg,&cb_chain);
+	writel(bs->cs_device_flags[message->spi->chip_select]|BCM2835_SPI_CS_CSPOL1 ,bs->regs+BCM2835_SPI_CS);
+	status=bcm2835dma_spi_message_to_cbchain(
+		master,
+		message->spi,
+		message,
+		&cb_chain);
 	writel(bs->cs_device_flags_idle,bs->regs+BCM2835_SPI_CS);
 	if (status)
 		goto error_exit;
@@ -1342,7 +1341,7 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 	/* add list to DMA */
 	status=bcm2835dma_add_to_dma_schedule(master,&bs->dma_rx,&cb_chain);
 	if (status) {
-		spi_print_debug_message(mesg,128);
+		spi_print_debug_message(message,128);
 		goto error_exit;
 	}
 	/* wait for us to get woken up again after the transfer */
@@ -1366,11 +1365,11 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 
 error_exit:
 	/* set the status - before we run the debug code and before we finalize the message */
-	mesg->status=status;
+	message->status=status;
 
 	/* write the debug message information */
 	if (unlikely(debug_msg)) {
-		spi_print_debug_message(mesg,128);
+		spi_print_debug_message(message,128);
 	}
 	/* release the control block chains */
 	bcm2835dma_release_cb_chain(master,&cb_chain);
