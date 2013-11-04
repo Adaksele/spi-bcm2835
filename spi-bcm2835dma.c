@@ -194,9 +194,24 @@ struct bcm2835dma_spi {
 	/* some flags */
 	u32 error_occurred;
 	/* and the prepared statement list - should belong to SPI device or master structure really */
-	struct list_head prepared_list;
-	/* the list of scheduled control blocks */
+	struct list_head prepared_messages_list;
 	struct list_head active_cb_chain;
+	struct list_head active_messages;
+
+};
+
+/* these should ideally get included in spi.c/spi.h */
+struct spi_prepared_message {
+	/* the list in which we store the message */
+	struct list_head prepared_list;
+	/* the identification data for matching */
+	struct spi_device *spi;
+	struct spi_message *message;
+};
+
+struct bcm2835dma_prepared_message {
+	struct spi_prepared_message prepared;
+	struct list_head prepared_cb_chain;
 };
 
 /* the control block structure - this should be 64 bytes in size*/
@@ -216,14 +231,13 @@ struct bcm2835dma_dma_cb {
 	/* the dma to which this belongs - note that we may not need this*/
 	struct bcm2835dma_spi_dma* dma;
 	/* the pointer to the corresponding SPI message - used for callbacks,... - only for the last part of the transaction*/
-	struct spi_message* msg;
+	struct bcm2835dma_prepared_message* prepared;
 	/* some locally allocated data - for some short transfers of up to 8 bytes -either source or destination - not both !!! */
 	u32 data[2];
 	/* some FLAGS - to a full 32 bit*/
 	bool mmapped_source:1;
 	bool mmapped_destination:1;
-	bool is_prepared:1;
-	u32 padding:29;
+	u32 padding:30;
 };
 
 static void bcm2835dma_dump_state(struct spi_master *master);
@@ -350,11 +364,10 @@ static struct bcm2835dma_dma_cb *bcm2835dma_add_cb(struct bcm2835dma_spi *bs,
 	/* our extra data */
 	INIT_LIST_HEAD(&cb->cb_chain);
 	cb->bus_addr=bus_addr;
-	cb->msg=msg;
 	cb->dma=dma;
 	cb->mmapped_source=0;
 	cb->mmapped_destination=0;
-	cb->is_prepared=0;
+	cb->prepared=NULL;
 	/* return early if no list */
 	if (!list)
 		return cb;
@@ -386,9 +399,18 @@ static struct bcm2835dma_dma_cb *bcm2835dma_add_cb(struct bcm2835dma_spi *bs,
 static void bcm2835dma_release_cb(struct spi_master *master,struct bcm2835dma_dma_cb *cb)
 {
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+	/* remove from list */
+	list_del(&cb->cb_chain);
+
 	/* if the device is prepared, then release it differently...*/
-	if (cb->is_prepared) 
+	if (cb->prepared)  {
+		/* add it back to the control_block at the end */
+		list_add_tail(&cb->cb_chain,&cb->prepared->prepared_cb_chain);
+		/* and return */
 		return;
+	}
+
+	/* handle the case of dynamically allocated object */
 
 	/* unmap the dma-mapped-memory if we got the address*/
 	if (cb->mmapped_source) { /* we did map the source */
@@ -417,8 +439,6 @@ static void bcm2835dma_release_cb(struct spi_master *master,struct bcm2835dma_dm
 		cb->msg->complete(cb->msg->context);
 	}
 #endif
-	/* remove from list */
-	list_del(&cb->cb_chain);
 	/* and release the pointer */
 	dma_pool_free(bs->pool,cb,cb->bus_addr);
 }
@@ -572,14 +592,11 @@ static void bcm2835dma_dump_dma(struct spi_master *master,struct bcm2835dma_spi_
                 /* dump this cb */
                 printk(KERN_DEBUG "  CB[%02i].base     = %pK\n",count,cb);
                 printk(KERN_DEBUG "        .bus_addr = %08x\n",cb->bus_addr);
-                printk(KERN_DEBUG "        .msg      = %pK\n",cb->msg);
 		__bcm2835dma_dump_dmacb(cb);
                 printk(KERN_DEBUG "        .pad0     = %08x\n",cb->pad[0]);
                 printk(KERN_DEBUG "        .pad1     = %08x\n",cb->pad[1]);
                 printk(KERN_DEBUG "        .mmap_src = %i\n",cb->mmapped_source);
                 printk(KERN_DEBUG "        .mmap_dst = %i\n",cb->mmapped_destination);
-                printk(KERN_DEBUG "        .prepared = %i\n",cb->is_prepared);
-                printk(KERN_DEBUG "        .msg      = %pK\n",cb->msg);
                 printk(KERN_DEBUG "        .dma_info = %pK - %s\n",cb->dma,cb->dma->desc);		
 		/* and dump the rx/tx-data itself if we have allocated it locally*/
 		if (length<=sizeof(cb->data)) {
@@ -993,9 +1010,8 @@ static int bcm2835dma_spi_schedule_where_we_are(struct bcm2835dma_spi *bs,
 			BCM2835_DMA_WAIT_RESP,
 			-1,
 			bs->last_spi_message_finished.bus_addr,
-			8,0,1);
+			4,0,1);
 	cb->data[0]=(u32)mesg;
-	cb->data[1]=(u32)xfer;
 #ifdef IS_PIPELINED
 	/* not possible in the non-pipelined case - need to set it or we time out... */
 	if (is_last && mesg->complete)
@@ -1159,16 +1175,6 @@ error_exit:
 	return status;
 }
 
-
-/* these should filter up to spi.c/spi.h */
-struct spi_prepared_message {
-	/* the list in which we store the message */
-	struct list_head prepared_list;
-	/* the identification data for matching */
-	struct spi_device *spi;
-	struct spi_message *message;
-};
-
 static struct spi_prepared_message *bcm2835dma_spi_find_prepared_message_nolock(
 	struct spi_device *spi,
 	struct spi_message *message)
@@ -1183,7 +1189,7 @@ static struct spi_prepared_message *bcm2835dma_spi_find_prepared_message_nolock(
 	         return 0;
 	*/
 	/* now loop the entries */
-	list_for_each_entry(prepared, &bs->prepared_list, prepared_list) {
+	list_for_each_entry(prepared, &bs->prepared_messages_list, prepared_list) {
 		/* if we match, then return */
 		if ((prepared->spi==spi)
 			&& (prepared->message==message))
@@ -1232,24 +1238,34 @@ static int bcm2835dma_spi_add_prepared_message(
 		return -EPERM;
 	}
 	/* now add it to the list at tail*/
-	INIT_LIST_HEAD(&prepared->prepared_list);
-	list_add_tail(&prepared->prepared_list,&bs->prepared_list);
-	
+	list_add_tail(&prepared->prepared_list,&bs->prepared_messages_list);
+
 	/* unlock and return */
 	spin_unlock_irqrestore(&bs->lock,flags);
 	return 0;
 }
 
-static void* bcm2835dma_spi_remove_prepared_message(struct spi_device *spi,
-						struct spi_message *mesg,
-						void *prepared)
+/* this code has problem with still in-flight CBs that are scheduled - we need to review that ...*/
+
+struct spi_prepared_message *bcm2835dma_spi_remove_prepared_message(
+	struct spi_device *spi,
+	struct spi_message *message
+	)
 {
-	return NULL;
+	struct spi_prepared_message *prep=NULL;
+	struct spi_master *master=spi->master;
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+	unsigned long flags;
+	/* ideally this would be in spi_master structure */
+	spin_lock_irqsave(&bs->lock,flags);
+	prep=bcm2835dma_spi_find_prepared_message_nolock(spi,message);
+	/* now unlink the prepared item */
+	if (prep) 
+		list_del(&prep->prepared_list);
+	/* unlock and return the deleted version */
+	spin_unlock_irqrestore(&bs->lock,flags);
+	return prep;
 }
-struct bcm2835dma_prepared_message {
-	struct spi_prepared_message prepared;
-	struct list_head cb_chain;
-};
 
 int bcm2835dma_spi_prepare_message(struct spi_device *spi,
 				struct spi_message *message)
@@ -1257,9 +1273,6 @@ int bcm2835dma_spi_prepare_message(struct spi_device *spi,
 	struct bcm2835dma_prepared_message *prep;
         struct bcm2835dma_dma_cb *cb;
 	int status=0;
-
-	dev_err(&spi->dev,"Preparing message at address %pK\n",message);
-
 	/* no preparation if not FULLY DMA mapped! */
 	if (!message->is_dma_mapped) {
 		dev_err(&spi->dev,"preparing a message, that is not dma mapped - not supported\n");
@@ -1270,9 +1283,10 @@ int bcm2835dma_spi_prepare_message(struct spi_device *spi,
 	prep=kmalloc(sizeof(struct bcm2835dma_prepared_message),GFP_KERNEL);
 	if (!prep)
                return -ENOMEM;
+
 	/* now prepare the message */
 	memset(prep,0,sizeof(*prep));
-	INIT_LIST_HEAD(&prep->cb_chain);
+	INIT_LIST_HEAD(&prep->prepared_cb_chain);
 	prep->prepared.spi=spi;
 	prep->prepared.message=message;	
 
@@ -1281,24 +1295,27 @@ int bcm2835dma_spi_prepare_message(struct spi_device *spi,
 		spi->master,
 		spi,
 		message,
-		&prep->cb_chain);
+		&prep->prepared_cb_chain);
 	/* now handle errors */
-	if (!status)
+	if (status)
 		goto err_release;
-	/* mark all members as prepared */
-	list_for_each_entry(cb,&prep->cb_chain,cb_chain) {
-		cb->is_prepared=1;
+	/* and add to pool */
+	status=bcm2835dma_spi_add_prepared_message(&prep->prepared);
+	if (status)
+		goto err_release;
+	/* finally mark all members as prepared - this is the last one, 
+	   as otherwise we would need to roll it back in the error case*/
+	list_for_each_entry(cb,&prep->prepared_cb_chain,cb_chain) {
+		cb->prepared=prep;
 	}
 
-	/* prepared */
-
-	/* try to find the message in the "pool" */
 	return 0;
 
 err_release:
+	/* release structure */
         bcm2835dma_release_cb_chain(
                 spi->master,
-                &prep->cb_chain
+                &prep->prepared_cb_chain
                 );
         /* and release the memory allocated before */
         kfree(prep);
@@ -1311,7 +1328,27 @@ EXPORT_SYMBOL_GPL(bcm2835dma_spi_prepare_message);
 int bcm2835dma_spi_unprepare_message(struct spi_device *spi,
 				struct spi_message *message)
 {
-	dev_err(&spi->dev,"Unpreparing message at address %pK\n",message);
+	struct bcm2835dma_prepared_message *prep;
+        struct bcm2835dma_dma_cb *cb;
+	/* find and remove the item from list */
+	prep=(struct bcm2835dma_prepared_message*)
+		bcm2835dma_spi_remove_prepared_message(spi,message);
+	if (!prep) {
+		dev_err(&spi->dev,"Unpreparing message at address %pK failed - it has not been prepared\n",message);
+		return -ENODEV;
+	}
+	/* now "unmark the cbs as prepared */
+	list_for_each_entry(cb,&prep->prepared_cb_chain,cb_chain) {
+		cb->prepared=NULL;
+	}
+	/* and now we can remove it finally */
+        bcm2835dma_release_cb_chain(
+                spi->master,
+                &prep->prepared_cb_chain
+                );
+        /* and release the memory allocated for the prepared list */
+        kfree(prep);
+	/* and return */
 	return 0;
 }
 EXPORT_SYMBOL_GPL(bcm2835dma_spi_unprepare_message);
@@ -1321,16 +1358,27 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 		struct spi_message *message)
 {
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
-	LIST_HEAD(cb_chain);
+	struct bcm2835dma_prepared_message *prep=NULL;
+	/* the list head to use by default - if no prepared spi_nmessage exists */
+	LIST_HEAD(cb_chain_tmp);
+	struct list_head *cb_chain=&cb_chain_tmp;
+	/* the status */
 	u32 status=0;
 
 	/* prepare DMA chain */
 	writel(bs->cs_device_flags[message->spi->chip_select]|BCM2835_SPI_CS_CSPOL1 ,bs->regs+BCM2835_SPI_CS);
-	status=bcm2835dma_spi_message_to_cbchain(
-		master,
-		message->spi,
-		message,
-		&cb_chain);
+	/* get the prepared message */
+	prep=(struct bcm2835dma_prepared_message*)
+		bcm2835dma_spi_find_prepared_message(message->spi,message);
+	if (prep) {
+		cb_chain=&prep->prepared_cb_chain;
+	} else {
+		status=bcm2835dma_spi_message_to_cbchain(
+			master,
+			message->spi,
+			message,
+			cb_chain);
+	}
 	writel(bs->cs_device_flags_idle,bs->regs+BCM2835_SPI_CS);
 	if (status)
 		goto error_exit;
@@ -1339,7 +1387,7 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 		bcm2835dma_dump_state(master);
 
 	/* add list to DMA */
-	status=bcm2835dma_add_to_dma_schedule(master,&bs->dma_rx,&cb_chain);
+	status=bcm2835dma_add_to_dma_schedule(master,&bs->dma_rx,cb_chain);
 	if (status) {
 		spi_print_debug_message(message,128);
 		goto error_exit;
@@ -1372,7 +1420,7 @@ error_exit:
 		spi_print_debug_message(message,128);
 	}
 	/* release the control block chains */
-	bcm2835dma_release_cb_chain(master,&cb_chain);
+	bcm2835dma_release_cb_chain(master,cb_chain);
 	/* finalize message */
 	spi_finalize_current_message(master);
 	/* and return */
@@ -1472,8 +1520,9 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 	
 	/* initialize the prepared statements list and lock*/
 	spin_lock_init(&bs->lock);
-	INIT_LIST_HEAD(&bs->prepared_list);
+	INIT_LIST_HEAD(&bs->prepared_messages_list);
 	INIT_LIST_HEAD(&bs->active_cb_chain);
+	INIT_LIST_HEAD(&bs->active_messages);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res) {
