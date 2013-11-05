@@ -1086,32 +1086,6 @@ static int bcm2835dma_spi_schedule_where_we_are(struct bcm2835dma_spi *bs,
 	return 0;
 }
 
-static int bcm2835dma_spi_schedule_interrupt(struct bcm2835dma_spi *bs, 
-					struct list_head *cb_chain) 
-{
-	struct bcm2835dma_dma_cb *cb;
-
-	/* create a transfer that starts TX DMA to trigger an interrupt
-	 * this works arround a bug, where an interrupt only gets triggered
-	 * when it is the last transfer and no more CBs are chained
-	 */
-	cb=bcm2835dma_add_cb(bs,&bs->dma_rx,cb_chain,NULL,
-			BCM2835_DMA_WAIT_RESP,
-			-1,
-#if 0
-			bs->dma_rx.bus_addr, /* CS of the dma_rx register */
-#else
-			bs->buffer_write_dummy.bus_addr,
-#endif
-			4,0,1);
-	/* disable transfer */
-	cb->data[0]=0x00;
-	/* and link to ourself */
-	//cb->next=cb->bus_addr;
-	/* and return */
-	return 0;
-}
-
 static int bcm2835dma_spi_schedule_dma_tail(struct bcm2835dma_spi *bs, 
 					struct list_head *cb_chain) 
 {
@@ -1126,16 +1100,12 @@ static int bcm2835dma_spi_schedule_dma_tail(struct bcm2835dma_spi *bs,
 	cb=bcm2835dma_add_cb(bs,&bs->dma_rx,cb_chain,NULL,
 			BCM2835_DMA_WAIT_RESP,
 			-1,
-#if 0
 			bs->dma_rx.bus_addr, /* CS of the dma_rx register */
-#else
-			bs->buffer_write_dummy.bus_addr,
-#endif
 			4,0,1);
 	/* disable transfer */
 	cb->data[0]=0x00;
 	/* and link to ourself */
-	//cb->next=cb->bus_addr;
+	cb->next=cb->bus_addr;
 	/* and return */
 	return 0;
 }
@@ -1261,14 +1231,14 @@ static int bcm2835dma_spi_schedule_dma_tail(struct bcm2835dma_spi *bs,
 			}
 		}
 
-		/* now store the current location (message,xfer) for reference */
-		status=bcm2835dma_spi_schedule_where_we_are(bs,
-							mesg,xfer,
-							is_last,
-							cb_chain);
-		if (status)
-			goto error_exit;
 	}
+	/* now store the current location (message,xfer) for reference */
+	status=bcm2835dma_spi_schedule_where_we_are(bs,
+						mesg,xfer,
+						is_last,
+						cb_chain);
+	if (status)
+		goto error_exit;
 
 	/* and return */
 	return 0;
