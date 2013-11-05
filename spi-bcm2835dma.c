@@ -3,6 +3,7 @@
  *
  * Copyright (C) 2012 Chris Boot
  * Copyright (C) 2013 Stephen Warren
+ * Copyright (C) 2013 Martin Sperl
  *
  * This driver is inspired by:
  * spi-ath79.c, Copyright (C) 2009-2011 Gabor Juhos <juhosg@openwrt.org>
@@ -136,17 +137,21 @@ MODULE_PARM_DESC(realtime, "Run the driver with realtime priority");
 /* some module-parameters for debugging and corresponding */
 static bool debug_msg = 0;
 module_param(debug_msg, bool, 0);
-MODULE_PARM_DESC(realtime, "Run the driver with message debugging enabled");
+MODULE_PARM_DESC(debug_msg, "Run the driver with message debugging enabled");
 
 static bool debug_dma = 0;
 module_param(debug_dma, bool, 0);
-MODULE_PARM_DESC(realtime, "Run the driver with dma debugging enabled");
+MODULE_PARM_DESC(debug_dma, "Run the driver with dma debugging enabled");
 
 static int delay_1us = 889;
 module_param(delay_1us, int, 0);
 MODULE_PARM_DESC(delay_1us, "the value we need to use for a 1 us delay via dma transfers ...");
 /* note that this value has some variation - based on other activities happening on the bus...
    this also adds memory overhead slowing down the whole system when there is lots of memory access ...*/
+
+static bool allow_prepared = 1;
+module_param(allow_prepared, bool, 0);
+MODULE_PARM_DESC(allow_prepared, "Run the driver with spi_prepare_message support");
 
 /* the layout of the DMA register itself - use writel/readl for it to work correctly */
 struct bcm2835_dma_regs {
@@ -725,7 +730,7 @@ static irqreturn_t bcm2835dma_spi_interrupt_dma_rx(int irq, void *dev_id)
 
 	/* write interrupt message to debug */ 
 	if (unlikely(debug_dma))
-		printk(KERN_DEBUG "Interrupt %i triggered for message: %08x\n",irq,*((u32*)bs->last_spi_message_finished.addr));
+		printk(KERN_DEBUG "RX-Interrupt %i triggered for message: %08x\n",irq,*((u32*)bs->last_spi_message_finished.addr));
 
 	/* we need to clean the IRQ flag as well 
 	 * otherwise it will trigger again...
@@ -733,6 +738,29 @@ static irqreturn_t bcm2835dma_spi_interrupt_dma_rx(int irq, void *dev_id)
 	 * and we are not using it for the RX path
 	 */
 	 writel(BCM2835_DMA_CS_INT, bs->dma_rx.base+BCM2708_DMA_CS);
+
+	/* wake up task */
+	complete(&bs->done);
+
+	/* and return with the IRQ marked as handled */
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id) 
+{
+	struct spi_master *master = dev_id;
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+
+	/* write interrupt message to debug */ 
+	if (unlikely(debug_dma))
+		printk(KERN_DEBUG "TX-Interrupt %i triggered for message: %08x\n",irq,*((u32*)bs->last_spi_message_finished.addr));
+
+	/* we need to clean the IRQ flag as well 
+	 * otherwise it will trigger again...
+	 * as we are on the READ DMA queue, we should not have an issue setting/clearing WAIT_FOR_OUTSTANDING_WRITES
+	 * and we are not using it for the RX path
+	 */
+	 writel(BCM2835_DMA_CS_INT, bs->dma_tx.base+BCM2708_DMA_CS);
 
 	/* wake up task */
 	complete(&bs->done);
@@ -776,6 +804,42 @@ static int bcm2835dma_spi_schedule_cdiv_config(struct bcm2835dma_spi *bs,
 	*cdiv=cb->data[0];
 	return 0;
 }
+
+static int bcm2835dma_spi_schedule_tx_dma(struct bcm2835dma_spi *bs,
+					dma_addr_t **link_here,
+					struct list_head *cb_chain)
+{
+	struct bcm2835dma_dma_cb* cb;
+	/* even though it looks tempting, there are times when the Strides are not handled exactly - or so it seems...
+	 * so we first set the control address and then start it in a separate transfer
+	 */
+	cb=bcm2835dma_add_cb(bs,&bs->dma_rx,cb_chain,NULL,
+				BCM2835_DMA_WAIT_RESP,
+				-1, /* take our source */
+				bs->dma_tx.bus_addr+4, /* the DMA Address of the TX buffer */
+				4,0,
+				1
+		); 
+	if (!cb)
+		return -ENOMEM;
+	cb->data[0]=0;
+	*link_here=&cb->data[0];
+
+	/* and now enable TX-DMA */
+	cb=bcm2835dma_add_cb(bs,&bs->dma_rx,cb_chain,NULL,
+				BCM2835_DMA_WAIT_RESP,
+				-1, /* take our source */
+				bs->dma_tx.bus_addr, /* the DMA Address of the TX buffer */
+				4,0,
+				1
+		); 
+	if (!cb)
+		return -ENOMEM;
+	cb->data[0]=BCM2835_DMA_CS_ACTIVE;
+	/* and return OK */
+	return 0;
+}
+
 static int bcm2835dma_spi_schedule_setup_dma_transfer(struct bcm2835dma_spi *bs,
 						u32 cs,
 						dma_addr_t **link_here,
@@ -825,34 +889,8 @@ static int bcm2835dma_spi_schedule_setup_dma_transfer(struct bcm2835dma_spi *bs,
 		| BCM2835_SPI_CS_DMAEN /* enable DMA Transfer*/
 		;
 
-	/* even though it looks tempting, there are times when the Strides are not handled exactly - or so it seems...
-	 * so we first set the control address and then start it in a separate transfer
-	 */
-	cb=bcm2835dma_add_cb(bs,&bs->dma_rx,cb_chain,NULL,
-				BCM2835_DMA_WAIT_RESP,
-				-1, /* take our source */
-				bs->dma_tx.bus_addr+4, /* the DMA Address of the TX buffer */
-				4,0,
-				1
-		); 
-	if (!cb)
-		return -ENOMEM;
-	cb->data[0]=0;
-	*link_here=&cb->data[0];
-
-	/* and now enable TX-DMA */
-	cb=bcm2835dma_add_cb(bs,&bs->dma_rx,cb_chain,NULL,
-				BCM2835_DMA_WAIT_RESP,
-				-1, /* take our source */
-				bs->dma_tx.bus_addr, /* the DMA Address of the TX buffer */
-				4,0,
-				1
-		); 
-	if (!cb)
-		return -ENOMEM;
-	cb->data[0]=BCM2835_DMA_CS_ACTIVE;
-	/* and return OK */
-	return 0;
+	/* and schedule TX */
+	return bcm2835dma_spi_schedule_tx_dma(bs,link_here,cb_chain);
 }
 
 static int bcm2835dma_spi_schedule_single_transfer(struct bcm2835dma_spi *bs, 
@@ -1004,30 +1042,101 @@ static int bcm2835dma_spi_schedule_where_we_are(struct bcm2835dma_spi *bs,
 						struct list_head *cb_chain) 
 {
 	struct bcm2835dma_dma_cb *cb;
+	struct bcm2835dma_spi_dma *dma=&bs->dma_rx;
+	u32 info=BCM2835_DMA_WAIT_RESP;
+	u32 status=0;
+	dma_addr_t *link_here=NULL;
+
+	/* not possible in the non-pipelined case - need to set it or we time out... */
+	if (is_last
+#ifdef IS_PIPELINED
+		&& mesg->complete
+#endif
+		) {
+		/* set the interrupt flag */
+		info|=BCM2835_DMA_INT_EN;
+		/* set the channel to use */
+		dma=&bs->dma_tx;
+		/* and schedule TX */
+		status=bcm2835dma_spi_schedule_tx_dma(bs,&link_here,cb_chain);
+		if (status) { 
+			return status; 
+		}
+
+	}
 
 	/* create a transfer that identifies which transfer we have finished */
-	cb=bcm2835dma_add_cb(bs,&bs->dma_rx,cb_chain,mesg,
-			BCM2835_DMA_WAIT_RESP,
-			-1,
-			bs->last_spi_message_finished.bus_addr,
-			4,0,1);
+	cb=bcm2835dma_add_cb(bs,dma,cb_chain,mesg,
+				info,
+				-1,
+				bs->last_spi_message_finished.bus_addr,
+				4,0,
+				(info&BCM2835_DMA_INT_EN)?0:1
+		);
+	if (!cb) 
+		return -ENOMEM;
+	/* set the message we have finished */
 	cb->data[0]=(u32)mesg;
-#ifdef IS_PIPELINED
-	/* not possible in the non-pipelined case - need to set it or we time out... */
-	if (is_last && mesg->complete)
-		cb->info|=BCM2835_DMA_INT_EN;
-#else
-	if (is_last)
-		cb->info|=BCM2835_DMA_INT_EN;
-#endif
+	
+	/* and link the message in the "correct" location, if we need to link  */
+	if (link_here) 
+		*link_here=cb->bus_addr;
 
 	/* and return OK */
+	return 0;
+}
+
+static int bcm2835dma_spi_schedule_interrupt(struct bcm2835dma_spi *bs, 
+					struct list_head *cb_chain) 
+{
+	struct bcm2835dma_dma_cb *cb;
+
+	/* create a transfer that starts TX DMA to trigger an interrupt
+	 * this works arround a bug, where an interrupt only gets triggered
+	 * when it is the last transfer and no more CBs are chained
+	 */
+	cb=bcm2835dma_add_cb(bs,&bs->dma_rx,cb_chain,NULL,
+			BCM2835_DMA_WAIT_RESP,
+			-1,
+#if 0
+			bs->dma_rx.bus_addr, /* CS of the dma_rx register */
+#else
+			bs->buffer_write_dummy.bus_addr,
+#endif
+			4,0,1);
+	/* disable transfer */
+	cb->data[0]=0x00;
+	/* and link to ourself */
+	//cb->next=cb->bus_addr;
+	/* and return */
 	return 0;
 }
 
 static int bcm2835dma_spi_schedule_dma_tail(struct bcm2835dma_spi *bs, 
 					struct list_head *cb_chain) 
 {
+	struct bcm2835dma_dma_cb *cb;
+
+	/* create a transfer that stops DMA in case we have finished
+	 * but which allows us to restart the DMA transparently
+	 * and DMA continues if linked correctly
+	 * this is needed for "transparent" restarts and should avoid
+	 * races between SW and HW.
+	 */
+	cb=bcm2835dma_add_cb(bs,&bs->dma_rx,cb_chain,NULL,
+			BCM2835_DMA_WAIT_RESP,
+			-1,
+#if 0
+			bs->dma_rx.bus_addr, /* CS of the dma_rx register */
+#else
+			bs->buffer_write_dummy.bus_addr,
+#endif
+			4,0,1);
+	/* disable transfer */
+	cb->data[0]=0x00;
+	/* and link to ourself */
+	//cb->next=cb->bus_addr;
+	/* and return */
 	return 0;
 }
 
@@ -1160,17 +1269,12 @@ static int bcm2835dma_spi_schedule_dma_tail(struct bcm2835dma_spi *bs,
 		if (status)
 			goto error_exit;
 	}
-	/* finally we need to set up the dummy-control-block for the next transfer to get easily chained to - that is for pipelining to work */
-	status=bcm2835dma_spi_schedule_dma_tail(bs,
-						cb_chain);
-	if (status)
-		goto error_exit;
 
 	/* and return */
 	return 0;
 
 error_exit:
-	/* clean up memory */
+	/* clean up memory is not needed, as the master should delete in the case of an error (hopefully)*/
 	/* return the error */
 	return status;
 }
@@ -1273,6 +1377,10 @@ int bcm2835dma_spi_prepare_message(struct spi_device *spi,
 	struct bcm2835dma_prepared_message *prep;
         struct bcm2835dma_dma_cb *cb;
 	int status=0;
+	/* return immediately if we are not supposed to support prepared spi_messages */
+	if (!allow_prepared)
+		return 0;
+
 	/* no preparation if not FULLY DMA mapped! */
 	if (!message->is_dma_mapped) {
 		dev_err(&spi->dev,"preparing a message, that is not dma mapped - not supported\n");
@@ -1330,6 +1438,9 @@ int bcm2835dma_spi_unprepare_message(struct spi_device *spi,
 {
 	struct bcm2835dma_prepared_message *prep;
         struct bcm2835dma_dma_cb *cb;
+	/* return immediately if we are not supposed to support prepared spi_messages */
+	if (!allow_prepared)
+		return 0;
 	/* find and remove the item from list */
 	prep=(struct bcm2835dma_prepared_message*)
 		bcm2835dma_spi_remove_prepared_message(spi,message);
@@ -1379,9 +1490,19 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 			message,
 			cb_chain);
 	}
-	writel(bs->cs_device_flags_idle,bs->regs+BCM2835_SPI_CS);
 	if (status)
 		goto error_exit;
+	/* we need to set up the dummy-control-block for the next transfer
+	   this can not be part of a prepared statement and needs to be left
+	   when freeing the DMA chains - otherwise chaos may break loose */
+#if 1
+	status=bcm2835dma_spi_schedule_dma_tail(bs,
+						cb_chain);
+#endif
+	if (status)
+		goto error_exit;
+
+	writel(bs->cs_device_flags_idle,bs->regs+BCM2835_SPI_CS);
 	/* if debugging dma, then dump what we got so far prior to scheduling */
 	if (unlikely(debug_dma)) 
 		bcm2835dma_dump_state(master);
@@ -1548,7 +1669,7 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 	clk_prepare_enable(bs->clk);
 
 	/* allocate DMA */
-	if ((err=bcm2835dma_allocate_dma(pdev,&bs->dma_tx,NULL,"tx"))) {
+	if ((err=bcm2835dma_allocate_dma(pdev,&bs->dma_tx,bcm2835dma_spi_interrupt_dma_tx,"tx"))) {
 		goto out_release_dma;
 	}
 	if ((err=bcm2835dma_allocate_dma(pdev,&bs->dma_rx,bcm2835dma_spi_interrupt_dma_rx,"rx"))) {
