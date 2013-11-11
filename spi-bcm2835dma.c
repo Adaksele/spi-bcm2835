@@ -765,6 +765,30 @@ static irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+static int bcm2835dma_spi_schedule_delay(struct bcm2835dma_spi *bs,
+					u32 delay,
+					struct list_head *cb_chain)
+{
+	struct bcm2835dma_dma_cb* cb;
+	/* schedule a dummy transfer that uses lots of AXI wait cycles */
+	cb=bcm2835dma_add_cb(bs,&bs->dma_rx,cb_chain,NULL,
+			BCM2835_DMA_WAIT_RESP|BCM2835_DMA_WAITS(0x1f)|BCM2835_DMA_NO_WIDE_BURSTS
+			|BCM2835_DMA_S_IGNORE|BCM2835_DMA_D_IGNORE,
+			bs->buffer_read_0xff.bus_addr,
+			bs->buffer_write_dummy.bus_addr,
+			0,0,1);
+	if (!cb)
+		return -ENOMEM;
+	/* now assign the delay - this is taken from an empirical value.
+	   this seems to have a jitter of about 1% (when measuring in the 1ms delay range) 
+	   bigger below, because the initial ControlBlock needs to get loaded as well, adding some overhead
+	*/
+	cb->length=delay;
+
+	/* and return OK */
+	return 0;
+}
+
 static int bcm2835dma_spi_schedule_cdiv_config(struct bcm2835dma_spi *bs, 
 					u32 speed_hz, u32 clk_hz, 
 					u32* cdiv,
@@ -856,7 +880,13 @@ static int bcm2835dma_spi_schedule_setup_dma_transfer(struct bcm2835dma_spi *bs,
 		| BCM2835_SPI_CS_TA /* enable Transfer */
 		| BCM2835_SPI_CS_CLEAR_RX /* clear RX buffers */
 		| BCM2835_SPI_CS_CLEAR_TX /* clear TX buffers */
-		;
+		/* to avoid the "CS-glitch on CLEAR_TX, we make use of:
+		 * changing polarity for the current CS
+		 * and using an "unsupported" CS
+		 */
+		|BCM2835_SPI_CS_CS_10|BCM2835_SPI_CS_CS_01;
+	/* we need to toggle the CS for the current bit - this may produce other "glitches" unfortunately...*/
+	cb->data[0] ^= BCM2835_SPI_CS_CSPOL0<<(cs&0x03);
 
 	/* setup length */
 	cb=bcm2835dma_add_cb(bs,&bs->dma_rx,cb_chain,NULL,
@@ -985,32 +1015,7 @@ static int bcm2835dma_spi_schedule_single_transfer(struct bcm2835dma_spi *bs,
 	return 0;
 }
 
-static int bcm2835dma_spi_schedule_delay(struct bcm2835dma_spi *bs, 
-					u32 delay,
-					struct list_head *cb_chain)
-{
-	struct bcm2835dma_dma_cb* cb;
-	/* schedule a dummy transfer that uses lots of AXI wait cycles */
-	cb=bcm2835dma_add_cb(bs,&bs->dma_rx,cb_chain,NULL,
-			BCM2835_DMA_WAIT_RESP|BCM2835_DMA_WAITS(0x1f)|BCM2835_DMA_NO_WIDE_BURSTS
-			|BCM2835_DMA_S_IGNORE|BCM2835_DMA_D_IGNORE,
-			bs->buffer_read_0xff.bus_addr,
-			bs->buffer_write_dummy.bus_addr,
-			0,0,1);
-	if (!cb) 
-		return -ENOMEM;
-	/* now assign the delay - this is taken from an empirical value.
-	   this seems to have a jitter of about 1% (when measuring in the 1ms delay range) 
-	   bigger below, because the initial ControlBlock needs to get loaded as well, adding some overhead
-	*/
-	cb->length=delay;
-	
- 	/* and return OK */
-	return 0;
-}
-
 static int bcm2835dma_spi_schedule_cs_change(struct bcm2835dma_spi *bs,
-					u32 cdiv,
 					struct list_head *cb_chain)
 {
 	struct bcm2835dma_dma_cb* cb;
@@ -1070,9 +1075,9 @@ static int bcm2835dma_spi_schedule_where_we_are(struct bcm2835dma_spi *bs,
 		);
 	if (!cb) 
 		return -ENOMEM;
-	/* set the message we have finished the specific message */
+	/* set the message we have just finished plus the pointer to the current CB */
 	cb->data[0]=(u32)mesg;
-	cb->data[1]=(u32)cb;
+	cb->data[1]=(u32)cb; /* for cleanup of CBs */
 	
 	/* and link the message in the "correct" location, if we need to link  */
 	if (link_here) 
@@ -1189,7 +1194,6 @@ static int bcm2835dma_spi_schedule_where_we_are(struct bcm2835dma_spi *bs,
 		/* if we got cs_change or an end of transfer */
 		if ((xfer->cs_change)||is_last) {
 			status=bcm2835dma_spi_schedule_cs_change(bs,
-								cdiv,
 								cb_chain);
 			if (status)
 				goto error_exit;
@@ -1317,6 +1321,7 @@ int bcm2835dma_spi_prepare_message(struct spi_device *spi,
 {
 	struct bcm2835dma_prepared_message *prep;
         struct bcm2835dma_dma_cb *cb;
+	struct spi_transfer *xfer;
 	int status=0;
 	/* return immediately if we are not supposed to support prepared spi_messages */
 	if (!allow_prepared)
@@ -1329,7 +1334,7 @@ int bcm2835dma_spi_prepare_message(struct spi_device *spi,
 	}
 
 #if 1
-	struct spi_transfer *xfer;
+	/* workarround for things that usually get done during "spi_async" */
         list_for_each_entry(xfer, &message->transfers, transfer_list) {
                 if (!xfer->bits_per_word)
                         xfer->bits_per_word = spi->bits_per_word;
@@ -1337,7 +1342,6 @@ int bcm2835dma_spi_prepare_message(struct spi_device *spi,
                         xfer->speed_hz = spi->max_speed_hz;
         }
 #endif
-
 
 	/* allocate structure */
 	prep=kmalloc(sizeof(struct bcm2835dma_prepared_message),GFP_KERNEL);
