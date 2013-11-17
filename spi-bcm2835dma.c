@@ -153,6 +153,10 @@ static bool allow_prepared = 1;
 module_param(allow_prepared, bool, 0);
 MODULE_PARM_DESC(allow_prepared, "Run the driver with spi_prepare_message support");
 
+static bool use_transfer_one = 0;
+module_param(use_transfer_one, bool, 0);
+MODULE_PARM_DESC(use_transfer_one, "Run the driver with the transfer_one_message interface...");
+
 /* the layout of the DMA register itself - use writel/readl for it to work correctly */
 struct bcm2835_dma_regs {
 	/* the dma control registers */
@@ -243,7 +247,7 @@ struct bcm2835dma_dma_cb {
 	/* some FLAGS - to a full 32 bit*/
 	bool mmapped_source:1;
 	bool mmapped_destination:1;
-	bool do_message_complete:1; /* the message pointer sits in data[1] */
+	bool end_of_message:1; /* marker flag to identify the last CB of a message, the pointer of which sits in data[0] */
 	u32 padding:29;
 };
 
@@ -388,7 +392,7 @@ static struct bcm2835dma_dma_cb *bcm2835dma_add_cb(struct bcm2835dma_spi *bs,
 	cb->dma=dma;
 	cb->mmapped_source=0;
 	cb->mmapped_destination=0;
-	cb->do_message_complete=0;
+	cb->end_of_message=0;
 	cb->prepared=NULL;
 	/* return early if no list */
 	if (!list)
@@ -487,17 +491,21 @@ static void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 		/* check the dma_addr against the one we have in register and exit loop */
 		if (cb->bus_addr == current_dma) 
 			break;
-		/* release the entry */
-		bcm2835dma_release_cb(master,cb);
-		/* do the complete call if needed */
-		if (cb->do_message_complete) {
-			mesg  = (struct spi_message *)cb->data[1];
-			if ((mesg) && (mesg->complete)) {
-				mesg->complete(mesg->context);
+		/* do the complete call if we run in transfer mode and this is an EOM cb */
+		if ((! use_transfer_one)&&(cb->end_of_message)) {
+			mesg = (struct spi_message *)cb->data[0];
+			if (mesg) {
+				/* set status to OK */
+				mesg->status=0;
+				/* and call complete */
+				if (mesg->complete)
+					mesg->complete(mesg->context);
 			} else {
-				dev_err(&master->dev,"do message complete set, when there is nothing to do\n");
+				dev_err(&master->dev,"message is null, but it is terminating a message\n");
 			}
 		}
+		/* release the entry last */
+		bcm2835dma_release_cb(master,cb);
 	}
 	/* and unlock */
 	spin_unlock_irqrestore(&bs->active_lock,flags);
@@ -512,7 +520,7 @@ int bcm2835dma_schedule_cbchain(struct spi_master *master,struct list_head *list
 	/* if the list we received is empty, then return */
 	if (list_empty(list))
 		return 0;
-	/* now get the first entry of this list */
+	/* get the first entry of this list */
 	first = list_first_entry(
 		list,
 		struct bcm2835dma_dma_cb,
@@ -524,9 +532,11 @@ int bcm2835dma_schedule_cbchain(struct spi_master *master,struct list_head *list
 
 	/* now chain last to first */
 	if (!list_empty(&bs->active_cb_chain)) {
-		last = list_entry((list)->next, struct bcm2835dma_dma_cb, cb_chain);
-		/* so we can also link now the DMA cbs*/
+		/* get the last entry of the active chain */
+		last = list_entry((bs->active_cb_chain.prev), struct bcm2835dma_dma_cb, cb_chain);
+		/* so we can also link now the DMA cb s*/
 		last->next=first->bus_addr;
+		printk(KERN_INFO "Adding %pK(%08x) to %pK(%08x)\n",first,first->bus_addr,last,last->bus_addr);
 		/* and sync the memory via a barrier */
 		dsb();
 	}
@@ -534,12 +544,16 @@ int bcm2835dma_schedule_cbchain(struct spi_master *master,struct list_head *list
 	list_splice_tail_init(list,&bs->active_cb_chain);
 
 	/* now all we are left with is checking if rx-DMA is running or not */
-	if ( !(readl(&bs->dma_rx.base->cs) & BCM2835_DMA_CS_ACTIVE )) {
+	if ((readl(&bs->dma_rx.base->cs) & BCM2835_DMA_CS_ACTIVE )) {
+		printk(KERN_INFO "dma RUNNING\n");
+	} else {
+		printk(KERN_INFO "dma_NOT RUNNING - head is %pK\n",first);
 		/* fill in next control block address */
 		writel(first->bus_addr,&(bs->dma_rx.base->addr));
+		/* and sync the memory via a barrier */
+		dsb();
 		/* and start DMA */
 		writel(BCM2835_DMA_CS_ACTIVE,&(bs->dma_rx.base->cs));
-		/* we might need to start a second time here */
 	}
 	/* and unlock and return */
 	spin_unlock_irqrestore(&bs->active_lock,flags);
@@ -597,7 +611,7 @@ static void bcm2835dma_dump_dma(struct spi_master *master,struct bcm2835dma_spi_
                 printk(KERN_DEBUG "        .pad1     = %08x\n",cb->pad[1]);
                 printk(KERN_DEBUG "        .mmap_src = %i\n",cb->mmapped_source);
                 printk(KERN_DEBUG "        .mmap_dst = %i\n",cb->mmapped_destination);
-                printk(KERN_DEBUG "        .complete = %i\n",cb->do_message_complete);
+                printk(KERN_DEBUG "        .eom      = %i\n",cb->end_of_message);
                 printk(KERN_DEBUG "        .dma_info = %pK - %s\n",cb->dma,cb->dma->desc);		
 		/* and dump the rx/tx-data itself if we have allocated it locally*/
 		if (length<=sizeof(cb->data)) {
@@ -756,10 +770,18 @@ static irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
 	 * as we are on the READ DMA queue, we should not have an issue setting/clearing WAIT_FOR_OUTSTANDING_WRITES
 	 * and we are not using it for the RX path
 	 */
-	 writel(BCM2835_DMA_CS_INT, bs->dma_tx.base+BCM2708_DMA_CS);
-
-	/* wake up task */
-	complete(&bs->done);
+	writel(BCM2835_DMA_CS_INT, bs->dma_tx.base+BCM2708_DMA_CS);
+	
+	/* dependent on how we run */
+	if (use_transfer_one) {
+		/* wake up message pump task */
+		complete(&bs->done);
+	} else {
+		/* release the control block chains until we reach the CB for that message 
+		 * this will also call complete
+		 */
+		bcm2835dma_release_cb_chain_complete(master);
+	}
 
 	/* and return with the IRQ marked as handled */
 	return IRQ_HANDLED;
@@ -1038,8 +1060,7 @@ static int bcm2835dma_spi_schedule_cs_change(struct bcm2835dma_spi *bs,
 
 static int bcm2835dma_spi_schedule_where_we_are(struct bcm2835dma_spi *bs,
 						struct spi_message *mesg,
-						struct spi_transfer *xfer,
-						int is_last,
+						int trigger_irq,
 						struct list_head *cb_chain) 
 {
 	struct bcm2835dma_dma_cb *cb;
@@ -1049,11 +1070,7 @@ static int bcm2835dma_spi_schedule_where_we_are(struct bcm2835dma_spi *bs,
 	dma_addr_t *link_here=NULL;
 
 	/* not possible in the non-pipelined case - need to set it or we time out... */
-	if (is_last
-#ifdef IS_PIPELINED
-		&& mesg->complete
-#endif
-		) {
+	if (trigger_irq) {
 		/* set the interrupt flag */
 		info|=BCM2835_DMA_INT_EN;
 		/* set the channel to use */
@@ -1077,8 +1094,11 @@ static int bcm2835dma_spi_schedule_where_we_are(struct bcm2835dma_spi *bs,
 		return -ENOMEM;
 	/* set the message we have just finished plus the pointer to the current CB */
 	cb->data[0]=(u32)mesg;
-	cb->data[1]=(u32)cb; /* for cleanup of CBs */
+	cb->data[1]=(u32)cb;
 	
+	/* mark this as an EndOfMessage CB, so data[0] contains the pointer to the message  */
+	cb->end_of_message=1;
+
 	/* and link the message in the "correct" location, if we need to link  */
 	if (link_here) 
 		*link_here=cb->bus_addr;
@@ -1208,11 +1228,20 @@ static int bcm2835dma_spi_schedule_where_we_are(struct bcm2835dma_spi *bs,
 		}
 
 	}
-	/* now store the current location (message,xfer) for reference */
-	status=bcm2835dma_spi_schedule_where_we_are(bs,
-						mesg,xfer,
-						is_last,
-						cb_chain);
+	/* now store the current location (message) for cleanup and callback */
+	/* for transfer_one we always need to trigger an interrupt */
+	if (use_transfer_one) {
+		status=bcm2835dma_spi_schedule_where_we_are(bs,
+							mesg,
+							1,
+							cb_chain);
+	} else {
+		/* trigger interrupt only if we have a msg complete */
+		status=bcm2835dma_spi_schedule_where_we_are(bs,
+							mesg,
+							(mesg->complete)?1:0,
+							cb_chain);
+	}
 	if (status)
 		goto error_exit;
 	/* and return */
@@ -1433,7 +1462,7 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 	u32 status=0;
 
 	/* prepare DMA chain */
-	writel(bs->cs_device_flags[message->spi->chip_select]|BCM2835_SPI_CS_CSPOL1 ,bs->regs+BCM2835_SPI_CS);
+	//writel(bs->cs_device_flags[message->spi->chip_select]|BCM2835_SPI_CS_CSPOL1 ,bs->regs+BCM2835_SPI_CS);
 	/* get the prepared message */
 	prep=(struct bcm2835dma_prepared_message*)
 		bcm2835dma_spi_find_prepared_message(message->spi,message);
@@ -1449,7 +1478,7 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 	if (status)
 		goto error_exit;
 
-	writel(bs->cs_device_flags_idle,bs->regs+BCM2835_SPI_CS);
+	//writel(bs->cs_device_flags_idle,bs->regs+BCM2835_SPI_CS);
 	/* if debugging dma, then dump what we got so far prior to scheduling */
 	if (unlikely(debug_dma)) 
 		bcm2835dma_dump_state(master);
@@ -1494,6 +1523,57 @@ error_exit:
 	/* and return */
 	return status;
 }
+
+static int bcm2835dma_spi_transfer(struct spi_device *spi,
+		struct spi_message *message)
+{
+	struct spi_master *master = spi->master;
+	/*struct bcm2835dma_spi *bs = spi_master_get_devdata(master);*/
+	struct bcm2835dma_prepared_message *prep=NULL;
+	/* the list head to use by default - if no prepared spi_nmessage exists */
+	LIST_HEAD(cb_chain_tmp);
+	struct list_head *cb_chain=&cb_chain_tmp;
+	/* the status */
+	u32 status=0;
+
+	/* prepare DMA chain */
+	/* get the prepared message */
+	prep=(struct bcm2835dma_prepared_message*)
+		bcm2835dma_spi_find_prepared_message(message->spi,message);
+	if (prep) {
+		cb_chain=&prep->prepared_cb_chain;
+	} else {
+		status=bcm2835dma_spi_message_to_cbchain(
+			master,
+			message->spi,
+			message,
+			cb_chain);
+	}
+	if (status)
+		goto error_exit;
+	/* if debugging dma, then dump what we got so far prior to scheduling */
+	if (unlikely(debug_dma)) 
+		bcm2835dma_dump_state(master);
+	
+	/* add list to DMA */
+	status=bcm2835dma_schedule_cbchain(master,cb_chain);
+	if (!status)
+		return 0;
+error_exit:
+	/* set the status - before we run the debug code and before we finalize the message */
+	message->status=status;
+
+	/* write the debug message information */
+	if (unlikely(debug_msg)) {
+		spi_print_debug_message(message,128);
+	}
+
+	/* release the control block chains until we reach the CB for that message */
+	bcm2835dma_release_cb_chain_complete(master);
+	/* and return */
+	return status;
+}
+
 
 #ifdef CONFIG_MACH_BCM2708
 static void bcm2835dma_spi_init_pinmode(void) {
@@ -1578,9 +1658,17 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 #endif
 	master->num_chipselect = BCM2835_SPI_NUM_CS;
 	master->setup = bcm2835dma_spi_setup;
-	master->transfer_one_message = bcm2835dma_spi_transfer_one;
+
 	master->dev.of_node = pdev->dev.of_node;
 	master->rt = realtime;
+
+	/* depending on if we are asked to run transfer_one or transfer register differently */
+	if (use_transfer_one) {
+		master->transfer_one_message = bcm2835dma_spi_transfer_one;
+	} else {
+		/* this unfortunately triggers the "depreciated" message */
+		master->transfer=bcm2835dma_spi_transfer;
+	}
 
 	bs = spi_master_get_devdata(master);
 
