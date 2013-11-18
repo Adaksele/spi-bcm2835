@@ -153,6 +153,10 @@ static bool allow_prepared = 1;
 module_param(allow_prepared, bool, 0);
 MODULE_PARM_DESC(allow_prepared, "Run the driver with spi_prepare_message support");
 
+static bool use_transfer_one = 1;
+module_param(use_transfer_one, bool, 0);
+MODULE_PARM_DESC(use_transfer_one, "Run the driver with the transfer_one_message");
+
 /* the layout of the DMA register itself - use writel/readl for it to work correctly */
 struct bcm2835_dma_regs {
 	/* the dma control registers */
@@ -243,7 +247,7 @@ struct bcm2835dma_dma_cb {
 	/* some FLAGS - to a full 32 bit*/
 	bool mmapped_source:1;
 	bool mmapped_destination:1;
-	bool do_message_complete:1; /* the message pointer sits in data[1] */
+	bool end_of_message:1; /* flag that marks the CB as an EndOfMessage CB, so spi_message* sits in data[0] */
 	u32 padding:29;
 };
 
@@ -412,7 +416,7 @@ static struct bcm2835dma_dma_cb *bcm2835dma_add_cb(struct bcm2835dma_spi *bs,
 	cb->dma=dma;
 	cb->mmapped_source=0;
 	cb->mmapped_destination=0;
-	cb->do_message_complete=0;
+	cb->end_of_message=0;
 	cb->prepared=NULL;
 	/* return early if no list */
 	if (!list)
@@ -513,13 +517,15 @@ static void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 			break;
 		/* release the entry */
 		bcm2835dma_release_cb(master,cb);
-		/* do the complete call if needed */
-		if (cb->do_message_complete) {
-			mesg  = (struct spi_message *)cb->data[1];
-			if ((mesg) && (mesg->complete)) {
-				mesg->complete(mesg->context);
-			} else {
-				dev_err(&master->dev,"do message complete set, when there is nothing to do\n");
+		/* do the complete call if we run in transfer mode and this is a EOM cb */
+		if ((! use_transfer_one)&&(cb->end_of_message)) {
+			mesg = (struct spi_message *)cb->data[0];
+			if (mesg) {
+				/* set status to OK */
+				mesg->status=0;
+				/* and call complete */
+				if (mesg->complete)
+					mesg->complete(mesg->context);
 			}
 		}
 	}
@@ -621,7 +627,7 @@ static void bcm2835dma_dump_dma(struct spi_master *master,struct bcm2835dma_spi_
                 printk(KERN_DEBUG "        .pad1     = %08x\n",cb->pad[1]);
                 printk(KERN_DEBUG "        .mmap_src = %i\n",cb->mmapped_source);
                 printk(KERN_DEBUG "        .mmap_dst = %i\n",cb->mmapped_destination);
-                printk(KERN_DEBUG "        .complete = %i\n",cb->do_message_complete);
+                printk(KERN_DEBUG "        .eom      = %i\n",cb->end_of_message);
                 printk(KERN_DEBUG "        .dma_info = %pK - %s\n",cb->dma,cb->dma->desc);		
 		/* and dump the rx/tx-data itself if we have allocated it locally*/
 		if (length<=sizeof(cb->data)) {
