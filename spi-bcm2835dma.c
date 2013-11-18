@@ -763,10 +763,18 @@ static irqreturn_t bcm2835dma_spi_interrupt_dma_rx(int irq, void *dev_id)
 	 * as we are on the READ DMA queue, we should not have an issue setting/clearing WAIT_FOR_OUTSTANDING_WRITES
 	 * and we are not using it for the RX path
 	 */
-	 writel(BCM2835_DMA_CS_INT, bs->dma_rx.base+BCM2708_DMA_CS);
+	writel(BCM2835_DMA_CS_INT, bs->dma_rx.base+BCM2708_DMA_CS);
 
-	/* wake up task */
-	complete(&bs->done);
+	/* dependent on how we run */
+	if (use_transfer_one) {
+		/* wake up message pump task */
+		complete(&bs->done);
+	} else {
+		/* release the control block chains until we reach the CB for th
+		 * this will also call complete
+		 */
+		bcm2835dma_release_cb_chain_complete(master);
+	}
 
 	/* and return with the IRQ marked as handled */
 	return IRQ_HANDLED;
