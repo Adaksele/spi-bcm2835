@@ -514,6 +514,7 @@ static void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 int bcm2835dma_schedule_cbchain(struct spi_master *master,struct list_head *list)
 {
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+        struct bcm2835dma_dma_cb *cb;
 	unsigned long flags;
 	/* retain a copy of the first item in the list - we need it...*/
 	struct bcm2835dma_dma_cb *first, *last=NULL;
@@ -536,7 +537,7 @@ int bcm2835dma_schedule_cbchain(struct spi_master *master,struct list_head *list
 		last = list_entry((bs->active_cb_chain.prev), struct bcm2835dma_dma_cb, cb_chain);
 		/* so we can also link now the DMA cb s*/
 		last->next=first->bus_addr;
-		printk(KERN_INFO "Adding %pK(%08x) to %pK(%08x)\n",first,first->bus_addr,last,last->bus_addr);
+		//printk(KERN_INFO "Adding %pK(%08x) to %pK(%08x)\n",first,first->bus_addr,last,last->bus_addr);
 		/* and sync the memory via a barrier */
 		dsb();
 	}
@@ -545,7 +546,7 @@ int bcm2835dma_schedule_cbchain(struct spi_master *master,struct list_head *list
 
 	/* now all we are left with is checking if rx-DMA is running or not */
 	if ((readl(&bs->dma_rx.base->cs) & BCM2835_DMA_CS_ACTIVE )) {
-		printk(KERN_INFO "dma RUNNING\n");
+		printk(KERN_INFO "dma still RUNNING\n");
 	} else {
 		printk(KERN_INFO "dma_NOT RUNNING - head is %pK\n",first);
 		/* fill in next control block address */
@@ -555,6 +556,13 @@ int bcm2835dma_schedule_cbchain(struct spi_master *master,struct list_head *list
 		/* and start DMA */
 		writel(BCM2835_DMA_CS_ACTIVE,&(bs->dma_rx.base->cs));
 	}
+	/* quick dump of the chain */
+	printk( KERN_INFO " first CB=%pK lastCB=%pK\n",first,last);
+	
+	list_for_each_entry(cb,&bs->active_cb_chain,cb_chain) {
+		printk( KERN_INFO "   CB=%pK\n",cb);
+	}
+	
 	/* and unlock and return */
 	spin_unlock_irqrestore(&bs->active_lock,flags);
 	return 0;
@@ -1239,7 +1247,8 @@ static int bcm2835dma_spi_schedule_where_we_are(struct bcm2835dma_spi *bs,
 		/* trigger interrupt only if we have a msg complete */
 		status=bcm2835dma_spi_schedule_where_we_are(bs,
 							mesg,
-							(mesg->complete)?1:0,
+							//(mesg->complete)?1:0,
+							1,
 							cb_chain);
 	}
 	if (status)
@@ -1555,7 +1564,7 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 	if (unlikely(debug_dma)) 
 		bcm2835dma_dump_state(master);
 	
-	/* add list to DMA */
+	/* add prepared list to DMA */
 	status=bcm2835dma_schedule_cbchain(master,cb_chain);
 	if (!status)
 		return 0;
