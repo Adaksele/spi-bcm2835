@@ -515,8 +515,6 @@ static void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 		/* check the dma_addr against the one we have in register and exit loop */
 		if (cb->bus_addr == current_dma) 
 			break;
-		/* release the entry */
-		bcm2835dma_release_cb(master,cb);
 		/* do the complete call if we run in transfer mode and this is a EOM cb */
 		if ((! use_transfer_one)&&(cb->end_of_message)) {
 			mesg = (struct spi_message *)cb->data[0];
@@ -528,6 +526,8 @@ static void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 					mesg->complete(mesg->context);
 			}
 		}
+		/* release the entry last */
+		bcm2835dma_release_cb(master,cb);
 	}
 	/* and unlock */
 	spin_unlock_irqrestore(&bs->active_lock,flags);
@@ -1622,9 +1622,15 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 #endif
 	master->num_chipselect = BCM2835_SPI_NUM_CS;
 	master->setup = bcm2835dma_spi_setup;
-	master->transfer_one_message = bcm2835dma_spi_transfer_one;
 	master->dev.of_node = pdev->dev.of_node;
 	master->rt = realtime;
+
+	if (use_transfer_one)
+		master->transfer_one_message = bcm2835dma_spi_transfer_one;
+	else {
+		printk(KERN_ERR "transfer message support not implemented yet");
+		return -ENODEV;
+	}
 
 	bs = spi_master_get_devdata(master);
 
