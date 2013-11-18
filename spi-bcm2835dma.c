@@ -249,6 +249,26 @@ struct bcm2835dma_dma_cb {
 
 static void bcm2835dma_dump_state(struct spi_master *master);
 static void bcm2835dma_release_cb_chain_complete(struct spi_master *master);
+void bcm2835dma_spi_free_prepared_message(struct spi_master *master,struct bcm2835dma_prepared_message *prep);
+
+static void bcm2835dma_release_dma_pool(struct bcm2835dma_spi *bs)
+{
+	/* only if we got a pool */
+	if (!bs->pool)
+		return;
+	/* free the allocated objects */
+	if (bs->buffer_write_dummy.addr)
+		dma_pool_free(bs->pool,bs->buffer_write_dummy.addr,bs->buffer_write_dummy.bus_addr);
+	if (bs->buffer_read_0xff.addr)
+		dma_pool_free(bs->pool,bs->buffer_read_0xff.addr,bs->buffer_read_0xff.bus_addr);
+	if (bs->buffer_read_0x00.addr)
+		dma_pool_free(bs->pool,bs->buffer_read_0x00.addr,bs->buffer_read_0x00.bus_addr);
+	if (bs->last_spi_message_finished.addr)
+		dma_pool_free(bs->pool,bs->last_spi_message_finished.addr,bs->last_spi_message_finished.bus_addr);
+	/* and free the pool */
+	dma_pool_destroy(bs->pool);
+        bs->pool=NULL;
+}
 
 /* the following 2 functions are in need of a rewrite to get them use the
    linux-dma-manager instead for allocation of DMAs*/
@@ -258,6 +278,8 @@ static void bcm2835dma_release_dma(struct spi_master *master,
 {
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	unsigned long flags;
+	struct spi_prepared_message *prepared;
+	/* if no base, then we are not configured, so return */
 	if (!d->base)
                 return;
 	/* reset the DMA */
@@ -267,8 +289,10 @@ static void bcm2835dma_release_dma(struct spi_master *master,
 	bcm2835dma_release_cb_chain_complete(master);
 	/* now release the prepared messages */
 	spin_lock_irqsave(&bs->prepared_messages_lock,flags);
-	/* todo: release messages */
-
+	/* release messages */
+	list_for_each_entry(prepared, &bs->prepared_messages_list, prepared_list) {
+		bcm2835dma_spi_free_prepared_message(master,list_entry(prepared,struct bcm2835dma_prepared_message,prepared));
+	}
 	/* unlock and return the deleted version */
 	spin_unlock_irqrestore(&bs->prepared_messages_lock,flags);
 	/* release interrupt handler and dma */
@@ -1389,11 +1413,25 @@ err_release:
 }
 EXPORT_SYMBOL_GPL(bcm2835dma_spi_prepare_message);
 
+void bcm2835dma_spi_free_prepared_message(struct spi_master *master,struct bcm2835dma_prepared_message *prep) {
+        struct bcm2835dma_dma_cb *cb;
+	/* now "unmark the cbs as prepared */
+	list_for_each_entry(cb,&prep->prepared_cb_chain,cb_chain) {
+		cb->prepared=NULL;
+	}
+	/* and now we can remove it finally */
+        bcm2835dma_release_cb_chain(
+                master,
+                &prep->prepared_cb_chain
+                );
+        /* and release the memory allocated for the prepared list */
+        kfree(prep);
+}
+
 int bcm2835dma_spi_unprepare_message(struct spi_device *spi,
 				struct spi_message *message)
 {
 	struct bcm2835dma_prepared_message *prep;
-        struct bcm2835dma_dma_cb *cb;
 	/* return immediately if we are not supposed to support prepared spi_messages */
 	if (!allow_prepared)
 		return 0;
@@ -1404,17 +1442,9 @@ int bcm2835dma_spi_unprepare_message(struct spi_device *spi,
 		dev_err(&spi->dev,"Unpreparing message at address %pK failed - it has not been prepared\n",message);
 		return -ENODEV;
 	}
-	/* now "unmark the cbs as prepared */
-	list_for_each_entry(cb,&prep->prepared_cb_chain,cb_chain) {
-		cb->prepared=NULL;
-	}
-	/* and now we can remove it finally */
-        bcm2835dma_release_cb_chain(
-                spi->master,
-                &prep->prepared_cb_chain
-                );
-        /* and release the memory allocated for the prepared list */
-        kfree(prep);
+	/* and release it */
+	bcm2835dma_spi_free_prepared_message(spi->master,prep);	
+
 	/* and return */
 	return 0;
 }
@@ -1659,12 +1689,10 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 	memset(bs->buffer_read_0x00.addr,0x00,sizeof(struct bcm2835dma_dma_cb));
 
 	bs->last_spi_message_finished.addr=dma_pool_alloc(bs->pool,GFP_KERNEL,&bs->last_spi_message_finished.bus_addr);
-        if (!bs->last_spi_message_finished.addr) {
+	if (!bs->last_spi_message_finished.addr) {
 		printk(KERN_ERR " could not allocate from memory pool");
 		goto out_release_pool;
 	}
-	memset(bs->last_spi_message_finished.addr,0x00,sizeof(struct bcm2835dma_dma_cb));
-
 #ifdef CONFIG_MACH_BCM2708
 	/* configure pin function for SPI */
 	bcm2835dma_spi_init_pinmode();
@@ -1682,8 +1710,7 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 
 	return 0;
 out_release_pool:
-	dma_pool_destroy(bs->pool);
-        bs->pool=NULL;
+	bcm2835dma_release_dma_pool(bs);
 out_release_dma:
 	bcm2835dma_release_dma(master,&bs->dma_tx);
 	bcm2835dma_release_dma(master,&bs->dma_rx);
@@ -1705,9 +1732,8 @@ static int bcm2835dma_spi_remove(struct platform_device *pdev)
 	bcm2835dma_release_dma(master,&bs->dma_rx);
 
 	/* release pool - also releases all objects */
-	dma_pool_destroy(bs->pool);
-        bs->pool=NULL;
-	
+	bcm2835dma_release_dma_pool(bs);
+
 	/* Clear FIFOs, and disable the HW block */
 	bcm2835dma_wr(bs, BCM2835_SPI_CS,
 		   BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX);
