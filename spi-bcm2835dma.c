@@ -915,16 +915,9 @@ static int bcm2835dma_spi_schedule_setup_dma_transfer(struct bcm2835dma_spi *bs,
 	if (!cb) 
 		return -ENOMEM;
 	cb->data[0]=cs /* the given settings */
-		| BCM2835_SPI_CS_TA /* enable Transfer */
 		| BCM2835_SPI_CS_CLEAR_RX /* clear RX buffers */
 		| BCM2835_SPI_CS_CLEAR_TX /* clear TX buffers */
-		/* to avoid the "CS-glitch on CLEAR_TX, we make use of:
-		 * changing polarity for the current CS
-		 * and using an "unsupported" CS
-		 */
-		|BCM2835_SPI_CS_CS_10|BCM2835_SPI_CS_CS_01;
-	/* we need to toggle the CS for the current bit - this may produce other "glitches" unfortunately...*/
-	cb->data[0] ^= BCM2835_SPI_CS_CSPOL0<<(cs&0x03);
+		;
 
 	/* setup length */
 	cb=bcm2835dma_add_cb(bs,&bs->dma_rx,cb_chain,NULL,
@@ -951,6 +944,7 @@ static int bcm2835dma_spi_schedule_setup_dma_transfer(struct bcm2835dma_spi *bs,
 	cb->data[0]=cs /* the given settings */
 		| BCM2835_SPI_CS_TA /* enable Transfer */
 		| BCM2835_SPI_CS_DMAEN /* enable DMA Transfer*/
+		| BCM2835_SPI_CS_CS_10|BCM2835_SPI_CS_CS_01 /* unofficial CS=3 */
 		;
 
 	/* and schedule TX */
@@ -1477,7 +1471,7 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 	u32 status=0;
 
 	/* prepare DMA chain */
-	writel(bs->cs_device_flags[message->spi->chip_select]|BCM2835_SPI_CS_CSPOL1 ,bs->regs+BCM2835_SPI_CS);
+	//writel(bs->cs_device_flags[message->spi->chip_select]|BCM2835_SPI_CS_CSPOL1 ,bs->regs+BCM2835_SPI_CS);
 	/* get the prepared message */
 	prep=(struct bcm2835dma_prepared_message*)
 		bcm2835dma_spi_find_prepared_message(message->spi,message);
@@ -1493,7 +1487,7 @@ static int bcm2835dma_spi_transfer_one(struct spi_master *master,
 	if (status)
 		goto error_exit;
 
-	writel(bs->cs_device_flags_idle,bs->regs+BCM2835_SPI_CS);
+	//writel(bs->cs_device_flags_idle,bs->regs+BCM2835_SPI_CS);
 	/* if debugging dma, then dump what we got so far prior to scheduling */
 	if (unlikely(debug_dma)) 
 		bcm2835dma_dump_state(master);
@@ -1584,11 +1578,14 @@ static int bcm2835dma_spi_setup(struct spi_device *spi) {
 			}
 			/* the idle mode as well */
 			bs->cs_device_flags_idle |= BCM2835_SPI_CS_CSPOL0 << cs;
+
 			/* and the specific flag for this device */
 			bs->cs_device_flags[cs] |= BCM2835_SPI_CS_CSPOL;
 		}
-		bs->cs_device_flags[cs] |= spi->chip_select;
+		/* and now invert the CS polarity for this specific cs*/
+		bs->cs_device_flags[cs] ^= BCM2835_SPI_CS_CSPOL0<<(cs&0x03);
 	}
+
 	/* and set up the other stuff */ 
 	if (mode & SPI_CPOL)
 		bs->cs_device_flags[cs] |= BCM2835_SPI_CS_CPOL;
