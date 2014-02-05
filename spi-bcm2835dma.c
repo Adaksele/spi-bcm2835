@@ -361,17 +361,130 @@ static void spi_dmafragment_return(struct spi_dmafragment_cache *cache,
 	spin_unlock_irqrestore(&cache->lock,flags);
 }
 
+struct spi_message_assemble_state {
+	struct spi_device *spi;
+	struct spi_message *message;
+	struct spi_transfer *xfer;
+	
+	u32 speed_hz,last_speed_hz;
+	u32 clock_rate;
+	u32 clock_divider;
+
+	void *link_rx_here;
+	void *link_tx_here;
+
+	struct list_head *chain;
+
+	gfp_t gfp;
+};
+
+int __spi_message_assemble_dma_clock(
+	struct spi_message_assemble_state *state);
+int __spi_message_assemble_dma_prepare_transfer(
+	struct spi_message_assemble_state *state);
+int __spi_message_assemble_dma_transfer(
+	struct spi_message_assemble_state *state);
+int __spi_message_assemble_dma_delay(
+	struct spi_message_assemble_state *state);
+int __spi_message_assemble_dma_change_cs(
+	struct spi_message_assemble_state *state);
+int __spi_message_assemble_dma_interrupt(
+	struct spi_message_assemble_state *state);
+
 static int spi_message_assemble_dma(
 	struct spi_device *spi,
 	struct spi_message *m,
 	struct list_head *chain,
 	gfp_t flags)
 {
-	//struct spi_master* master=spi->master;
-	/* start assembling dma */
-	
-	return -EPERM;
+	struct spi_master* master=spi->master;
+	int ret=0;
+	/* the state */
+	struct spi_message_assemble_state state;
+	state.spi=spi;
+	state.message=m;
+	state.chain=chain;
+	state.gfp=flags;
+	state.speed_hz=spi->max_speed_hz;
+	state.last_speed_hz=0;
+	state.clock_rate=0;
+	state.clock_divider=0;
+	state.link_rx_here=NULL;
+	state.link_tx_here=NULL;
+	/* start assembling dma transfers from fragments */
+	INIT_LIST_HEAD(chain);
+	list_for_each_entry(state.xfer,
+			&state.message->transfers, 
+			transfer_list) {
+		/* first the clock config */
+		ret=__spi_message_assemble_dma_clock(&state);
+		if (ret)
+			return ret;
+		/* now set up TX/RX DMA and configure SPI registers */
+		ret=__spi_message_assemble_dma_prepare_transfer(&state);
+		if (ret)
+			return ret;
+		/* and now loop all the xfers until we find an exit condition */
+		ret=__spi_message_assemble_dma_transfer(&state);
+		if (ret)
+			return ret;
+		/* schedule some delay (possibly either way ) */
+		ret=__spi_message_assemble_dma_delay(&state);
+		if (ret)
+			return ret;
+		/* schedule cs_up if needed */
+		if (
+			(state.xfer->cs_change)
+			||(list_is_last(
+					&state.xfer->transfer_list,
+					&m->transfers)
+				)) {
+			ret=__spi_message_assemble_dma_change_cs(&state);
+			if (ret)
+				return ret;
+		}
+	}
+	/* and if we need to run an interrupt schedule that */
+	if ((m->complete)||(master->transfer_one_message)) {
+		ret=__spi_message_assemble_dma_interrupt(&state);
+		if (ret)
+			return ret;
+	}
+
+	/* and return ok */
+	return 0;
 }
+int __spi_message_assemble_dma_clock(
+	struct spi_message_assemble_state *state)
+{
+	if (state->xfer->speed_hz)
+		state->speed_hz=state->xfer->speed_hz;
+	if (state->last_speed_hz==state->speed_hz)
+		return 0;
+	state->last_speed_hz=state->speed_hz;
+
+	
+
+
+	return 0;
+}
+
+int __spi_message_assemble_dma_prepare_transfer(
+	struct spi_message_assemble_state *state)
+{ return -EPERM; }
+int __spi_message_assemble_dma_transfer(
+	struct spi_message_assemble_state *state)
+{ return -EPERM; }
+int __spi_message_assemble_dma_delay(
+	struct spi_message_assemble_state *state)
+{ return -EPERM; }
+int __spi_message_assemble_dma_change_cs(
+	struct spi_message_assemble_state *state)
+{ return -EPERM; }
+int __spi_message_assemble_dma_interrupt(
+	struct spi_message_assemble_state *state)
+{ return -EPERM; }
+
 
 static void spi_release_dmachain(
 	struct spi_master* master,dma_addr_t active)
@@ -469,12 +582,12 @@ void  bcm2835_dmafragment_chain_free(struct dma_pool* pool,
 /* here the real fragments */
 
 /* the set Clock Divider fragment */
-struct bcm2835dma_dmafragment_set_cdiv {
+struct bcm2835dma_dmafragment_clock {
 	struct spi_dmafragment fragment;
 	u32 cdiv;
 };
 
-struct spi_dmafragment *bcm2835dma_dmafragment_set_cdiv_create(
+struct spi_dmafragment *bcm2835dma_dmafragment_clock_create(
 	struct spi_dmafragment_cache *cache, gfp_t gfp)
 {
 	/* allocate the dma_fragment itself (should be in DMA region), 
@@ -484,7 +597,7 @@ struct spi_dmafragment *bcm2835dma_dmafragment_set_cdiv_create(
 	return NULL;
 }
 
-void bcm2835dma_dmafragment_set_cdiv_release(
+void bcm2835dma_dmafragment_clock_release(
 	struct spi_dmafragment_cache *cache,
 	struct spi_dmafragment * frag)
 {
@@ -549,7 +662,7 @@ struct bcm2835dma_spi {
 	} buffer_write_dummy,buffer_read_0x00;
 
 	/* the dmachain caches */
-	struct spi_dmafragment_cache dma_fragment_cache_set_cdiv,
+	struct spi_dmafragment_cache dma_fragment_cache_clock,
 		dma_fragment_cache_delay,
 		dma_fragment_cache_init_transfer,
 		dma_fragment_cache_cs_change,
@@ -681,9 +794,9 @@ static int bcm2835dma_create_dma(struct spi_master *master)
 	 * one spi_write
 	 * without having to go thru the loops
 	 */
-	spi_dmafragment_cache_create(&bs->dma_fragment_cache_set_cdiv,
-				bcm2835dma_dmafragment_set_cdiv_create,
-				bcm2835dma_dmafragment_set_cdiv_release,
+	spi_dmafragment_cache_create(&bs->dma_fragment_cache_clock,
+				bcm2835dma_dmafragment_clock_create,
+				bcm2835dma_dmafragment_clock_release,
 				bs->pool,
 				3
 		);
@@ -754,7 +867,7 @@ static void bcm2835dma_release_dma(struct spi_master *master)
 	dma_pool_free(bs->pool,
 		bs->buffer_write_dummy.addr,bs->buffer_write_dummy.bus_addr);
 
-        spi_dmafragment_cache_destroy(&bs->dma_fragment_cache_set_cdiv);
+        spi_dmafragment_cache_destroy(&bs->dma_fragment_cache_clock);
 	spi_dmafragment_cache_destroy(&bs->dma_fragment_cache_delay);
         spi_dmafragment_cache_destroy(&bs->dma_fragment_cache_init_transfer);
         spi_dmafragment_cache_destroy(&bs->dma_fragment_cache_cs_change);
