@@ -94,10 +94,10 @@ struct DMAFragment {
 };
 
 /**
- * DMAFragment_allocate - allocate a new DMAFragment and initialize it empty
+ * DMAFragment_alloc - allocate a new DMAFragment and initialize it empty
  * @gfpflags: the allocation flags
  */
-struct DMAFragment* DMAFragment_allocate(gfp_t gfpflags);
+struct DMAFragment* DMAFragment_alloc(gfp_t gfpflags);
 /**
  * DMAFragment_free - allocate a new DMAFragment and initialize it empty
  * @fragment: the fragment to free

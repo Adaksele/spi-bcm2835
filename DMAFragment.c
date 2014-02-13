@@ -20,7 +20,6 @@
 #include "DMAFragment.h"
 #include <linux/slab.h>
 
-
 struct DMALinkBlock *DMALinkBlock_alloc(struct dma_pool *pool,gfp_t gfpflags) {
 
 	struct DMALinkBlock *block = kmalloc(sizeof(*block),gfpflags);
@@ -47,7 +46,7 @@ void DMALinkBlock_free(struct DMALinkBlock *block) {
 	kfree(block);
 }
 
-struct DMAFragment *DMAFragment_allocate(gfp_t gfpflags) {
+struct DMAFragment *DMAFragment_alloc(gfp_t gfpflags) {
 	struct DMAFragment *frag=kzalloc(sizeof(*frag),gfpflags);
 	return frag;
 }
@@ -64,34 +63,7 @@ int DMAFragment_add(struct DMAFragment *fragment,
 	return 0;
 }
 
-
-static struct DMAFragment *DMAFragmentCache_add(struct DMAFragmentCache *cache, gfp_t gfpflags,int toidle) {
-	unsigned long flags;
-
-	struct DMAFragment *frag=cache->allocateFragment(
-		cache->dmapool,
-		gfpflags);
-	if (!frag)
-		return NULL; 
-
-	frag->cache=cache;
-
-	spin_lock_irqsave(&cache->lock,flags);
-
-	/* gather statistics */
-	cache->allocated ++;
-	if (gfpflags != GFP_KERNEL)
-		cache->allocated_atomic ++;
-	/* add to corresponding list */
-	if (toidle)
-		list_add(&frag->cache_list,&cache->idle);
-	else
-		list_add(&frag->cache_list,&cache->active);
-	
-	spin_unlock_irqrestore(&cache->lock,flags);
-	/* and return it */
-	return frag;
-}
+static struct DMAFragment *DMAFragmentCache_add(struct DMAFragmentCache *cache, gfp_t gfpflags,int toidle);
 
 int DMAFragmentCache_initialize(struct DMAFragmentCache *cache,
 				const char* name,
@@ -135,7 +107,36 @@ void DMAFragmentCache_release(struct DMAFragmentCache* cache) {
 
 	spin_unlock_irqrestore(&cache->lock,flags);
 
-	printk(KERN_INFO "The DMA Fragment cache for %s has had %lu Fragments created"
+	/* we could expose this statistics via sysfs - for now just when unloading the module */
+	printk(KERN_INFO "The DMA Fragment cache for %s has had %lu fragments created "
 		"with %lu not with the GPF_KERNEL flag, so in interrupt mode\n",
 		cache->name,cache->allocated,cache->allocated_atomic);
+}
+
+static struct DMAFragment *DMAFragmentCache_add(struct DMAFragmentCache *cache, gfp_t gfpflags,int toidle) {
+	unsigned long flags;
+
+	struct DMAFragment *frag=cache->allocateFragment(
+		cache->dmapool,
+		gfpflags);
+	if (!frag)
+		return NULL; 
+
+	frag->cache=cache;
+
+	spin_lock_irqsave(&cache->lock,flags);
+
+	/* gather statistics */
+	cache->allocated ++;
+	if (gfpflags != GFP_KERNEL)
+		cache->allocated_atomic ++;
+	/* add to corresponding list */
+	if (toidle)
+		list_add(&frag->cache_list,&cache->idle);
+	else
+		list_add(&frag->cache_list,&cache->active);
+	
+	spin_unlock_irqrestore(&cache->lock,flags);
+	/* and return it */
+	return frag;
 }

@@ -29,11 +29,13 @@
 
 struct DMAFragment *bcm2835_dmafragment_create_setup_spi_plus_transfer(
 	struct dma_pool *pool,gfp_t gfpflags) {
-	return NULL;
+
+	return DMAFragment_alloc(gfpflags);
 }
 	
 struct DMAFragment *bcm2835_dmafragment_create_transfer(
 	struct dma_pool *pool,gfp_t gfpflags) {
-	return NULL;
+
+	return DMAFragment_alloc(gfpflags);
 }
 

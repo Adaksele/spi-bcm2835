@@ -24,6 +24,11 @@
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
 
+/* known limitations:
+ *  * cs maps directly to GPIO (except for 0 and 1, which also map to 7+8)
+ *    and the mode is not reverted when not used
+ */
+
 #include "bcm2835-dma.h"
 #include "DMAFragment.h"
 
@@ -85,6 +90,8 @@
 #define SPI_TIMEOUT_MS	3000
 #define BCM2835_SPI_MODE_BITS	(SPI_CPOL | SPI_CPHA | SPI_CS_HIGH | SPI_NO_CS)
 
+#define BCM2835_SPI_GPIO_CS0     8
+#define BCM2835_SPI_GPIO_CS1     7
 #define BCM2835_SPI_GPIO_MISO    9
 #define BCM2835_SPI_GPIO_MOSI   10
 #define BCM2835_SPI_GPIO_SCK    11
@@ -492,11 +499,12 @@ static void bcm2835dma_set_gpio_mode(u8 pin,u32 mode) {
 	u32 *reg = &gpio[pin/10];
 	u8 shift = ((pin)%10)*3;
 	u32 v = *reg;
+	u32 vpre= v;
 	v &= ~( ((u32)(7)) << shift );
 	v |= (mode & 7) << shift;
 	*reg= v;
 	printk(KERN_INFO "pin %i mode %i\n",pin,mode);
-	printk(KERN_INFO "ADDR %08x %2i %010o %010o %010o\n",(u32)reg,shift,*reg,v,*reg);
+	printk(KERN_INFO "ADDR %08x %2i %010o %010o %010o\n",(u32)reg,shift,vpre,v,*reg);
 	iounmap(gpio);
 }
 
@@ -509,20 +517,29 @@ static void bcm2835dma_spi_init_pinmode(void) {
 	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_SCK, 4);
 }
 
+static void bcm2835dma_spi_restore_pinmodes(void) {
+	/* reset modes to INPUT */
+	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_MISO,0);
+	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_MOSI,0);
+	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_SCK, 0);
+}
+
 static int bcm2835dma_spi_setup(struct spi_device *spi) {
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(spi->master);
 	u8 cs = spi->chip_select;
 	u32 mode = spi->mode;
 
 	/* map cs=0 and cs=1 to the correct ones for the RPI */
-	if (cs == 0)
-		cs = 8;
-	if (cs == 1)
-		cs = 7;
-
-	/* set the "correct" cs level */
-	if (!(mode & SPI_NO_CS)) {
+	if (spi->master->cs_gpios) {
+		cs= spi->cs_gpio;
 	} else {
+		if (cs == 0)
+			cs = BCM2835_SPI_GPIO_CS0;
+		if (cs == 1)
+			cs = BCM2835_SPI_GPIO_CS1;
+	}
+	/* set the "correct" cs level */
+	if ((mode & SPI_NO_CS)) {
 		/* check cs for prohibited pins */
 		if (
 			(cs == BCM2835_SPI_GPIO_MISO)
@@ -534,8 +551,7 @@ static int bcm2835dma_spi_setup(struct spi_device *spi) {
 			dev_err(&spi->dev, "Chipselect GPIO %i is not allowed as it is already used\n",cs);
 			return -EPERM;
 		}
-		/* set pin mode as Output */
-		/* and set the polarity */
+		/* set pin mode as Output with the correct polarity */
 		if (mode & SPI_CS_HIGH) {
 			/* configure the GPIO as low and output */
 			gpio_direction_output(cs,0);
@@ -645,6 +661,8 @@ static int bcm2835dma_spi_remove(struct platform_device *pdev)
 		writel(
 			BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX,
 			bs->spi_regs+BCM2835_SPI_CS);
+
+	bcm2835dma_spi_restore_pinmodes();
 	
 	clk_disable_unprepare(bs->clk);
 	spi_master_put(master);
