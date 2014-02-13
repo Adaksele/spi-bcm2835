@@ -17,12 +17,12 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
-#include "DMAFragment.h"
+#include <linux/dma-fragment.h>
 #include <linux/slab.h>
 
-struct DMALinkBlock *DMALinkBlock_alloc(struct dma_pool *pool,gfp_t gfpflags) {
+struct dma_link *dma_link_alloc(struct dma_pool *pool,gfp_t gfpflags) {
 
-	struct DMALinkBlock *block = kmalloc(sizeof(*block),gfpflags);
+	struct dma_link *block = kmalloc(sizeof(*block),gfpflags);
 	if (!block)
 		return NULL;
 	block->dmapool = pool;
@@ -37,7 +37,7 @@ struct DMALinkBlock *DMALinkBlock_alloc(struct dma_pool *pool,gfp_t gfpflags) {
 	return block;
 }
 
-void DMALinkBlock_free(struct DMALinkBlock *block) {
+void dma_link_free(struct dma_link *block) {
 	if (!block->dmablock)
 		return;
 			
@@ -46,28 +46,28 @@ void DMALinkBlock_free(struct DMALinkBlock *block) {
 	kfree(block);
 }
 
-struct DMAFragment *DMAFragment_alloc(gfp_t gfpflags) {
-	struct DMAFragment *frag=kzalloc(sizeof(*frag),gfpflags);
+struct dma_fragment *dma_fragment_alloc(gfp_t gfpflags) {
+	struct dma_fragment *frag=kzalloc(sizeof(*frag),gfpflags);
 	return frag;
 }
 
-void DMAFragment_free(struct DMAFragment *frag) {
+void dma_fragment_free(struct dma_fragment *frag) {
 	/* iterate between fragment_head and fragment_tail to free them */
 	printk(KERN_ERR "Missing freeing of Fragments\n");
 	/* and finally free the memory */
 	kfree(frag);
 }
 
-int DMAFragment_add(struct DMAFragment *fragment,
-		struct DMALinkBlock *dmalink) {
+int dma_fragment_add(struct dma_fragment *fragment,
+		struct dma_link *dmalink) {
 	return 0;
 }
 
-static struct DMAFragment *DMAFragmentCache_add(struct DMAFragmentCache *cache, gfp_t gfpflags,int toidle);
+static struct dma_fragment *dma_fragment_cache_add(struct dma_fragment_cache *cache, gfp_t gfpflags,int toidle);
 
-int DMAFragmentCache_initialize(struct DMAFragmentCache *cache,
+int dma_fragment_cache_initialize(struct dma_fragment_cache *cache,
 				const char* name,
-				struct DMAFragment *(*allocateFragment)(struct dma_pool *, gfp_t),
+				struct dma_fragment *(*allocateFragment)(struct dma_pool *, gfp_t),
 				struct dma_pool *pool,
 				int initial_size
 	) {
@@ -83,27 +83,27 @@ int DMAFragmentCache_initialize(struct DMAFragmentCache *cache,
 
 	/* now allocate new entries to fill the pool */
 	for (i = 0 ; i < initial_size ; i++) {
-		if (! DMAFragmentCache_add(cache,GFP_KERNEL,1))
+		if (! dma_fragment_cache_add(cache,GFP_KERNEL,1))
 			return -ENOMEM;
 	}
 
 	return 0;
 }
 
-void DMAFragmentCache_release(struct DMAFragmentCache* cache) {
+void dma_fragment_cache_release(struct dma_fragment_cache* cache) {
 	unsigned long flags;
-	struct DMAFragment *frag;
+	struct dma_fragment *frag;
 
 	spin_lock_irqsave(&cache->lock,flags);
 
 	while( !list_empty(&cache->active)) {
-		frag = list_first_entry(&cache->idle,struct DMAFragment, cache_list);
+		frag = list_first_entry(&cache->idle,struct dma_fragment, cache_list);
 		list_del(&frag->cache_list);
-		DMAFragment_free(frag);
+		dma_fragment_free(frag);
 	}
 
 	if (! list_empty(&cache->active))
-		printk(KERN_ERR "the DMAFragmentCache %s is not totally idle\n",cache->name);
+		printk(KERN_ERR "the dma_fragment_cache %s is not totally idle\n",cache->name);
 
 	spin_unlock_irqrestore(&cache->lock,flags);
 
@@ -113,10 +113,10 @@ void DMAFragmentCache_release(struct DMAFragmentCache* cache) {
 		cache->name,cache->allocated,cache->allocated_atomic);
 }
 
-static struct DMAFragment *DMAFragmentCache_add(struct DMAFragmentCache *cache, gfp_t gfpflags,int toidle) {
+static struct dma_fragment *dma_fragment_cache_add(struct dma_fragment_cache *cache, gfp_t gfpflags,int toidle) {
 	unsigned long flags;
 
-	struct DMAFragment *frag=cache->allocateFragment(
+	struct dma_fragment *frag=cache->allocateFragment(
 		cache->dmapool,
 		gfpflags);
 	if (!frag)

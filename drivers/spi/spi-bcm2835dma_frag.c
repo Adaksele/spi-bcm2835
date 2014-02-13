@@ -1,9 +1,7 @@
 /*
  * Driver for Broadcom BCM2835 SPI Controllers
  *
- * Copyright (C) 2012 Chris Boot
- * Copyright (C) 2013 Stephen Warren
- * Copyright (C) 2013 Martin Sperl
+ * Copyright (C) 2014 Martin Sperl
  *
  * This driver is inspired by:
  * spi-ath79.c, Copyright (C) 2009-2011 Gabor Juhos <juhosg@openwrt.org>
@@ -24,18 +22,18 @@
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
 
-#include "bcm2835-dma.h"
-#include "DMAFragment.h"
+#include <linux/dma/bcm2835-dma.h>
+#include <linux/dma-fragment.h>
 
-struct DMAFragment *bcm2835_dmafragment_create_setup_spi_plus_transfer(
+struct dma_fragment *bcm2835_dmafragment_create_setup_spi_plus_transfer(
 	struct dma_pool *pool,gfp_t gfpflags) {
 
-	return DMAFragment_alloc(gfpflags);
+	return dma_fragment_alloc(gfpflags);
 }
 	
-struct DMAFragment *bcm2835_dmafragment_create_transfer(
+struct dma_fragment *bcm2835_dmafragment_create_transfer(
 	struct dma_pool *pool,gfp_t gfpflags) {
 
-	return DMAFragment_alloc(gfpflags);
+	return dma_fragment_alloc(gfpflags);
 }
 

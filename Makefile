@@ -1,8 +1,10 @@
-
-obj-m := spi-bcm2835dma.o
-spi-bcm2835dma-y := spi-bcm2835dma_drv.o spi-bcm2835dma_frag.o DMAFragment.o bcm2835-dma.o
 KDIR := /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
+
+ccflags-y := -I $(src)/include
+
+obj-m := spi-bcm2835dma.o
+spi-bcm2835dma-y := drivers/spi/spi-bcm2835dma_drv.o drivers/spi/spi-bcm2835dma_frag.o drivers/dma/dma-fragment.o drivers/dma/bcm2835-dma.o
 
 all:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules

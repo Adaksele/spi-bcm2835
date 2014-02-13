@@ -29,8 +29,8 @@
  *    and the mode is not reverted when not used
  */
 
-#include "bcm2835-dma.h"
-#include "DMAFragment.h"
+#include "linux/dma/bcm2835-dma.h"
+#include "linux/dma-fragment.h"
 
 #include <linux/clk.h>
 #include <linux/completion.h>
@@ -264,12 +264,12 @@ struct bcm2835dma_spi {
 		dma_addr_t bus_addr;
 	} buffer_write_dummy,buffer_read_0x00;
 	/* the fragment caches */
-	struct DMAFragmentCache fragment_setup_spi_plus_transfer;
-	struct DMAFragmentCache fragment_transfer;
+	struct dma_fragment_cache fragment_setup_spi_plus_transfer;
+	struct dma_fragment_cache fragment_transfer;
 };
 
-struct DMAFragment *bcm2835_dmafragment_create_setup_spi_plus_transfer(struct dma_pool *,gfp_t);
-struct DMAFragment *bcm2835_dmafragment_create_transfer(struct dma_pool *,gfp_t);
+struct dma_fragment *bcm2835_dmafragment_create_setup_spi_plus_transfer(struct dma_pool *,gfp_t);
+struct dma_fragment *bcm2835_dmafragment_create_transfer(struct dma_pool *,gfp_t);
 
 /* the interrupt-handlers */
 static irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id);
@@ -315,13 +315,13 @@ static int bcm2835dma_allocate_dma(struct spi_master *master,
 			sizeof(*bs->buffer_read_0x00.addr));
 
 	/* initialize DMA Fragment pools */
-	DMAFragmentCache_initialize(&bs->fragment_setup_spi_plus_transfer,
+	dma_fragment_cache_initialize(&bs->fragment_setup_spi_plus_transfer,
 				"setup_spi_plus_transfer",
 				&bcm2835_dmafragment_create_setup_spi_plus_transfer,
 				bs->pool,
 				5
 		);
-	DMAFragmentCache_initialize(&bs->fragment_transfer,
+	dma_fragment_cache_initialize(&bs->fragment_transfer,
 				"transfer",
 				&bcm2835_dmafragment_create_transfer,
 				bs->pool,
@@ -346,8 +346,8 @@ static void bcm2835dma_release_dma(struct spi_master *master)
 	dma_pool_free(bs->pool,
 		bs->buffer_write_dummy.addr,bs->buffer_write_dummy.bus_addr);
 
-	DMAFragmentCache_release(&bs->fragment_setup_spi_plus_transfer);
-	DMAFragmentCache_release(&bs->fragment_transfer);
+	dma_fragment_cache_release(&bs->fragment_setup_spi_plus_transfer);
+	dma_fragment_cache_release(&bs->fragment_transfer);
 
 	dma_pool_destroy(bs->pool);
         bs->pool=NULL;
@@ -499,12 +499,9 @@ static void bcm2835dma_set_gpio_mode(u8 pin,u32 mode) {
 	u32 *reg = &gpio[pin/10];
 	u8 shift = ((pin)%10)*3;
 	u32 v = *reg;
-	u32 vpre= v;
 	v &= ~( ((u32)(7)) << shift );
 	v |= (mode & 7) << shift;
 	*reg= v;
-	printk(KERN_INFO "pin %i mode %i\n",pin,mode);
-	printk(KERN_INFO "ADDR %08x %2i %010o %010o %010o\n",(u32)reg,shift,vpre,v,*reg);
 	iounmap(gpio);
 }
 
