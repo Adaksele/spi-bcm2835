@@ -26,33 +26,31 @@
 #include <linux/dmapool.h>
 
 struct dma_link;
-struct DMAFragment;
-struct DMAFragmentCache;
+struct dma_fragment;
+struct dma_fragment_cache;
 
 /**
  * struct dma_link - the linked list of DMA control blocks
  * @dmablock: the pointer to the DMA control-block itself (void pointer to be of generic use)
  * @dmablock_dma: the dma-buss address of the control block
  * @dmapool: from which pool the block has been taken
- * @linked_list: the linked list connecting the individual link blocks
+ * @fragment: the fragment to which we belong
+ * @fragment_dma_link_chain: the link chain to which we belong
+ * @dma_link_chain: the active DMA link chain to which we belong
  */
-struct dma_link {
-	void              *dmablock;
-	dma_addr_t        dmablock_dma;
-	struct dma_pool   *dmapool;
-	struct list_head  linked_list;
-};
 
-/**
- * DMA_LINK_FIELD_DMAADDR() - helper macro to get the bus address of the specific field
- * @block: the link block for which we need the DMA address
- * @field: the field name we want to get the DMA-address for
- */
-#define DMA_LINK_FIELD_DMAADDR(block,field)		\
-	(							\
-		block->dmablock_dma+				\
-		offsetof(typeof(*block->dmablock),field)	\
-		)
+struct dma_link {
+	/* the control block itself */
+	void                *dmablock;
+	dma_addr_t          dmablock_dma;
+	/* the pool from which this has been allocated */
+	struct dma_pool     *dmapool;
+	/* the membership to a fragment */
+	struct dma_fragment *fragment;
+	struct list_head    fragment_dma_link_chain;
+	/* and for the (active) dma chain itself */
+	struct list_head    dma_link_chain;
+};
 
 /**
  * dma_link_alloc
@@ -69,35 +67,27 @@ void dma_link_free(struct dma_link *block);
 
 /**
  * struct dma_fragment - a list of dma_links with means how to link Fragments quickly
- * @fragment_head: the pointer to the head of the dma_link list for the mixed dma-queue (rx/tx)
- * @fragment_tail: the pointer to the tail of the dma_link list for the mixed dma-queue (rx/tx)
- * @fragment_rx_head: the pointer to the head of the dma_link list for the rx_queue
- * @fragment_rx_tail: the pointer to the tail of the dma_link list for the rx_queue
- * @fragment_tx_head: the pointer to the head of the dma_link list for the tx_queue
- * @fragment_tx_tail: the pointer to the tail of the dma_link list for the tx_queue
- * @length_ptr: the length pointer for the transfer in this transfer block
- * @cache: the dma_fragment_cache to which this fragment belongs to (mostly used to return the fragment to the cache
- * @cache_list: the linked list for the fragment cache
- *
+ * @cache: to which fragment cache we belong
+ * @cache_list: the list to link the objects in the cache
+ * @fragment_dma_link_chain: the link chain connecting all the dma_link
+     objects belonging to this fragment
+ * @dma_link_chain: the link chain connecting all the dma_link
+     objects belonging to this fragment - used for real dma scheduling
  */
 struct dma_fragment {
-	struct dma_link * fragmenent_head;
-	struct dma_link * fragmenent_tail;
-	struct dma_link * fragmenent_rx_head;
-	struct dma_link * fragmenent_rx_tail;
-	struct dma_link * fragmenent_tx_head;
-	struct dma_link * fragmenent_tx_tail;
-	u32* length;
 	struct dma_fragment_cache* cache;
 	struct list_head cache_list;
+	struct list_head fragment_dma_link_chain;
+	struct list_head dma_link_chain;
 	/* TODO: preparedModificationList - for prepared statements */
 };
 
 /**
  * dma_fragment_alloc - allocate a new dma_fragment and initialize it empty
  * @gfpflags: the allocation flags
+ * @size: the size to really allocate
  */
-struct dma_fragment* dma_fragment_alloc(gfp_t gfpflags);
+struct dma_fragment* dma_fragment_alloc(gfp_t gfpflags, size_t size);
 /**
  * dma_fragment_free - allocate a new dma_fragment and initialize it empty
  * @fragment: the fragment to free

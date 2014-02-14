@@ -26,9 +26,15 @@ struct dma_link *dma_link_alloc(struct dma_pool *pool,gfp_t gfpflags) {
 	if (!block)
 		return NULL;
 	block->dmapool = pool;
-	INIT_LIST_HEAD(&block->linked_list);
 
-	block->dmablock = dma_pool_alloc(block->dmapool,gfpflags,&block->dmablock_dma);
+	block->fragment = NULL;
+	INIT_LIST_HEAD(&block->fragment_dma_link_chain);
+
+	INIT_LIST_HEAD(&block->dma_link_chain);
+
+	block->dmablock = dma_pool_alloc(block->dmapool,
+					gfpflags,
+					&block->dmablock_dma);
 	if (!block->dmablock) {
 		kfree(block);
 		return NULL;
@@ -40,26 +46,51 @@ struct dma_link *dma_link_alloc(struct dma_pool *pool,gfp_t gfpflags) {
 void dma_link_free(struct dma_link *block) {
 	if (!block->dmablock)
 		return;
-			
-	list_del(&block->linked_list);
+
+	list_del(&block->fragment_dma_link_chain);
+	list_del(&block->dma_link_chain);
+
 	dma_pool_free(block->dmapool,block->dmablock,block->dmablock_dma);
+
 	kfree(block);
 }
 
-struct dma_fragment *dma_fragment_alloc(gfp_t gfpflags) {
-	struct dma_fragment *frag=kzalloc(sizeof(*frag),gfpflags);
+struct dma_fragment *dma_fragment_alloc(gfp_t gfpflags,size_t size) {
+	struct dma_fragment *frag;
+	frag=kzalloc(max(size,sizeof(*frag)),gfpflags);
+	if (! frag)
+		return NULL;
+	
+	INIT_LIST_HEAD(&frag->cache_list);
+	INIT_LIST_HEAD(&frag->fragment_dma_link_chain);
+	INIT_LIST_HEAD(&frag->dma_link_chain);
+
 	return frag;
 }
 
 void dma_fragment_free(struct dma_fragment *frag) {
-	/* iterate between fragment_head and fragment_tail to free them */
-	printk(KERN_ERR "Missing freeing of Fragments\n");
-	/* and finally free the memory */
+	struct dma_link * link;
+
+	while( !list_empty(&frag->fragment_dma_link_chain)) {
+		link = list_first_entry(&frag->fragment_dma_link_chain,
+					typeof(*link),
+					fragment_dma_link_chain);
+		dma_link_free(link);
+	}
+
 	kfree(frag);
 }
 
 int dma_fragment_add(struct dma_fragment *fragment,
 		struct dma_link *dmalink) {
+	list_add(
+		&dmalink->fragment_dma_link_chain,
+		&fragment->fragment_dma_link_chain
+		);
+	list_add(
+		&dmalink->dma_link_chain,
+		&fragment->dma_link_chain
+		);
 	return 0;
 }
 
@@ -96,7 +127,7 @@ void dma_fragment_cache_release(struct dma_fragment_cache* cache) {
 
 	spin_lock_irqsave(&cache->lock,flags);
 
-	while( !list_empty(&cache->active)) {
+	while( !list_empty(&cache->idle)) {
 		frag = list_first_entry(&cache->idle,struct dma_fragment, cache_list);
 		list_del(&frag->cache_list);
 		dma_fragment_free(frag);
@@ -109,7 +140,7 @@ void dma_fragment_cache_release(struct dma_fragment_cache* cache) {
 
 	/* we could expose this statistics via sysfs - for now just when unloading the module */
 	printk(KERN_INFO "The DMA Fragment cache for %s has had %lu fragments created "
-		"with %lu not with the GPF_KERNEL flag, so in interrupt mode\n",
+		"out of which %lu were created without the GPF_KERNEL flag\n",
 		cache->name,cache->allocated,cache->allocated_atomic);
 }
 
