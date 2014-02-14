@@ -22,9 +22,7 @@
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
 
-#include <linux/dma/bcm2835-dma.h>
-#include <linux/dma-fragment.h>
-#include <linux/spi/bcm2835.h>
+#include "spi-bcm2835dma.h"
 
 #define ALLOCATE_CBFIELD_IN_STRUCT(frag,field)			\
 	if (! ( frag->field = dma_link_alloc(pool,gfpflags) ) )	\
@@ -60,8 +58,37 @@ struct dmafragment_create_setup_spi_plus_transfer {
 	struct dma_link     *schedule_transfer_tx;
 };
 
+struct dmafragment_create_transfer {
+	struct dma_fragment fragment;
+	/* the individual objects */
+	struct dma_link     *schedule_transfer_rx;
+	struct dma_link     *schedule_transfer_tx;
+};
+
+struct dmafragment_cs_deselect {
+	struct dma_fragment fragment;
+	struct dma_link     *delay_pre;
+	struct dma_link     *cs_deselect;
+	struct dma_link     *delay_post;
+};
+
+struct dmafragment_delay {
+	struct dma_fragment fragment;
+	struct dma_link     *delay;
+};
+
+struct dmafragment_trigger_irq {
+	struct dma_fragment fragment;
+	struct dma_link     *set_tx_dma_next;
+	struct dma_link     *start_tx_dma;
+	struct dma_link     *message_finished;
+};
+
 struct dma_fragment *bcm2835_dmafragment_create_setup_spi_plus_transfer(
-	struct dma_pool *pool,gfp_t gfpflags) {
+	struct spi_master * master,gfp_t gfpflags)
+{
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+	struct dma_pool *pool = bs->pool;
 	struct dmafragment_create_setup_spi_plus_transfer *frag 
 		= (typeof(frag))dma_fragment_alloc(gfpflags,sizeof(*frag));
 	if (! frag)
@@ -208,8 +235,218 @@ error:
 }
 	
 struct dma_fragment *bcm2835_dmafragment_create_transfer(
-	struct dma_pool *pool,gfp_t gfpflags) {
+	struct spi_master * master,gfp_t gfpflags)
+{
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+	struct dma_pool *pool = bs->pool;
+	struct dmafragment_create_setup_spi_plus_transfer *frag 
+		= (typeof(frag))dma_fragment_alloc(gfpflags,sizeof(*frag));
+	if (! frag)
+		return NULL;
+	/* now allocate the blocks we need */
 
-	return dma_fragment_alloc(gfpflags,0);
+	/* the initial transfer for RX */
+	ALLOCATE_CBFIELD_IN_STRUCT(frag,schedule_transfer_rx);
+	LINK_TO_BCM2835_DMA_CB(frag->schedule_transfer_rx)->src =
+		BCM2835_SPI_BASE_BUS + BCM2835_SPI_FIFO;
+	/* need to set:
+	 * * ti to correct flags
+	 * * length to correct length
+	 * * dst to correct bus address
+	 */
+	/* and the initial transfer for TX */
+	ALLOCATE_CBFIELD_IN_STRUCT(frag,schedule_transfer_tx);
+	LINK_TO_BCM2835_DMA_CB(frag->schedule_transfer_tx)->dst =
+		BCM2835_SPI_BASE_BUS + BCM2835_SPI_FIFO;
+	/* need to set:
+	 * * ti to correct flags
+	 * * length to correct length
+	 * * dst to correct bus address
+	 */
+
+	return &frag->fragment;
+
+error:
+	FREE_CBFIELD_IN_STRUCT(frag,schedule_transfer_rx);
+	FREE_CBFIELD_IN_STRUCT(frag,schedule_transfer_tx);
+
+	dma_fragment_free(&frag->fragment);
+
+	return NULL;
 }
 
+struct dma_fragment *bcm2835_dmafragment_create_cs_deselect(
+	struct spi_master * master,gfp_t gfpflags)
+{
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+	struct dma_pool *pool = bs->pool;
+	struct dmafragment_cs_deselect *frag 
+		= (typeof(frag))dma_fragment_alloc(gfpflags,sizeof(*frag));
+	if (! frag)
+		return NULL;
+	/* now allocate the blocks we need */
+
+	/* the pre-half-clock delay */
+	ALLOCATE_CBFIELD_IN_STRUCT(frag,delay_pre);
+	LINK_TO_BCM2835_DMA_CB(frag->delay_pre)->ti =
+		BCM2835_DMA_TI_WAIT_RESP
+		| BCM2835_DMA_TI_WAITS(0x1f)
+		| BCM2835_DMA_TI_NO_WIDE_BURSTS
+		| BCM2835_DMA_TI_S_IGNORE
+		| BCM2835_DMA_TI_D_IGNORE;
+	LINK_TO_BCM2835_DMA_CB(frag->delay_pre)->src =
+		LINK_FIELD_DMAADDR(frag->delay_pre,pad[0]);
+	LINK_TO_BCM2835_DMA_CB(frag->delay_pre)->dst =
+		LINK_FIELD_DMAADDR(frag->delay_pre,pad[1]);
+	/* need to set:
+	 * * length to correct length to get to the delay we need based on the clock
+	 */
+	/* start with the CSSelect */
+	ALLOCATE_CBFIELD_IN_STRUCT(frag,cs_deselect);
+	LINK_TO_BCM2835_DMA_CB(frag->delay_pre)->next =
+		frag->cs_deselect->dmablock_dma;
+	LINK_TO_BCM2835_DMA_CB(frag->cs_deselect)->ti =
+		BCM2835_DMA_TI_WAIT_RESP;
+	LINK_TO_BCM2835_DMA_CB(frag->cs_deselect)->src =
+		LINK_FIELD_DMAADDR(frag->cs_deselect,pad[0]);
+	LINK_TO_BCM2835_DMA_CB(frag->cs_deselect)->length = 
+		4;
+	/* need to set:
+	 * * pad0 to correct bitmask
+	 * * dst to correct register to pull GPIO pin up
+	 */
+
+	/* the post-half-clock delay */
+	ALLOCATE_CBFIELD_IN_STRUCT(frag,delay_post);
+	LINK_TO_BCM2835_DMA_CB(frag->delay_post)->next =
+		frag->cs_deselect->dmablock_dma;
+	LINK_TO_BCM2835_DMA_CB(frag->delay_post)->ti =
+		BCM2835_DMA_TI_WAIT_RESP
+		| BCM2835_DMA_TI_WAITS(0x1f)
+		| BCM2835_DMA_TI_NO_WIDE_BURSTS
+		| BCM2835_DMA_TI_S_IGNORE
+		| BCM2835_DMA_TI_D_IGNORE;
+	LINK_TO_BCM2835_DMA_CB(frag->delay_post)->src =
+		LINK_FIELD_DMAADDR(frag->delay_post,pad[0]);
+	LINK_TO_BCM2835_DMA_CB(frag->delay_pre)->dst =
+		LINK_FIELD_DMAADDR(frag->delay_post,pad[1]);
+	/* need to set:
+	 * * length to correct length to get to the delay we need based on the clock
+	 */
+
+	return &frag->fragment;
+
+error:
+	FREE_CBFIELD_IN_STRUCT(frag,delay_pre);
+	FREE_CBFIELD_IN_STRUCT(frag,cs_deselect);
+	FREE_CBFIELD_IN_STRUCT(frag,delay_post);
+
+	dma_fragment_free(&frag->fragment);
+
+	return NULL;
+}
+
+struct dma_fragment *bcm2835_dmafragment_create_delay(
+	struct spi_master * master,gfp_t gfpflags)
+{
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+	struct dma_pool *pool = bs->pool;
+	struct dmafragment_delay *frag 
+		= (typeof(frag))dma_fragment_alloc(gfpflags,sizeof(*frag));
+	if (! frag)
+		return NULL;
+	/* now allocate the blocks we need */
+
+	/* the pre-half-clock delay */
+	ALLOCATE_CBFIELD_IN_STRUCT(frag,delay);
+	LINK_TO_BCM2835_DMA_CB(frag->delay)->ti =
+		BCM2835_DMA_TI_WAIT_RESP
+		| BCM2835_DMA_TI_WAITS(0x1f)
+		| BCM2835_DMA_TI_NO_WIDE_BURSTS
+		| BCM2835_DMA_TI_S_IGNORE
+		| BCM2835_DMA_TI_D_IGNORE;
+	LINK_TO_BCM2835_DMA_CB(frag->delay)->src =
+		LINK_FIELD_DMAADDR(frag->delay,pad[0]);
+	LINK_TO_BCM2835_DMA_CB(frag->delay)->dst =
+		LINK_FIELD_DMAADDR(frag->delay,pad[1]);
+	/* need to set:
+	 * * length to correct length to get to the delay we need based on the clock
+	 */
+
+	return &frag->fragment;
+
+error:
+	FREE_CBFIELD_IN_STRUCT(frag,delay);
+
+	dma_fragment_free(&frag->fragment);
+
+	return NULL;
+}
+
+struct dma_fragment *bcm2835_dmafragment_create_trigger_irq(
+	struct spi_master * master,gfp_t gfpflags)
+{
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+	struct dma_pool *pool = bs->pool;
+	struct dmafragment_trigger_irq *frag 
+		= (typeof(frag))dma_fragment_alloc(gfpflags,sizeof(*frag));
+	if (! frag)
+		return NULL;
+	/* now allocate the blocks we need */
+	/* set the tx-DMA next pointer */
+	ALLOCATE_CBFIELD_IN_STRUCT(frag,set_tx_dma_next);
+	LINK_TO_BCM2835_DMA_CB(frag->set_tx_dma_next)->ti =
+		BCM2835_DMA_TI_WAIT_RESP ;
+	LINK_TO_BCM2835_DMA_CB(frag->set_tx_dma_next)->src =
+		LINK_FIELD_DMAADDR(frag->set_tx_dma_next,pad[0]);
+	LINK_TO_BCM2835_DMA_CB(frag->set_tx_dma_next)->length =
+		4;
+	/* need to set:
+	 * * dst = dma_tx.bus_addr+BCM2835_DMA_CB_ADDR
+	 */ 
+	
+	/* start tx-DMA */
+	ALLOCATE_CBFIELD_IN_STRUCT(frag,start_tx_dma);
+	LINK_TO_BCM2835_DMA_CB(frag->set_tx_dma_next)->next =
+		frag->start_tx_dma->dmablock_dma;
+	LINK_TO_BCM2835_DMA_CB(frag->start_tx_dma)->ti =
+		BCM2835_DMA_TI_WAIT_RESP ;
+	LINK_TO_BCM2835_DMA_CB(frag->start_tx_dma)->src =
+		LINK_FIELD_DMAADDR(frag->start_tx_dma,pad[0]);
+	LINK_TO_BCM2835_DMA_CB(frag->start_tx_dma)->length =
+		4;
+	LINK_TO_BCM2835_DMA_CB(frag->start_tx_dma)->pad[0] =
+		BCM2835_DMA_CS_ACTIVE;
+	/* need to set:
+	 * * dst = dma_tx.bus_addr+BCM2835_DMA_CB_CS
+	 */ 
+
+	/* message_finished */
+	ALLOCATE_CBFIELD_IN_STRUCT(frag,message_finished);
+	LINK_TO_BCM2835_DMA_CB(frag->set_tx_dma_next)->pad[0] =
+		frag->message_finished->dmablock_dma;
+	LINK_TO_BCM2835_DMA_CB(frag->message_finished)->ti =
+		BCM2835_DMA_TI_WAIT_RESP
+		| BCM2835_DMA_TI_S_INC
+		| BCM2835_DMA_TI_D_INC
+		;
+	LINK_TO_BCM2835_DMA_CB(frag->message_finished)->src =
+		LINK_FIELD_DMAADDR(frag->message_finished,pad[0]);
+	LINK_TO_BCM2835_DMA_CB(frag->message_finished)->length =
+		8;
+	/* need to set:
+	 * * dst = The address which gets the latest tranfer
+	 * * pad[0] = the fragment that was finished
+	 * * pad[1] = possibly spi_message pointer
+	 */ 
+	return &frag->fragment;
+
+error:
+	FREE_CBFIELD_IN_STRUCT(frag,set_tx_dma_next);
+	FREE_CBFIELD_IN_STRUCT(frag,start_tx_dma);
+	FREE_CBFIELD_IN_STRUCT(frag,message_finished);
+
+	dma_fragment_free(&frag->fragment);
+
+	return NULL;
+}

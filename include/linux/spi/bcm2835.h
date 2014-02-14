@@ -60,7 +60,9 @@
 #define BCM2835_SPI_CS_CS_10		0x00000002
 #define BCM2835_SPI_CS_CS_01		0x00000001
 
-/* and the GPIO mappings */
+#define BCM2835_SPI_MODE_BITS	(SPI_CPOL | SPI_CPHA | SPI_CS_HIGH | SPI_NO_CS)
+
+/* and the GPIO mappings with ALT0 for SPI */
 #define BCM2835_SPI_GPIO_CS0     8
 #define BCM2835_SPI_GPIO_CS1     7
 #define BCM2835_SPI_GPIO_MISO    9

@@ -28,9 +28,7 @@
  *  * cs maps directly to GPIO (except for 0 and 1, which also map to 7+8)
  *    and the mode is not reverted when not used
  */
-
-#include "linux/dma/bcm2835-dma.h"
-#include "linux/dma-fragment.h"
+#include "spi-bcm2835dma.h"
 
 #include <linux/clk.h>
 #include <linux/completion.h>
@@ -43,17 +41,13 @@
 #include <linux/of.h>
 #include <linux/of_irq.h>
 #include <linux/of_device.h>
-#include <linux/spi/spi.h>
 
 #include <linux/dma-mapping.h>
 #include <linux/dmapool.h>
 
 #include <linux/gpio.h>
-#include <linux/spi/bcm2835.h>
 
 #define SPI_TIMEOUT_MS	3000
-#define BCM2835_SPI_MODE_BITS	(SPI_CPOL | SPI_CPHA | SPI_CS_HIGH | SPI_NO_CS)
-
 
 #define DRV_NAME	"spi-bcm2835dma"
 
@@ -86,19 +80,6 @@ MODULE_PARM_DESC(use_transfer_one,
  * this should possibly go to bcm2835.h
  */
 
-
-/* the DMA channel definition and functions */
-#include <mach/dma.h>
-
-/* the structure that defines the DMAs we use */
-struct bcm2835_dmachannel {
-	void __iomem *base;
-	dma_addr_t bus_addr;
-        int chan;
-        int irq;
-	irq_handler_t handler;
-	const char *desc;
-};
 
 static void bcm2835dma_release_dmachannel(struct spi_master *master,
 					struct bcm2835_dmachannel *d);
@@ -204,34 +185,6 @@ static void bcm2835_dmachannel_dump(struct bcm2835_dmachannel *dma)
 		readl(dma->base+BCM2835_DMA_DEBUG));
 }
 
-/* the SPI controller structures */
-
-struct bcm2835dma_spi {
-	/* the SPI registers */
-	void __iomem *spi_regs;
-	/* the clock */
-	struct clk *clk;
-	/* the DMA channels allocated */
-	struct bcm2835_dmachannel dma_tx;
-	struct bcm2835_dmachannel dma_rx;
-	/* the DMA-able pool we use to allocate control blocks from */
-	struct dma_pool *pool;
-	/* some DMA able blocks for some read/write buffers */
-	struct {
-		void *addr;
-		dma_addr_t bus_addr;
-	} buffer_write_dummy,buffer_read_0x00;
-	/* the fragment caches */
-	struct dma_fragment_cache fragment_setup_spi_plus_transfer;
-	struct dma_fragment_cache fragment_transfer;
-};
-
-struct dma_fragment *bcm2835_dmafragment_create_setup_spi_plus_transfer(struct dma_pool *,gfp_t);
-struct dma_fragment *bcm2835_dmafragment_create_transfer(struct dma_pool *,gfp_t);
-
-/* the interrupt-handlers */
-static irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id);
-//static irqreturn_t bcm2835dma_spi_interrupt_dma_rx(int irq, void *dev_id);
 
 static int bcm2835dma_allocate_dma(struct spi_master *master,
 				struct platform_device *pdev)
@@ -285,6 +238,24 @@ static int bcm2835dma_allocate_dma(struct spi_master *master,
 				bs->pool,
 				3
 		);
+	dma_fragment_cache_initialize(&bs->fragment_cs_deselect,
+				"fragment_cs_deselect",
+				&bcm2835_dmafragment_create_cs_deselect,
+				bs->pool,
+				3
+		);
+	dma_fragment_cache_initialize(&bs->fragment_delay,
+				"fragment_delay",
+				&bcm2835_dmafragment_create_delay,
+				bs->pool,
+				3
+		);
+	dma_fragment_cache_initialize(&bs->fragment_trigger_irq,
+				"fragment_trigger_irq",
+				&bcm2835_dmafragment_create_trigger_irq,
+				bs->pool,
+				3
+		);
 
 	return 0;
 }
@@ -300,12 +271,17 @@ static void bcm2835dma_release_dma(struct spi_master *master)
 		return;
 
 	dma_pool_free(bs->pool,
-		bs->buffer_read_0x00.addr,bs->buffer_read_0x00.bus_addr);
+		bs->buffer_read_0x00.addr,
+		bs->buffer_read_0x00.bus_addr);
 	dma_pool_free(bs->pool,
-		bs->buffer_write_dummy.addr,bs->buffer_write_dummy.bus_addr);
+		bs->buffer_write_dummy.addr,
+		bs->buffer_write_dummy.bus_addr);
 
 	dma_fragment_cache_release(&bs->fragment_setup_spi_plus_transfer);
 	dma_fragment_cache_release(&bs->fragment_transfer);
+	dma_fragment_cache_release(&bs->fragment_cs_deselect);
+	dma_fragment_cache_release(&bs->fragment_delay);
+	dma_fragment_cache_release(&bs->fragment_trigger_irq);
 
 	dma_pool_destroy(bs->pool);
         bs->pool=NULL;
