@@ -22,6 +22,7 @@
 #define __BCM2835_DMA_H
 
 #include <linux/types.h>
+#include <linux/device.h>
 
 /* the DMA registers and their bitflags */
 #define BCM2835_DMA_CS                                  0x00
@@ -43,7 +44,7 @@
 #define BCM2835_DMA_CS_ABORT				(1 <<30)
 #define BCM2835_DMA_CS_RESET				(1 <<31)
 
-#define BCM2835_DMA_CB_ADDR                             0x04
+#define BCM2835_DMA_ADDR                                0x04
 #define BCM2835_DMA_TI                                  0x08
 #define BCM2835_DMA_TI_INT_EN				(1 << 0)
 #define BCM2835_DMA_TI_TDMODE				(1 << 1)
@@ -91,5 +92,12 @@ struct bcm2835_dma_cb {
 	dma_addr_t next;
 	u32        pad[2];
 };
+
+void bcm2835_dma_cb_dump(
+	char *prefix,
+	struct device *dev,
+	struct bcm2835_dma_cb *dmablock,
+	dma_addr_t dmablock_dma,
+	int flags);
 
 #endif /* __BCM2835_DMA_H */

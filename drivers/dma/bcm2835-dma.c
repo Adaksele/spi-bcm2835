@@ -21,13 +21,45 @@
 #include <linux/printk.h>
 #include <asm/io.h>
 
-static void bcm2835_dma_dump_cb(struct bcm2835_dma_cb* cb)
+void bcm2835_dma_cb_dump(
+	char *prefix,
+	struct device *dev,
+	struct bcm2835_dma_cb *dmablock,
+	dma_addr_t dmablock_dma,
+	int flags)
 {
-        printk(KERN_DEBUG "        .info       = %08x\n",readl(&cb->ti));
-        printk(KERN_DEBUG "        .src        = %08x\n",readl(&cb->src));
-        printk(KERN_DEBUG "        .dst        = %08x\n",readl(&cb->dst));
-        printk(KERN_DEBUG "        .length     = %08x\n",readl(&cb->length));
-        printk(KERN_DEBUG "        .stride_src = %08x\n",readl(&cb->stride_src));
-        printk(KERN_DEBUG "        .stride_dst = %08x\n",readl(&cb->stride_dst));
-        printk(KERN_DEBUG "        .next       = %08x\n",readl(&cb->next));
+	dev_printk(KERN_INFO,dev,
+		"%saddr:\t%pK\n"
+		,prefix,dmablock);
+	if (dmablock_dma)
+		dev_printk(KERN_INFO,dev,
+			"%sd_addr:\t%08llx\n"
+			,prefix,(unsigned long long)dmablock_dma);
+	dev_printk(KERN_INFO,dev,
+		"%sti:\t%08x\n",
+		prefix,dmablock->ti);
+	dev_printk(KERN_INFO,dev,
+		"%ssrc:\t%08x\n",
+		prefix,dmablock->src);
+	dev_printk(KERN_INFO,dev,
+		"%sdst:\t%08x\n",
+		prefix,dmablock->dst);
+	dev_printk(KERN_INFO,dev,
+		"%slength:\t%u\n",
+		prefix,dmablock->length);
+	dev_printk(KERN_INFO,dev,
+		"%ssstride:\t%i\n",
+		prefix,dmablock->stride_src);
+	dev_printk(KERN_INFO,dev,
+		"%sdstr.:\t%i\n",
+		prefix,dmablock->stride_dst);
+	dev_printk(KERN_INFO,dev,
+		"%ssstr.:\t%08x\n",
+		prefix,dmablock->next);
+	dev_printk(KERN_INFO,dev,
+		"%spad0:\t%08x\n",
+		prefix,dmablock->pad[0]);
+	dev_printk(KERN_INFO,dev,
+		"%spad1:\t%08x\n",
+		prefix,dmablock->pad[1]);
 }

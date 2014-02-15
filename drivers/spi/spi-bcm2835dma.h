@@ -40,6 +40,11 @@ struct bcm2835_dmachannel {
 	const char *desc;
 };
 
+struct bcm2835dma_dma_status {
+	u32 v1;
+	u32 v2;
+};
+
 struct bcm2835dma_spi {
 	/* the SPI registers */
 	void __iomem *spi_regs;
@@ -54,26 +59,29 @@ struct bcm2835dma_spi {
 	struct {
 		void *addr;
 		dma_addr_t bus_addr;
-	} buffer_write_dummy,buffer_read_0x00;
+	} buffer_receive_dummy,buffer_transmit_0x00,dma_status;
+	dma_addr_t dma_status_bus_addr;
 	/* the fragment caches */
-	struct dma_fragment_cache fragment_setup_spi_plus_transfer;
+	struct dma_fragment_cache fragment_composite;
+	struct dma_fragment_cache fragment_setup_transfer;
 	struct dma_fragment_cache fragment_transfer;
 	struct dma_fragment_cache fragment_cs_deselect;
 	struct dma_fragment_cache fragment_delay;
 	struct dma_fragment_cache fragment_trigger_irq;
 };
 
-struct dma_fragment *bcm2835_dmafragment_create_setup_spi_plus_transfer(
-	struct spi_master *,gfp_t);
-struct dma_fragment *bcm2835_dmafragment_create_transfer(
-	struct spi_master *,gfp_t);
-struct dma_fragment *bcm2835_dmafragment_create_cs_deselect(
-	struct spi_master *,gfp_t);
-struct dma_fragment *bcm2835_dmafragment_create_delay(
-	struct spi_master *,gfp_t);
-struct dma_fragment *bcm2835_dmafragment_create_trigger_irq(
-	struct spi_master *,gfp_t);
+struct dma_fragment *bcm2835_spi_dmafragment_create_composite(
+	struct device *,gfp_t);
+struct dma_fragment *bcm2835_spi_dmafragment_create_setup_transfer(
+	struct device *,gfp_t);
+struct dma_fragment *bcm2835_spi_dmafragment_create_transfer(
+	struct device *,gfp_t);
+struct dma_fragment *bcm2835_spi_dmafragment_create_cs_deselect(
+	struct device *,gfp_t);
+struct dma_fragment *bcm2835_spi_dmafragment_create_delay(
+	struct device *,gfp_t);
+struct dma_fragment *bcm2835_spi_dmafragment_create_trigger_irq(
+	struct device *,gfp_t);
 
 /* the interrupt-handlers */
-static irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id);
-//static irqreturn_t bcm2835dma_spi_interrupt_dma_rx(int irq, void *dev_id);
+irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id);

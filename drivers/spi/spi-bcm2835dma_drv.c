@@ -114,7 +114,7 @@ static int bcm2835dma_allocate_dmachannel(struct spi_master *master,
                 d->chan, d->base, d->irq,handler);
 	/* and reset the DMA - just in case */
 	writel(BCM2835_DMA_CS_RESET,d->base+BCM2835_DMA_CS);
-	writel(0,d->base+BCM2835_DMA_CB_ADDR);
+	writel(0,d->base+BCM2835_DMA_ADDR);
 	/* and add the irq handler */
 	if (handler) {
 		ret = request_irq(d->irq,
@@ -148,7 +148,7 @@ static void bcm2835dma_release_dmachannel(struct spi_master *master,
                 return;
 	/* reset the DMA */
 	writel(BCM2835_DMA_CS_RESET,d->base+BCM2835_DMA_CS);
-	writel(0,d->base+BCM2835_DMA_CB_ADDR);
+	writel(0,d->base+BCM2835_DMA_ADDR);
 
 	/* release interrupt handler and dma */
 	if (d->handler)
@@ -163,28 +163,6 @@ static void bcm2835dma_release_dmachannel(struct spi_master *master,
 	d->handler=NULL;
 	d->desc=NULL;
 }
-
-static void bcm2835_dmachannel_dump(struct bcm2835_dmachannel *dma)
-{
-	printk(KERN_DEBUG " DMA[%2s].base     = %pK\n",dma->desc,dma->base);
-	printk(KERN_DEBUG "        .bus_addr = %08x\n",dma->bus_addr);
-	printk(KERN_DEBUG "        .channel  = %i\n",dma->chan);
-	printk(KERN_DEBUG "        .irq      = %i\n",dma->irq);
-	printk(KERN_DEBUG "        .handler  = %pS\n",dma->handler);
-        printk(KERN_DEBUG "        .status   = %08x\n",
-		readl(dma->base+BCM2835_DMA_CS));
-        printk(KERN_DEBUG "        .cbaddr   = %08x\n",
-		readl(dma->base+BCM2835_DMA_CB_ADDR));
-
-#if 0
-	bcm2835_dma_dump_cb(
-		(struct bcm2835_dma_cb*)(dma->base+BCM2835_DMA_TI)
-		);
-#endif
-        printk(KERN_DEBUG "        .debug    = %08x\n",
-		readl(dma->base+BCM2835_DMA_DEBUG));
-}
-
 
 static int bcm2835dma_allocate_dma(struct spi_master *master,
 				struct platform_device *pdev)
@@ -214,46 +192,65 @@ static int bcm2835dma_allocate_dma(struct spi_master *master,
 		return -ENOMEM;
 	}
 	/* allocate some pages from pool for "standard" pages */
-	bs->buffer_write_dummy.addr=
+	bs->buffer_receive_dummy.addr=
 		dma_pool_alloc(bs->pool,GFP_KERNEL,
-			&bs->buffer_write_dummy.bus_addr);
+			&bs->buffer_receive_dummy.bus_addr);
+	if (!bs->buffer_receive_dummy.addr)
+		/* TODO: errorhandling */
+		return -ENOMEM;
 
-	bs->buffer_read_0x00.addr=
+	bs->buffer_transmit_0x00.addr=
 		dma_pool_alloc(bs->pool,GFP_KERNEL,
-			&bs->buffer_read_0x00.bus_addr);
-	if (bs->buffer_read_0x00.addr)
-		memset(bs->buffer_read_0x00.addr,0x00,
-			sizeof(*bs->buffer_read_0x00.addr));
+			&bs->buffer_transmit_0x00.bus_addr);
+	if (!bs->buffer_transmit_0x00.addr)
+		/* TODO: errorhandling */
+		return -ENOMEM;
+	memset(bs->buffer_transmit_0x00.addr,0x00,
+		sizeof(struct bcm2835_dma_cb));
+	
+	bs->dma_status.addr=
+		dma_pool_alloc(bs->pool,GFP_KERNEL,
+			&bs->dma_status.bus_addr);
+	if (!bs->dma_status.addr)
+		/* TODO: errorhandling */
+		return -ENOMEM;
+	memset(bs->dma_status.addr,0x00,sizeof(struct bcm2835_dma_cb));
 
 	/* initialize DMA Fragment pools */
-	dma_fragment_cache_initialize(&bs->fragment_setup_spi_plus_transfer,
+	dma_fragment_cache_initialize(&bs->fragment_composite,
+				"composit fragments",
+				&bcm2835_spi_dmafragment_create_composite,
+				&master->dev,
+				5
+		);
+	dma_fragment_cache_initialize(&bs->fragment_setup_transfer,
 				"setup_spi_plus_transfer",
-				&bcm2835_dmafragment_create_setup_spi_plus_transfer,
-				bs->pool,
+				&bcm2835_spi_dmafragment_create_setup_transfer,
+				&master->dev,
 				5
 		);
 	dma_fragment_cache_initialize(&bs->fragment_transfer,
 				"transfer",
-				&bcm2835_dmafragment_create_transfer,
-				bs->pool,
+				&bcm2835_spi_dmafragment_create_transfer,
+				&master->dev,
 				3
 		);
 	dma_fragment_cache_initialize(&bs->fragment_cs_deselect,
 				"fragment_cs_deselect",
-				&bcm2835_dmafragment_create_cs_deselect,
-				bs->pool,
+				&bcm2835_spi_dmafragment_create_cs_deselect,
+				&master->dev,
 				3
 		);
 	dma_fragment_cache_initialize(&bs->fragment_delay,
 				"fragment_delay",
-				&bcm2835_dmafragment_create_delay,
-				bs->pool,
+				&bcm2835_spi_dmafragment_create_delay,
+				&master->dev,
 				3
 		);
 	dma_fragment_cache_initialize(&bs->fragment_trigger_irq,
 				"fragment_trigger_irq",
-				&bcm2835_dmafragment_create_trigger_irq,
-				bs->pool,
+				&bcm2835_spi_dmafragment_create_trigger_irq,
+				&master->dev,
 				3
 		);
 
@@ -271,119 +268,28 @@ static void bcm2835dma_release_dma(struct spi_master *master)
 		return;
 
 	dma_pool_free(bs->pool,
-		bs->buffer_read_0x00.addr,
-		bs->buffer_read_0x00.bus_addr);
+		bs->buffer_transmit_0x00.addr,
+		bs->buffer_transmit_0x00.bus_addr);
 	dma_pool_free(bs->pool,
-		bs->buffer_write_dummy.addr,
-		bs->buffer_write_dummy.bus_addr);
+		bs->buffer_receive_dummy.addr,
+		bs->buffer_receive_dummy.bus_addr);
+	dma_pool_free(bs->pool,
+		bs->dma_status.addr,
+		bs->dma_status.bus_addr);
 
-	dma_fragment_cache_release(&bs->fragment_setup_spi_plus_transfer);
+	dma_fragment_cache_release(&bs->fragment_composite);
+	dma_fragment_cache_release(&bs->fragment_setup_transfer);
 	dma_fragment_cache_release(&bs->fragment_transfer);
 	dma_fragment_cache_release(&bs->fragment_cs_deselect);
 	dma_fragment_cache_release(&bs->fragment_delay);
 	dma_fragment_cache_release(&bs->fragment_trigger_irq);
-
 	dma_pool_destroy(bs->pool);
         bs->pool=NULL;
 }
 
-static void bcm2835dma_dump_spi(struct spi_master* master) {
-	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
-        printk(KERN_DEBUG"  SPI-REGS:\n");
-        printk(KERN_DEBUG"    SPI-CS:   %08x\n",
-		readl(bs->spi_regs + BCM2835_SPI_CS));
-        printk(KERN_DEBUG"    SPI-CLK:  %08x\n",
-		readl(bs->spi_regs + BCM2835_SPI_CLK));
-        printk(KERN_DEBUG"    SPI-DLEN: %08x\n",
-		readl(bs->spi_regs + BCM2835_SPI_DLEN));
-        printk(KERN_DEBUG"    SPI-LOTH: %08x\n",
-		readl(bs->spi_regs + BCM2835_SPI_LTOH));
-        printk(KERN_DEBUG"    SPI-DC:   %08x\n",
-		readl(bs->spi_regs + BCM2835_SPI_DC));
-}
 
-static void spi_print_debug_message(struct spi_message *mesg,u32 max_dump_len)
-{
-	struct spi_transfer *xfer;
-	/* some statistics to gather */
-	u32 transfers=0;
-	u32 transfers_len=0;
-	u32 transfers_tx_len=0;
-	u32 transfers_rx_len=0;
-	/* first general */
-	dev_info(&mesg->spi->dev,"SPI message:\n");
-	printk(KERN_DEBUG " msg.status         = %i\n",mesg->status);
-	printk(KERN_DEBUG "    .actual_length  = %i\n",mesg->actual_length);
-	printk(KERN_DEBUG "    .is_dma_mapped  = %i\n",mesg->is_dma_mapped);
-	printk(KERN_DEBUG "    .complete       = %pf\n",mesg->complete);
-	printk(KERN_DEBUG "    .context        = %pK\n",mesg->context);
-	/* now iterate over list again */
-	list_for_each_entry(xfer, &mesg->transfers, transfer_list) {
-		/* the max data-length to print */
-		u32 dump_len=(xfer->len<max_dump_len)?xfer->len:max_dump_len;
-		/* first some stats */
-		transfers++;
-		transfers_len+=xfer->len;
-		if (xfer->tx_buf)
-			transfers_tx_len+=xfer->len;
-		if (xfer->rx_buf)
-			transfers_rx_len+=xfer->len;
-		/* now write out details for this transfer */
-		printk(KERN_DEBUG " xfer[%02i].len           = %i\n",
-			transfers,xfer->len);
-		printk(KERN_DEBUG "         .speed_hz      = %i\n",
-			xfer->speed_hz);
-		printk(KERN_DEBUG "         .delay_usecs   = %i\n",
-			xfer->delay_usecs);
-		printk(KERN_DEBUG "         .cs_change     = %i\n",
-			xfer->cs_change);
-		printk(KERN_DEBUG "         .bits_per_word = %i\n",
-			xfer->bits_per_word);
-		printk(KERN_DEBUG "         .tx_buf        = %pK\n",
-			xfer->tx_buf);
-		printk(KERN_DEBUG "         .tx_dma        = %08x\n",
-			xfer->tx_dma);
-		if ((xfer->tx_buf)&&(dump_len)) {
-			print_hex_dump(KERN_DEBUG,
-				"         .tx_data       = ",
-				DUMP_PREFIX_ADDRESS,
-				32,4,
-				xfer->tx_buf,
-				dump_len,
-				false
-				);
-		}
-		printk(KERN_DEBUG "         .rx_buf        = %pK\n",
-			xfer->rx_buf);
-		printk(KERN_DEBUG "         .rx_dma        = %08x\n",
-			xfer->rx_dma);
-		if ((xfer->rx_buf)&&(dump_len)) {
-			print_hex_dump(KERN_DEBUG,
-				"         .rx_data       = ",
-				DUMP_PREFIX_ADDRESS,
-				32,4,
-				xfer->rx_buf,
-				dump_len,
-				false
-				);
-		}
-	}
-	printk(KERN_DEBUG " msg.transfers      = %i\n",transfers);
-	printk(KERN_DEBUG "    .total_len      = %i\n",transfers_len);
-	printk(KERN_DEBUG "    .tx_length      = %i\n",transfers_tx_len);
-	printk(KERN_DEBUG "    .rx_length      = %i\n",transfers_rx_len);
-}
 
-static void bcm2835dma_dump_state(struct spi_master *master)
-{
-	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
-	bcm2835dma_dump_spi(master);
-	dev_info(&master->dev,"DMA status:\n");
-	bcm2835_dmachannel_dump(&bs->dma_rx);
-	bcm2835_dmachannel_dump(&bs->dma_tx);
-}
-
-static irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
+irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
 {
 	struct spi_master *master = dev_id;
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
@@ -456,7 +362,7 @@ static void bcm2835dma_spi_restore_pinmodes(void) {
 }
 
 static int bcm2835dma_spi_setup(struct spi_device *spi) {
-	struct bcm2835dma_spi *bs = spi_master_get_devdata(spi->master);
+	//struct bcm2835dma_spi *bs = spi_master_get_devdata(spi->master);
 	u8 cs = spi->chip_select;
 	u32 mode = spi->mode;
 
