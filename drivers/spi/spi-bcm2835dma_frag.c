@@ -140,6 +140,7 @@ struct dma_fragment_transfer {
 	/* the individual objects */
 	struct dma_link     *schedule_transfer_rx;
 	struct dma_link     *schedule_transfer_tx;
+	u32                 *length;
 };
 
 /**
@@ -155,6 +156,7 @@ struct dma_fragment_setup_transfer {
 	/* the individual objects */
 	struct dma_link     *schedule_transfer_rx;
 	struct dma_link     *schedule_transfer_tx;
+	u32                 *length;
 	struct dma_link     *cs_select;
 	struct dma_link     *reset_spi_and_config_speed;
 	struct dma_link     *config_length;
@@ -306,6 +308,9 @@ struct dma_fragment *bcm2835_spi_dmafragment_create_setup_transfer(
 		LINK_FIELD_DMAADDR(frag->cs_select,pad[0]);
 	LINK_TO_BCM2835_DMA_CB(frag->cs_select)->length = 
 		4;
+	/* need to update:
+	   destination and pad0
+	*/
 	/* now reset SPI and configure the speed */
 	ALLOCATE_RXDMA_IN_FRAGMENT(frag,reset_spi_and_config_speed);
 	LINK_TO_BCM2835_DMA_CB(frag->cs_select)->next =
@@ -344,7 +349,7 @@ struct dma_fragment *bcm2835_spi_dmafragment_create_setup_transfer(
 		BCM2835_SPI_BASE_BUS + BCM2835_SPI_DLEN;
 	LINK_TO_BCM2835_DMA_CB(frag->config_length)->length =
 		4;
-	/* the clock speed as a divider in pad[0] */
+	/* the length in pad[0] */
 
 	/* reenable the spi config */
 	ALLOCATE_RXDMA_IN_FRAGMENT(frag,config_spi);
@@ -686,13 +691,106 @@ error:
 	return NULL;
 }
 
+#define transfer_to_dma(x) 0
+static int _bcm2835dma_spi_compo_add_transfer_helper (
+	struct spi_transfer *xfer,
+	struct dma_fragment_composite *compo,
+	struct dma_fragment_transfer* frag,
+	gfp_t gfpflags);
+
 int bcm2835dma_spi_compo_add_config_transfer(
 	struct spi_device *spi,
 	struct spi_transfer *xfer,
 	struct dma_fragment_composite *compo,
 	gfp_t gfpflags)
 {
-	return -1;
+	struct spi_master * master = spi->master;
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+	int cs,ret;
+
+	/* get the object from the correct chain */
+	struct dma_fragment_setup_transfer* 
+		frag = (struct dma_fragment_setup_transfer*)
+		dma_fragment_cache_fetch(
+			&bs->fragment_transfer,
+			gfpflags);
+	if (!frag)
+		return -ENOMEM;
+
+	/* calc CS/GPIO */
+	cs = spi->chip_select;
+	if (cs==0) 
+		cs=BCM2835_SPI_GPIO_CS0;
+	else if (cs==1) 
+		cs=BCM2835_SPI_GPIO_CS1;
+
+	
+	/* select correct address based on cs and CS_POLARITY*/
+	LINK_TO_BCM2835_DMA_CB(frag->cs_select)->dst =
+		(spi->mode & SPI_CS_HIGH) ?
+		0x7e20001C:0x7e200028
+		+ (cs < 32) ? 0:4
+		;
+
+	/* and the bitmap */
+	LINK_TO_BCM2835_DMA_CB(frag->cs_select)->pad[0] =
+		1<<(cs%32);
+	
+	/* now calculate and assign the clock divider */
+	LINK_TO_BCM2835_DMA_CB(frag->reset_spi_and_config_speed)->pad[0] =
+		/* TODO */
+		0 ;
+#ifdef WITH_PREPARED
+	if (xfer->prepared_mask & SPI_TRANSFER_PREPARED_MAY_CHANGE_SPEED) {
+		/* ADD the pre-transform to reconfig speed */
+	}
+#endif
+
+	/* and the CS flags */
+	LINK_TO_BCM2835_DMA_CB(frag->reset_spi_and_config_speed)->pad[1] =
+		BCM2835_SPI_CS_TA
+		| BCM2835_SPI_CS_CLEAR_RX
+		| BCM2835_SPI_CS_CLEAR_TX
+		| BCM2835_SPI_CS_CS_01
+		| BCM2835_SPI_CS_CS_10
+		| ((spi->mode & SPI_CPOL) ? BCM2835_SPI_CS_CPOL : 0)
+		| ((spi->mode & SPI_CPHA) ? BCM2835_SPI_CS_CPHA : 0)
+		;
+	
+	/* and the final SPI_CS settings */
+	LINK_TO_BCM2835_DMA_CB(frag->config_spi)->pad[0] =
+		BCM2835_SPI_CS_TA
+		| BCM2835_SPI_CS_DMAEN
+		| BCM2835_SPI_CS_CLEAR_RX
+		| BCM2835_SPI_CS_CLEAR_TX
+		| BCM2835_SPI_CS_CS_01
+		| BCM2835_SPI_CS_CS_10
+		| ((spi->mode & SPI_CPOL) ? BCM2835_SPI_CS_CPOL : 0)
+		| ((spi->mode & SPI_CPHA) ? BCM2835_SPI_CS_CPHA : 0)
+		;
+
+
+	/* and the length */
+	frag->length = 
+		&LINK_TO_BCM2835_DMA_CB(frag->config_length) -> pad[0];
+
+	*frag->length=xfer->len;
+#ifdef WITH_PREPARED
+	if ( (is_prepared)
+		&& (xfer->prepared_mask
+			& SPI_TRANSFER_PREPARED_MAY_CHANGE_LEN
+			)) {
+		/* ADD the pre-transform to copy length */
+	}
+#endif
+
+	ret=_bcm2835dma_spi_compo_add_transfer_helper(
+		xfer,compo,(struct dma_fragment_transfer*)frag,gfpflags
+		);
+
+	/* and now we can link it */
+
+	return ret;
 }
 
 int bcm2835dma_spi_compo_add_transfer(
@@ -701,7 +799,103 @@ int bcm2835dma_spi_compo_add_transfer(
 	struct dma_fragment_composite *compo,
 	gfp_t gfpflags)
 {
-	return -1;
+	struct spi_master * master = spi->master;
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+	int ret;
+
+	/* get the object from the correct chain */
+	struct dma_fragment_transfer* 
+		frag = (struct dma_fragment_transfer*)
+		dma_fragment_cache_fetch(
+			&bs->fragment_transfer,
+			gfpflags);
+	if (!frag)
+		return -ENOMEM;
+
+	ret=_bcm2835dma_spi_compo_add_transfer_helper(
+		xfer,compo,frag,gfpflags
+		);
+
+	/* and now we can link it */
+
+	return ret;
+}
+
+static int _bcm2835dma_spi_compo_add_transfer_helper (
+	struct spi_transfer *xfer,
+	struct dma_fragment_composite *compo,
+	struct dma_fragment_transfer* frag,
+	gfp_t gfpflags)
+{
+	/* configure the tx part */
+	if (xfer->tx_buf) {
+		if (xfer->tx_dma) {
+			LINK_TO_BCM2835_DMA_CB(frag->schedule_transfer_tx)->src
+				= xfer->tx_dma;
+		} else {
+			LINK_TO_BCM2835_DMA_CB(frag->schedule_transfer_tx)->src
+				= transfer_to_dma(xfer->tx_buf);
+			/* NOTE: we need to unmap after the transfer as well */
+		}
+		LINK_TO_BCM2835_DMA_CB(frag->schedule_transfer_tx)->ti =
+			BCM2835_DMA_TI_S_INC
+			| BCM2835_DMA_TI_WAIT_RESP
+			;
+#ifdef WITH_PREPARED
+		if (is_prepared) {
+			if (xfer->prepared_mask
+				& SPI_TRANSFER_PREPARED_MAY_CHANGE_TX_BUF_ADDR
+				) {
+			/* ADD the pre-transform to map Memory to DMA */
+			/* ADD the post-transform to unmap Memory to DMA */
+			} else if (xfer->prepared_mask
+				& SPI_TRANSFER_PREPARED_MAY_CHANGE_TX_DMA_ADDR
+				) {
+			/* ADD the pre-transform to copy the pointer */
+			}
+		}
+#endif
+
+	} else {
+		LINK_TO_BCM2835_DMA_CB(frag->schedule_transfer_tx)->src = 0;
+		LINK_TO_BCM2835_DMA_CB(frag->schedule_transfer_tx)->ti = 0;
+	}
+
+	/* configure the rx part */
+	if (xfer->rx_buf) {
+		if (xfer->rx_dma) {
+			LINK_TO_BCM2835_DMA_CB(frag->schedule_transfer_rx)->dst
+				= xfer->rx_dma;
+		} else {
+			LINK_TO_BCM2835_DMA_CB(frag->schedule_transfer_rx)->dst
+				= transfer_to_dma(xfer->rx_buf);
+			/* NOTE: we need to unmap after the transfer as well */
+		}
+		LINK_TO_BCM2835_DMA_CB(frag->schedule_transfer_rx)->ti =
+			BCM2835_DMA_TI_D_INC
+			| BCM2835_DMA_TI_WAIT_RESP
+			;
+#ifdef WITH_PREPARED
+		if (is_prepared) {
+			if (xfer->prepared_mask
+				& SPI_TRANSFER_PREPARED_MAY_CHANGE_RX_BUF_ADDR
+				) {
+			/* ADD the pre-transform to map Memory to DMA */
+			/* ADD the post-transform to unmap Memory to DMA */
+			} else if (xfer->prepared_mask
+				& SPI_TRANSFER_PREPARED_MAY_CHANGE_RX_DMA_ADDR
+				) {
+			/* ADD the pre-transform to copy the pointer */
+			}
+		}
+#endif
+	} else {
+		LINK_TO_BCM2835_DMA_CB(frag->schedule_transfer_rx)->src = 0;
+		LINK_TO_BCM2835_DMA_CB(frag->schedule_transfer_rx)->ti = 0;
+	}
+
+	/* the return flags */
+	return (xfer->len%4)?1:0;
 }
 
 int bcm2835dma_spi_compo_add_cs_change(
@@ -710,7 +904,40 @@ int bcm2835dma_spi_compo_add_cs_change(
 	struct dma_fragment_composite *compo,
 	gfp_t gfpflags)
 {
-	return -1;
+	struct spi_master * master = spi->master;
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+	int cs;
+
+	/* get the object from the correct chain */
+	struct dma_fragment_cs_deselect* 
+		frag = (struct dma_fragment_cs_deselect*)
+		dma_fragment_cache_fetch(
+			&bs->fragment_cs_deselect,
+			gfpflags);
+	if (!frag)
+		return -ENOMEM;
+
+	/* calc CS/GPIO */
+	cs = spi->chip_select;
+	if (cs==0) 
+		cs=BCM2835_SPI_GPIO_CS0;
+	else if (cs==1) 
+		cs=BCM2835_SPI_GPIO_CS1;
+	
+	/* select correct address based on cs and CS_POLARITY*/
+	LINK_TO_BCM2835_DMA_CB(frag->cs_deselect)->dst =
+		(spi->mode & SPI_CS_HIGH) ?
+		0x7e200028:0x7e20001C
+		+ (cs < 32) ? 0:4
+		;
+
+	/* and the bitmap */
+	LINK_TO_BCM2835_DMA_CB(frag->cs_deselect)->pad[0] =
+		1<<(cs%32);
+
+	/* a cs-change requires a reconfig, so we return 1 */
+	return 1;
+
 }
 
 int bcm2835dma_spi_compo_add_delay(
