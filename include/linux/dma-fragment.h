@@ -16,6 +16,8 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+ *
+ * 4567890123456789012345678901234567890123456789012345678901234567890123456789
  */
 
 #ifndef __DMAFRAGMENT_H
@@ -149,12 +151,33 @@ void dma_fragment_dump(struct dma_fragment *fragment,
 		int flags);
 
 /**
+ * dma_fragment_composite - this is a composit dma fragment, that combines 
+ *   several fragments to make up a full SPI transfer
+ *   it can be a prepared version, in which case we also run the 
+ *   message transforms
+ * @fragment: the normal dma_fragment
+ * @is_prepared: flags that the dma_fragment is prepared already
+ * @message_pre_transform_chain: list of transforms to do prior to scheduling
+ *   the dma fragment
+ * @message_post_transform_chain: list of transforms to do after the DMA has
+ *   finished
+ * @message: the spi_message which we are handling
+ */
+struct dma_fragment_composite {
+	struct dma_fragment fragment;
+	int is_prepared;
+	struct list_head    message_pre_transform_chain;
+	struct list_head    message_post_transform_chain;
+};
+
+/**
  * struct dma_fragment_cache - a cache of several fragments
  * @lock: lock for this structure
  * @name: name of the cache
  * @active: list of currently active fragments
  * @idle: list of currently idle fragments
- * @dmapool: the dmapool from which to allocate dma blocks (this implicitly defines the size of the DMA CB)
+ * @dmapool: the dmapool from which to allocate dma blocks 
+ *    (this implicitly defines the size of the DMA CB)
  * @allocateFragment: the allocation code for fragments
  */
 struct dma_fragment_cache {

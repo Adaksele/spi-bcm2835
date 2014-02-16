@@ -22,11 +22,17 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+ *
+ * 4567890123456789012345678901234567890123456789012345678901234567890123456789
  */
 
 /* known limitations:
  *  * cs maps directly to GPIO (except for 0 and 1, which also map to 7+8)
  *    and the mode is not reverted when not used
+ *  * if there is a transfer of say 13 bytes, then a total of 16 bytes will get
+ *    (over)written, so any tightly packed data would get overwritten
+ *    Not sure how we should approach such a situation  - if this is not a valid
+ *    situation with drivers right now, then maybe we should make it a policy
  */
 #include "spi-bcm2835dma.h"
 

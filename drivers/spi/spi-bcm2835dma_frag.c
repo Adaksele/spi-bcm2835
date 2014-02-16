@@ -20,6 +20,8 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+ *
+ * 4567890123456789012345678901234567890123456789012345678901234567890123456789
  */
 
 #include "spi-bcm2835dma.h"
@@ -126,27 +128,6 @@ int message_transform_speed_dmamap_region(void* src, void* dst, void* extra);
  * typically used on the post-transform chain
  */
 int message_transform_speed_dmaunmap_region(void* src, void* dst, void* extra);
-
-/**
- * dma_fragment_composit - this is a composit dma fragment, that combines 
- *   several fragments to make up a full SPI transfer
- *   it can be a prepared version, in which case we also run the 
- *   message transforms
- * @fragment: the normal dma_fragment
- * @is_prepared: flags that the dma_fragment is prepared already
- * @message_pre_transform_chain: list of transforms to do prior to scheduling
- *   the dma fragment
- * @message_post_transform_chain: list of transforms to do after the DMA has
- *   finished
- * @message: the spi_message which we are handling
- */
-struct dma_fragment_composite {
-	struct dma_fragment fragment;
-	int is_prepared;
-	struct list_head    message_pre_transform_chain;
-	struct list_head    message_post_transform_chain;
-	struct spi_message  *message;
-};
 
 /**
  * dma_fragment_transfer - structure used to initiate an additional
@@ -704,7 +685,6 @@ error:
 
 	return NULL;
 }
-
 
 int bcm2835dma_spi_compo_add_config_transfer(
 	struct spi_device *spi,
