@@ -367,42 +367,95 @@ static void bcm2835dma_spi_restore_pinmodes(void) {
 	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_SCK, 0);
 }
 
-static int bcm2835dma_spi_setup(struct spi_device *spi) {
-	//struct bcm2835dma_spi *bs = spi_master_get_devdata(spi->master);
-	u8 cs = spi->chip_select;
-	u32 mode = spi->mode;
+static void bcm2835dma_spi_cleanup(struct spi_device *spi) {
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(spi->master);
+	struct bcm2835dma_spi_device_data *data=dev_get_drvdata(&spi->dev);
+	/* release the memory and GPIO allocated for the SPI device */
+	if (data) {
+		dev_set_drvdata(&spi->dev,NULL);
+		gpio_direction_input(data->chipselect_gpio);
+		dma_pool_free(bs->pool,data,data->bus_addr);
+	}
+}
 
-	/* map cs=0 and cs=1 to the correct ones for the RPI */
+static int bcm2835dma_spi_setup(struct spi_device *spi) {
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(spi->master);
+	struct bcm2835dma_spi_device_data *data;
+	u16        tmp;
+	u32        mode=spi->mode;
+
+	/* calculate the real GPIO to use */
 	if (spi->master->cs_gpios) {
-		cs= spi->cs_gpio;
+		tmp = spi->cs_gpio;
 	} else {
-		if (cs == 0)
-			cs = BCM2835_SPI_GPIO_CS0;
-		if (cs == 1)
-			cs = BCM2835_SPI_GPIO_CS1;
+		switch (spi->chip_select) {
+		case 0:  tmp = BCM2835_SPI_GPIO_CS0 ; break;
+		case 1:  tmp = BCM2835_SPI_GPIO_CS1 ; break;
+		default: tmp = spi->chip_select     ; break;
+		}
 	}
-	/* set the "correct" cs level */
-	if ((mode & SPI_NO_CS)) {
-		/* check cs for prohibited pins */
-		if (
-			(cs == BCM2835_SPI_GPIO_MISO)
-			||
-			(cs == BCM2835_SPI_GPIO_MOSI)
-			||
-			(cs == BCM2835_SPI_GPIO_SCK)
-			) {
-			dev_err(&spi->dev, "Chipselect GPIO %i is not allowed as it is already used\n",cs);
+
+	/* check gpio for prohibited pins - MISO, MOSI, SCK are not allowed... */
+	if ((spi->mode & SPI_NO_CS)) {
+		switch (tmp) {
+		case BCM2835_SPI_GPIO_MISO:
+		case BCM2835_SPI_GPIO_MOSI:
+		case BCM2835_SPI_GPIO_SCK:
+			dev_err(&spi->dev, "Chipselect GPIO %i is not allowed as it is already used\n",tmp);
 			return -EPERM;
-		}
-		/* set pin mode as Output with the correct polarity */
-		if (mode & SPI_CS_HIGH) {
-			/* configure the GPIO as low and output */
-			gpio_direction_output(cs,0);
-		} else {
-			/* configure the GPIO as high and output */
-			gpio_direction_output(cs,1);
+		default: break;
 		}
 	}
+
+	/* allocate data - if not allocated yet */
+	data=dev_get_drvdata(&spi->dev);
+	if (!data) {
+		dma_addr_t t;
+		data=dma_pool_alloc(bs->pool,GFP_KERNEL,&t);
+		if (!data)
+			return -ENOMEM;
+		data->bus_addr=t;
+		dev_set_drvdata(&spi->dev,data);
+	}
+
+	/* set the chip_select fields correctly */
+	data->chipselect_gpio = tmp;
+	data->chipselect_bitfield = ((u32)1) << (tmp % 32);
+	/* shift right gpio by 5 bit to get the register offset we need to use*/
+	tmp >>= 5; 
+	/* based od SPI_CS configure it differently */
+	if (mode & SPI_CS_HIGH) {
+		/* configure the GPIO as low and output */
+		gpio_direction_output(data->chipselect_gpio,0);
+		/* and set the registers accordingly */
+		data->chipselect_select_gpio_reg  = 0x7e20001C + 4*tmp;
+		data->chipselect_release_gpio_reg = 0x7e200028 + 4*tmp;
+	} else {
+		/* configure the GPIO as high and output */
+		gpio_direction_output(data->chipselect_gpio,1);
+		/* and set the registers accordingly */
+		data->chipselect_select_gpio_reg = 0x7e200028 + 4*tmp;
+		data->chipselect_release_gpio_reg  = 0x7e20001C + 4*tmp;
+	}
+	
+	/* and the CS register values used to configure SPI */
+	tmp= 
+		BCM2835_SPI_CS_TA
+	        | BCM2835_SPI_CS_CS_01
+		| BCM2835_SPI_CS_CS_10
+		| ((spi->mode & SPI_CPOL) ? BCM2835_SPI_CS_CPOL : 0)
+		| ((spi->mode & SPI_CPHA) ? BCM2835_SPI_CS_CPHA : 0)
+		;
+	/* the values used to reset SPI FIFOs*/
+	data->spi_cs_reset = tmp 
+		| BCM2835_SPI_CS_CLEAR_RX
+		| BCM2835_SPI_CS_CLEAR_TX
+		;
+	/* the values used to reenable DMA transfers */
+	data->spi_cs_set = tmp 
+		| BCM2835_SPI_CS_DMAEN
+		;
+
 	return 0;
 }
 
@@ -428,6 +481,7 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 #endif
 	master->num_chipselect = BCM2835_SPI_MAX_CS;
 	master->setup = bcm2835dma_spi_setup;
+	master->cleanup = bcm2835dma_spi_cleanup;
 	master->dev.of_node = pdev->dev.of_node;
 	master->rt = 1;
 

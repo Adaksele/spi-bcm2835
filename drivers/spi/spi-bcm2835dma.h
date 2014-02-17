@@ -47,6 +47,19 @@ struct bcm2835dma_dma_status {
 	u32 v2;
 };
 
+struct bcm2835dma_spi_device_data {
+	/* the dma address - primarily used for releasing this */
+	dma_addr_t bus_addr;
+	/* the SPI Registers for Set/Reset values */
+	u32 spi_cs_set;
+	u32 spi_cs_reset;
+	/* the Chip select parameters */
+	dma_addr_t chipselect_select_gpio_reg;
+	dma_addr_t chipselect_release_gpio_reg;
+	u32        chipselect_bitfield;
+	u8         chipselect_gpio;
+};
+
 struct bcm2835dma_spi {
 	/* the SPI registers */
 	void __iomem *spi_regs;
