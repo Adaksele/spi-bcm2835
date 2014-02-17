@@ -140,7 +140,6 @@ struct dma_fragment_transfer {
 	/* the individual objects */
 	struct dma_link     *schedule_transfer_rx;
 	struct dma_link     *schedule_transfer_tx;
-	u32                 *length;
 };
 
 /**
@@ -153,16 +152,20 @@ struct dma_fragment_transfer {
  */
 struct dma_fragment_setup_transfer {
 	struct dma_fragment fragment;
-	/* the individual objects */
+	/* the individual objects - the first ones need to be identical 
+	   to the ones of dma_fragment_setup_transfer */
 	struct dma_link     *schedule_transfer_rx;
 	struct dma_link     *schedule_transfer_tx;
-	u32                 *length;
+	/* additional data */
 	struct dma_link     *cs_select;
 	struct dma_link     *reset_spi_and_config_speed;
 	struct dma_link     *config_length;
 	struct dma_link     *config_spi;
 	struct dma_link     *set_tx_dma_next;
 	struct dma_link     *start_tx_dma;
+	/* some of the timing data that we need 
+	   - filled in based on the SPI-clock */
+	u32 delay_transfers_half_cycle
 };
 
 /**
@@ -256,13 +259,19 @@ struct dma_fragment_trigger_irq {
 	((struct bcm2835_dma_cb *)dmalink->dmablock)
 
 /**
- * LINK_FIELD_DMAADDR - for a field in the DMA CB create the corresponding 
- *   dma-address
- * @dmalink: dma_link to base this on
- * @field: the member field in the dma CB
+ * dma_fragment_composite_spi - a composite structure with some extra data
+ * @composite: the main composite structure
+ * @last_setup_transfer: the pointer to the last setup_transfer structure
+ * @last_transfer: the pointer to the last transfer structure 
+ *   (may be identical to setup_transfer)
  */
-#define LINK_FIELD_DMAADDR(dmalink,field)				\
-	( dmalink->dmablock_dma + offsetof(struct bcm2835_dma_cb,field) )
+struct dma_fragment_composite_spi {
+	/* the main composit structure */
+	struct dma_fragment_composite composite;
+	/* additional data */
+	struct dma_fragment_setup_transfer *last_setup_transfer;
+	struct dma_fragment_transfer *last_transfer;
+};
 
 /**
  * bcm2835_spi_dmafragment_create_composite - create a composite DMA fragment
@@ -275,11 +284,143 @@ struct dma_fragment_trigger_irq {
 struct dma_fragment *bcm2835_spi_dmafragment_create_composite(
 	struct device * device,gfp_t gfpflags)
 {
-	struct dma_fragment_composite *frag 
+	struct dma_fragment_composite_spi *frag 
 		= (typeof(frag))dma_fragment_alloc(
 			device,gfpflags,sizeof(*frag));
-	return &frag->fragment;
+	
+	frag->last_setup_transfer = NULL;
+	frag->last_transfer = NULL;
+
+	return &(frag->composite.fragment);
 }
+
+/**
+ * ADD_TO_DMA_FRAGMENT - add data to field in fragment and assign 
+ *   the correct values
+ * @frag: the fragment to which to add it
+ * @field: the dma_link field which to set
+ * @dmachannel: the dma channel to which this belongs
+ * @do_<field>: do assign the following if set to 1
+ *   - see also helper macros to document where these fields are 
+ *     supposed to get set:
+ *     * _IGNORE(field): do not set it
+ *     * _FIXED(field): set this field fixed and never modified
+ *     * _SPI(field): set during setup/optimization - value from spi_device
+ *     * _MESG(field): set value based on spi_message/spi_transfer
+ *     * _VARY(field): set value based on spi_message/spi_transfer for
+ *                     optimized messages
+ * @v_<Field>: the values to assign
+ * Fields are:
+ * @ti: dma configuration values
+ * @src: the source dma_addr from which to copy data
+ * @dst: the destination dma_addr to wich 
+ * @length: the number of bytes to transfer
+ * @stride_s: the source_stride length in 2d-mode
+ * @stride_d: the destination_stride length in 2d-mode
+ * @pad0: the pad[0] value
+ * @pad1: the pad[1] value
+ * Note that the macro assumes that the compiler will optimize dead code away
+ */
+
+#define ADD_TO_DMA_FRAGMENT(frag,field,dmachannel,			\
+		do_ti, v_ti,						\
+		do_src, v_src,						\
+		do_dst, v_dst,						\
+		do_length, v_length,					\
+		do_stride, v_stride_s, v_stride_d,			\
+		do_pad0, v_pad0,					\
+		do_pad1, v_pad1						\
+	)								\
+	_ADD_TO_DMA_FRAGMENT(frag,field,dmachannel,			\
+		do_ti, v_ti,						\
+		do_src, v_src,						\
+		do_dst, v_dst,						\
+		do_length, v_length,					\
+		do_stride, v_stride_s, v_stride_d,			\
+		do_pad0, v_pad0,					\
+		do_pad1, v_pad1						\
+		)
+/**
+ * _ADD_TO_DMA_FRAGMENT: the internal version of ADD_TO_DMA_FRAGMENT,
+ *   so that macro expansion is working propperly
+ */
+#define _ADD_TO_DMA_FRAGMENT(frag,field,dmachannel,			\
+		do_ti, v_ti,						\
+		do_src, v_src,						\
+		do_dst, v_dst,						\
+		do_length, v_length,					\
+		do_stride, v_stride_s, v_stride_d,			\
+		do_pad0, v_pad0,					\
+		do_pad1, v_pad1						\
+	)								\
+	if (! ( frag->field = dma_link_alloc(				\
+				device,pool,				\
+				bs->dmachannel.chan,			\
+				gfpflags				\
+				)))					\
+		goto error;						\
+	if ( dma_fragment_add(						\
+			(struct dma_fragment *)frag,			\
+			(struct dma_link *)frag->field			\
+			) )						\
+		goto error;						\
+	else {								\
+		struct bcm2835_dma_cb *block =				\
+			(struct bcm2835_dma_cb *)			\
+			(frag->field->dmablock);			\
+		if ( do_ti == 1 )					\
+			block->ti = v_ti;				\
+		if ( do_src == 1 )					\
+			block->src = (u32) v_src;			\
+		if ( do_dst == 1 )					\
+			block->dst = (u32) v_dst;			\
+		if ( do_length == 1)					\
+			block->length = v_length;			\
+		if ( do_stride == 1) {					\
+			block->stride_src = v_stride_s;			\
+			block->stride_dst = v_stride_d;			\
+		} else {						\
+			block->stride_src = 0;				\
+			block->stride_dst = 0;				\
+		}							\
+		block->next=0;						\
+		if ( do_pad0 == 1 )					\
+			block->pad[0] = v_pad0;				\
+		if ( do_pad1 ==1 )					\
+			block->pad[1] = v_pad1;				\
+	}
+
+/**
+ * _HELPER - helper macros to define what we are doing with witch field
+ * these are defined mostly to give some insight into where the
+ * data for each is coming from
+ * @X: a dummy argument mostly there to clarify which data-field we 
+ *   are talking about to make it more readable...
+ */
+#define _IGNORE(X) 0
+#define _FIXED(X)  1
+#define _SPI(X)    2
+#define _MESG(X)   3
+#define _VARY(X)   4
+
+/**
+ * DMA_LINK - links the second dma_link to get executed after the first
+ * @frag: the fragment for which we do this
+ * @first: the dma_link that is linked to the next
+ * @second: the dma_link that is being linked to the first
+ */
+#define DMA_LINK(frag,first,second)					\
+		((struct bcm2835_dma_cb *)(frag->first->dmablock))	\
+		->next = frag->second->dmablock_dma;
+
+/**
+ * FIELD_DMA_ADDR - for a field in the DMA CB create the corresponding 
+ *   dma-address
+ * @dmalink: dma_link to base this on
+ * @field: the member field in the dma CB
+ */
+#define FIELD_DMA_ADDR(dmalink,field)					\
+	( dmalink->dmablock_dma + offsetof(struct bcm2835_dma_cb,field) )
 
 /**
  * bcm2835_spi_dmafragment_create_setup_transfer- create a DMA fragment
@@ -300,129 +441,121 @@ struct dma_fragment *bcm2835_spi_dmafragment_create_setup_transfer(
 	if (! frag)
 		return NULL;
 	/* now allocate the blocks we need */
-	/* start with the CSSelect */
-	ALLOCATE_RXDMA_IN_FRAGMENT(frag,cs_select);
-	LINK_TO_BCM2835_DMA_CB(frag->cs_select)->ti =
-		BCM2835_DMA_TI_WAIT_RESP;
-	LINK_TO_BCM2835_DMA_CB(frag->cs_select)->src =
-		LINK_FIELD_DMAADDR(frag->cs_select,pad[0]);
-	LINK_TO_BCM2835_DMA_CB(frag->cs_select)->length = 
-		4;
-	/* need to update:
-	   destination and pad0
-	*/
-	/* now reset SPI and configure the speed */
-	ALLOCATE_RXDMA_IN_FRAGMENT(frag,reset_spi_and_config_speed);
-	LINK_TO_BCM2835_DMA_CB(frag->cs_select)->next =
-		frag->reset_spi_and_config_speed->dmablock_dma;
-	LINK_TO_BCM2835_DMA_CB(frag->reset_spi_and_config_speed)->ti =
-		BCM2835_DMA_TI_WAIT_RESP
-		| BCM2835_DMA_TI_TDMODE
-		| BCM2835_DMA_TI_S_INC
-		| BCM2835_DMA_TI_D_INC;
-	LINK_TO_BCM2835_DMA_CB(frag->reset_spi_and_config_speed)->src =
-		LINK_FIELD_DMAADDR(frag->cs_select,pad[0]);
-	LINK_TO_BCM2835_DMA_CB(frag->reset_spi_and_config_speed)->dst =
-		BCM2835_SPI_BASE_BUS + BCM2835_SPI_CLK;
-	LINK_TO_BCM2835_DMA_CB(frag->reset_spi_and_config_speed)->length =
-		8;
-	LINK_TO_BCM2835_DMA_CB(frag->reset_spi_and_config_speed)->stride_src = 
-	        4;
-	LINK_TO_BCM2835_DMA_CB(frag->reset_spi_and_config_speed)->stride_dst =
-		-8;
-	/* the clock speed as a divider in pad[0]
-	 * the RESET values in pad[1] - need to set:
-	 * * BCM2835_SPI_CS_CSPOL correctly
-	 * * BCM2835_SPI_CS_CLEAR_RX
-	 * * BCM2835_SPI_CS_CLEAR_TX
-	 */
 
-	/* set the DMA-transfer length */
-	ALLOCATE_RXDMA_IN_FRAGMENT(frag,config_length);
-	LINK_TO_BCM2835_DMA_CB(frag->reset_spi_and_config_speed)->next =
-		frag->config_length->dmablock_dma;
-	LINK_TO_BCM2835_DMA_CB(frag->config_length)->ti =
-		BCM2835_DMA_TI_WAIT_RESP ;
-	LINK_TO_BCM2835_DMA_CB(frag->config_length)->src =
-		LINK_FIELD_DMAADDR(frag->cs_select,pad[0]);
-	LINK_TO_BCM2835_DMA_CB(frag->config_length)->dst =
-		BCM2835_SPI_BASE_BUS + BCM2835_SPI_DLEN;
-	LINK_TO_BCM2835_DMA_CB(frag->config_length)->length =
-		4;
-	/* the length in pad[0] */
+	/* start with setting CS - some of the data
+	   is taken data from spi_device_data */
+	ADD_TO_DMA_FRAGMENT(frag,cs_select,dma_rx,
+			_FIXED(TI),     BCM2835_DMA_TI_WAIT_RESP,
+			_FIXED(SRC),    FIELD_DMA_ADDR(
+				frag->cs_select,pad[0]),
+			_SPI(DST),      0, /* spi_device_data
+					      -> chipselect_select_gpio_reg */
+			_FIXED(LEN),    4,
+			_FIXED(STRIDE), 0, 0,
+			_SPI(PAD0),     0, /* spi_device_data
+					      ->chipselect_bitfield */
+			_IGNORE(PAD1),  0
+		);
 
-	/* reenable the spi config */
-	ALLOCATE_RXDMA_IN_FRAGMENT(frag,config_spi);
-	LINK_TO_BCM2835_DMA_CB(frag->config_length)->next =
-		frag->config_spi->dmablock_dma;
-	LINK_TO_BCM2835_DMA_CB(frag->config_spi)->ti =
-		BCM2835_DMA_TI_WAIT_RESP ;
-	LINK_TO_BCM2835_DMA_CB(frag->config_spi)->src =
-		LINK_FIELD_DMAADDR(frag->cs_select,pad[0]);
-	LINK_TO_BCM2835_DMA_CB(frag->config_spi)->dst =
-		BCM2835_SPI_BASE_BUS + BCM2835_SPI_DLEN;
-	LINK_TO_BCM2835_DMA_CB(frag->config_spi)->length =
-		4;
-	/* the correct flags for TI in pad[0] - need to have:
-	 * BCM2835_SPI_CS_CPHA correctly
-	 * BCM2835_SPI_CS_CPOL correctly
-	 * BCM2835_SPI_CS_DMAEN
-	 * BCM2835_SPI_CS_TA
-	 * BCM2835_SPI_CS_CS_01
-	 * BCM2835_SPI_CS_CS_10
-	 */
+	/* now reset SPI FIFOS and configure SPI_SPEED */
+	ADD_TO_DMA_FRAGMENT(frag,reset_spi_and_config_speed,dma_rx,
+			_FIXED(TI),     (BCM2835_DMA_TI_WAIT_RESP
+					| BCM2835_DMA_TI_TDMODE
+					| BCM2835_DMA_TI_S_INC
+					| BCM2835_DMA_TI_D_INC),
+			_FIXED(SRC),    FIELD_DMA_ADDR(
+				frag->reset_spi_and_config_speed,pad[0]),
+			_FIXED(DST),    (BCM2835_SPI_BASE_BUS
+					+ BCM2835_SPI_CLK),
+			_FIXED(LEN),    8,
+			_FIXED(STRIDE), 4, 8,
+			_SPI(PAD0),     0, /* spi_device_data->spi_cs_set */
+			_VARY(PAD1),    0  /* SPI_SPEED as a divider */
+		);
+	DMA_LINK(frag,cs_select,reset_spi_and_config_speed);
 
-	/* set the tx-DMA next pointer */
-	ALLOCATE_RXDMA_IN_FRAGMENT(frag,set_tx_dma_next);
-	LINK_TO_BCM2835_DMA_CB(frag->config_spi)->next =
-		frag->set_tx_dma_next->dmablock_dma;
-	LINK_TO_BCM2835_DMA_CB(frag->set_tx_dma_next)->ti =
-		BCM2835_DMA_TI_WAIT_RESP ;
-	LINK_TO_BCM2835_DMA_CB(frag->set_tx_dma_next)->src =
-		LINK_FIELD_DMAADDR(frag->set_tx_dma_next,pad[0]);
-	LINK_TO_BCM2835_DMA_CB(frag->set_tx_dma_next)->dst =
-		bs->dma_tx.bus_addr+BCM2835_DMA_ADDR;
-	LINK_TO_BCM2835_DMA_CB(frag->set_tx_dma_next)->length =
-		4;
-	
-	/* start tx-DMA */
-	ALLOCATE_RXDMA_IN_FRAGMENT(frag,start_tx_dma);
-	LINK_TO_BCM2835_DMA_CB(frag->set_tx_dma_next)->next =
-		frag->start_tx_dma->dmablock_dma;
-	LINK_TO_BCM2835_DMA_CB(frag->start_tx_dma)->ti =
-		BCM2835_DMA_TI_WAIT_RESP ;
-	LINK_TO_BCM2835_DMA_CB(frag->start_tx_dma)->src =
-		LINK_FIELD_DMAADDR(frag->start_tx_dma,pad[0]);
-	LINK_TO_BCM2835_DMA_CB(frag->set_tx_dma_next)->dst =
-		bs->dma_tx.bus_addr+BCM2835_DMA_ADDR;
+	/* set DMA transfer length in SPI */
+	ADD_TO_DMA_FRAGMENT(frag,config_length,dma_rx,
+			_FIXED(TI),     BCM2835_DMA_TI_WAIT_RESP,
+			_FIXED(SRC),    FIELD_DMA_ADDR(
+				frag->config_length,pad[0]),
+			_SPI(DST),      (BCM2835_SPI_BASE_BUS
+					+ BCM2835_SPI_DLEN),
+			_FIXED(LEN),    4,
+			_FIXED(STRIDE), 0,0,
+			_MESG(PAD0),    0, /* SPI_DMA_LENGTH - this is a sum of individual */
+			_IGNORE(PAD1),  0
+		);
+	DMA_LINK(frag,reset_spi_and_config_speed,config_length);
 
-	LINK_TO_BCM2835_DMA_CB(frag->start_tx_dma)->length =
-		4;
-	LINK_TO_BCM2835_DMA_CB(frag->start_tx_dma)->pad[0] =
-		BCM2835_DMA_CS_ACTIVE;
+	/* enable SPI+DMA */
+	ADD_TO_DMA_FRAGMENT(frag,config_spi,dma_rx,
+			_FIXED(TI),     BCM2835_DMA_TI_WAIT_RESP,
+			_FIXED(SRC),    FIELD_DMA_ADDR(frag->config_spi,pad[0]),
+			_SPI(DST),      (BCM2835_SPI_BASE_BUS
+					+ BCM2835_SPI_CS),
+			_FIXED(LEN),    4,
+			_FIXED(STRIDE), 0,0,
+			_SPI(PAD0),     0, /* spi_device_data->spi_cs_set */
+			_IGNORE(PAD1),  0
+		);
+	DMA_LINK(frag,config_length,config_spi);
 
-	/* the initial transfer for RX */
-	ALLOCATE_RXDMA_IN_FRAGMENT(frag,schedule_transfer_rx);
-	LINK_TO_BCM2835_DMA_CB(frag->start_tx_dma)->next =
-		frag->schedule_transfer_rx->dmablock_dma;
-	LINK_TO_BCM2835_DMA_CB(frag->schedule_transfer_rx)->src =
-		BCM2835_SPI_BASE_BUS + BCM2835_SPI_FIFO;
-	/* need to set:
-	 * * ti to correct flags
-	 * * length to correct length
-	 * * dst to correct bus address
-	 */
-	/* and the initial transfer for TX */
-	ALLOCATE_TXDMA_IN_FRAGMENT(frag,schedule_transfer_tx);
-	LINK_TO_BCM2835_DMA_CB(frag->set_tx_dma_next)->pad[0] =
-		frag->schedule_transfer_tx->dmablock_dma;
-	LINK_TO_BCM2835_DMA_CB(frag->schedule_transfer_tx)->dst =
-		BCM2835_SPI_BASE_BUS + BCM2835_SPI_FIFO;
-	/* need to set:
-	 * * ti to correct flags
-	 * * length to correct length
-	 * * dst to correct bus address
-	 */
+	/* configure the tx transfer itself */
+	ADD_TO_DMA_FRAGMENT(frag,schedule_transfer_tx,dma_tx,
+			_MESG(TI),      BCM2835_DMA_TI_WAIT_RESP,
+			_VARY(SRC),     0, /* the source from transfer */
+			_SPI(DST),      (BCM2835_SPI_BASE_BUS
+					+ BCM2835_SPI_FIFO),
+			_VARY(LEN),     0, /* the length from transfer */
+			_FIXED(STRIDE), 0,0,
+			_IGNORE(PAD0),  0,
+			_IGNORE(PAD1),  0
+		);
+	/* note that it gets linked below in set_tx_dma_next */
+
+	/* prepare the tx-DMA - setting the next address from which to load
+	 the DMA control block */
+	ADD_TO_DMA_FRAGMENT(frag,set_tx_dma_next,dma_rx,
+			_FIXED(TI),     BCM2835_DMA_TI_WAIT_RESP,
+			_FIXED(SRC),    FIELD_DMA_ADDR(
+				frag->set_tx_dma_next,pad[0]),
+			_FIXED(DST),    (bs->dma_tx.bus_addr
+					+BCM2835_DMA_ADDR),
+			_FIXED(LEN),    4,
+			_FIXED(STRIDE), 0,0,
+			_FIXED(PAD0),   FIELD_DMA_ADDR(
+				frag->schedule_transfer_tx,ti),
+			_IGNORE(PAD1),  0
+		);
+	DMA_LINK(frag,config_spi,set_tx_dma_next);
+
+	/* and start the tx-DMA */
+	ADD_TO_DMA_FRAGMENT(frag,start_tx_dma,dma_rx,
+			_FIXED(TI),     BCM2835_DMA_TI_WAIT_RESP,
+			_FIXED(SRC),    FIELD_DMA_ADDR(
+				frag->start_tx_dma,pad[0]),
+			_FIXED(DST),    (bs->dma_tx.bus_addr
+					+BCM2835_DMA_CS),
+			_FIXED(LEN),    4,
+			_FIXED(STRIDE), 0,0,
+			_FIXED(PAD0),   BCM2835_DMA_CS_ACTIVE,
+			_IGNORE(PAD1),  0
+		);
+	DMA_LINK(frag,config_spi,set_tx_dma_next);
+
+	/* configure the rx transfer itself */
+	ADD_TO_DMA_FRAGMENT(frag,schedule_transfer_rx,dma_rx,
+			_VARY(TI),      BCM2835_DMA_TI_WAIT_RESP,
+			_SPI(SRC),      (BCM2835_SPI_BASE_BUS
+					+ BCM2835_SPI_FIFO),
+			_SPI(DST),      0, /* the destination from transfer */
+			_VARY(LEN),     0, /* the length from transfer */
+			_FIXED(STRIDE), 0,0,
+			_IGNORE(PAD0),  0,
+			_IGNORE(PAD1),  0
+		);
+	DMA_LINK(frag,set_tx_dma_next,schedule_transfer_rx);
 
 	return &frag->fragment;
 
@@ -460,24 +593,29 @@ struct dma_fragment *bcm2835_spi_dmafragment_create_transfer(
 		return NULL;
 	/* now allocate the blocks we need */
 
-	/* the initial transfer for RX */
-	ALLOCATE_RXDMA_IN_FRAGMENT(frag,schedule_transfer_rx);
-	LINK_TO_BCM2835_DMA_CB(frag->schedule_transfer_rx)->src =
-		BCM2835_SPI_BASE_BUS + BCM2835_SPI_FIFO;
-	/* need to set:
-	 * * ti to correct flags
-	 * * length to correct length
-	 * * dst to correct bus address
-	 */
-	/* and the initial transfer for TX */
-	ALLOCATE_TXDMA_IN_FRAGMENT(frag,schedule_transfer_tx);
-	LINK_TO_BCM2835_DMA_CB(frag->schedule_transfer_tx)->dst =
-		BCM2835_SPI_BASE_BUS + BCM2835_SPI_FIFO;
-	/* need to set:
-	 * * ti to correct flags
-	 * * length to correct length
-	 * * dst to correct bus address
-	 */
+	/* configure the rx transfer itself */
+	ADD_TO_DMA_FRAGMENT(frag,schedule_transfer_rx,dma_rx,
+			_VARY(TI),      BCM2835_DMA_TI_WAIT_RESP,
+			_SPI(SRC),      (BCM2835_SPI_BASE_BUS
+					+ BCM2835_SPI_FIFO),
+			_SPI(DST),      0, /* the destination from transfer */
+			_VARY(LEN),     0, /* the length from transfer */
+			_FIXED(STRIDE), 0,0,
+			_IGNORE(PAD0),  0,
+			_IGNORE(PAD1),  0
+		);
+
+	/* configure the tx transfer itself */
+	ADD_TO_DMA_FRAGMENT(frag,schedule_transfer_tx,dma_tx,
+			_MESG(TI),      BCM2835_DMA_TI_WAIT_RESP,
+			_VARY(SRC),     0, /* the source from the transfer */
+			_SPI(DST),      (BCM2835_SPI_BASE_BUS
+					+ BCM2835_SPI_FIFO),
+			_VARY(LEN),     0, /* the length from transfer */
+			_FIXED(STRIDE), 0,0,
+			_IGNORE(PAD0),  0,
+			_IGNORE(PAD1),  0
+		);
 
 	return &frag->fragment;
 
@@ -509,53 +647,59 @@ struct dma_fragment *bcm2835_spi_dmafragment_create_cs_deselect(
 		return NULL;
 	/* now allocate the blocks we need */
 
-	/* the pre-half-clock delay */
-	ALLOCATE_RXDMA_IN_FRAGMENT(frag,delay_pre);
-	LINK_TO_BCM2835_DMA_CB(frag->delay_pre)->ti =
-		BCM2835_DMA_TI_WAIT_RESP
-		| BCM2835_DMA_TI_WAITS(0x1f)
-		| BCM2835_DMA_TI_NO_WIDE_BURSTS
-		| BCM2835_DMA_TI_S_IGNORE
-		| BCM2835_DMA_TI_D_IGNORE;
-	LINK_TO_BCM2835_DMA_CB(frag->delay_pre)->src =
-		LINK_FIELD_DMAADDR(frag->delay_pre,pad[0]);
-	LINK_TO_BCM2835_DMA_CB(frag->delay_pre)->dst =
-		LINK_FIELD_DMAADDR(frag->delay_pre,pad[1]);
-	/* need to set:
-	 * * length to correct length to get to the delay we need based on the clock
-	 */
-	/* start with the CSSelect */
-	ALLOCATE_RXDMA_IN_FRAGMENT(frag,cs_deselect);
-	LINK_TO_BCM2835_DMA_CB(frag->delay_pre)->next =
-		frag->cs_deselect->dmablock_dma;
-	LINK_TO_BCM2835_DMA_CB(frag->cs_deselect)->ti =
-		BCM2835_DMA_TI_WAIT_RESP;
-	LINK_TO_BCM2835_DMA_CB(frag->cs_deselect)->src =
-		LINK_FIELD_DMAADDR(frag->cs_deselect,pad[0]);
-	LINK_TO_BCM2835_DMA_CB(frag->cs_deselect)->length = 
-		4;
-	/* need to set:
-	 * * pad0 to correct bitmask
-	 * * dst to correct register to pull GPIO pin up
-	 */
+	/* delay by 0.5 of the clock cycle */
+	ADD_TO_DMA_FRAGMENT(frag,delay_pre,dma_rx,
+			_FIXED(TI),     (
+				BCM2835_DMA_TI_WAIT_RESP
+				| BCM2835_DMA_TI_WAITS(0x1f)
+				| BCM2835_DMA_TI_NO_WIDE_BURSTS
+				| BCM2835_DMA_TI_S_IGNORE
+				| BCM2835_DMA_TI_D_IGNORE
+				),
+			_FIXED(SRC),    FIELD_DMA_ADDR(frag->delay_pre,pad[0]),
+			_FIXED(DST),    FIELD_DMA_ADDR(frag->delay_pre,pad[1]),
+			_VARY(LEN),     0, /* last_config_setup delay_half_clock
+					     or the value given in transfer */
+			_FIXED(STRIDE), 0, 0,
+			_IGNORE(PAD0),  0,
+			_IGNORE(PAD1),  0
+		);
 
-	/* the post-half-clock delay */
-	ALLOCATE_RXDMA_IN_FRAGMENT(frag,delay_post);
-	LINK_TO_BCM2835_DMA_CB(frag->delay_post)->next =
-		frag->cs_deselect->dmablock_dma;
-	LINK_TO_BCM2835_DMA_CB(frag->delay_post)->ti =
-		BCM2835_DMA_TI_WAIT_RESP
-		| BCM2835_DMA_TI_WAITS(0x1f)
-		| BCM2835_DMA_TI_NO_WIDE_BURSTS
-		| BCM2835_DMA_TI_S_IGNORE
-		| BCM2835_DMA_TI_D_IGNORE;
-	LINK_TO_BCM2835_DMA_CB(frag->delay_post)->src =
-		LINK_FIELD_DMAADDR(frag->delay_post,pad[0]);
-	LINK_TO_BCM2835_DMA_CB(frag->delay_pre)->dst =
-		LINK_FIELD_DMAADDR(frag->delay_post,pad[1]);
-	/* need to set:
-	 * * length to correct length to get to the delay we need based on the clock
-	 */
+	/* resetting CS */
+	ADD_TO_DMA_FRAGMENT(frag,cs_deselect,dma_rx,
+			_FIXED(TI),     BCM2835_DMA_TI_WAIT_RESP,
+			_FIXED(SRC),    FIELD_DMA_ADDR(
+				frag->
+				cs_deselect,
+				pad[0]),
+			_SPI(DST),      0, /* spi_device_data
+					      -> chipselect_deselect_gpio_reg */
+			_FIXED(LEN),    4,
+			_FIXED(STRIDE), 0, 0,
+			_SPI(PAD0),     0, /* spi_device_data
+					      ->chipselect_bitfield */
+			_IGNORE(PAD1),  0
+		);
+	DMA_LINK(frag,delay_pre,cs_deselect);
+
+	/* delay by 0.5 of the clock cycle */
+	ADD_TO_DMA_FRAGMENT(frag,delay_post,dma_rx,
+			_FIXED(TI),     (
+				BCM2835_DMA_TI_WAIT_RESP
+				| BCM2835_DMA_TI_WAITS(0x1f)
+				| BCM2835_DMA_TI_NO_WIDE_BURSTS
+				| BCM2835_DMA_TI_S_IGNORE
+				| BCM2835_DMA_TI_D_IGNORE
+				),
+			_FIXED(SRC),    FIELD_DMA_ADDR(frag->delay_post,pad[0]),
+			_FIXED(DST),    FIELD_DMA_ADDR(frag->delay_post,pad[1]),
+			_VARY(LEN),     0, /* last_config_setup delay_half_clock
+					     or the value given in transfer */
+			_FIXED(STRIDE), 0, 0,
+			_IGNORE(PAD0),  0,
+			_IGNORE(PAD1),  0
+		);
+	DMA_LINK(frag,cs_deselect,delay_post);
 
 	return &frag->fragment;
 
@@ -589,21 +733,22 @@ struct dma_fragment *bcm2835_spi_dmafragment_create_delay(
 		return NULL;
 	/* now allocate the blocks we need */
 
-	/* the pre-half-clock delay */
-	ALLOCATE_RXDMA_IN_FRAGMENT(frag,delay);
-	LINK_TO_BCM2835_DMA_CB(frag->delay)->ti =
-		BCM2835_DMA_TI_WAIT_RESP
-		| BCM2835_DMA_TI_WAITS(0x1f)
-		| BCM2835_DMA_TI_NO_WIDE_BURSTS
-		| BCM2835_DMA_TI_S_IGNORE
-		| BCM2835_DMA_TI_D_IGNORE;
-	LINK_TO_BCM2835_DMA_CB(frag->delay)->src =
-		LINK_FIELD_DMAADDR(frag->delay,pad[0]);
-	LINK_TO_BCM2835_DMA_CB(frag->delay)->dst =
-		LINK_FIELD_DMAADDR(frag->delay,pad[1]);
-	/* need to set:
-	 * * length to correct length to get to the delay we need based on the clock
-	 */
+	/* delay by 0.5 of the clock cycle */
+	ADD_TO_DMA_FRAGMENT(frag,delay,dma_rx,
+			_FIXED(TI),     (
+				BCM2835_DMA_TI_WAIT_RESP
+				| BCM2835_DMA_TI_WAITS(0x1f)
+				| BCM2835_DMA_TI_NO_WIDE_BURSTS
+				| BCM2835_DMA_TI_S_IGNORE
+				| BCM2835_DMA_TI_D_IGNORE
+				),
+			_FIXED(SRC),    FIELD_DMA_ADDR(frag->delay,pad[0]),
+			_FIXED(DST),    FIELD_DMA_ADDR(frag->delay,pad[1]),
+			_VARY(LEN),     0, /* the value given in transfer */
+			_FIXED(STRIDE), 0, 0,
+			_IGNORE(PAD0),  0,
+			_IGNORE(PAD1),  0
+		);
 
 	return &frag->fragment;
 
@@ -633,50 +778,51 @@ struct dma_fragment *bcm2835_spi_dmafragment_create_trigger_irq(
 	if (! frag)
 		return NULL;
 	/* now allocate the blocks we need */
-	/* set the tx-DMA next pointer */
-	ALLOCATE_RXDMA_IN_FRAGMENT(frag,set_tx_dma_next);
-	LINK_TO_BCM2835_DMA_CB(frag->set_tx_dma_next)->ti =
-		BCM2835_DMA_TI_WAIT_RESP ;
-	LINK_TO_BCM2835_DMA_CB(frag->set_tx_dma_next)->src =
-		LINK_FIELD_DMAADDR(frag->set_tx_dma_next,pad[0]);
-	LINK_TO_BCM2835_DMA_CB(frag->set_tx_dma_next)->dst =
-		bs->dma_tx.bus_addr+BCM2835_DMA_ADDR;
-	LINK_TO_BCM2835_DMA_CB(frag->set_tx_dma_next)->length =
-		4;
-	
-	/* start tx-DMA */
-	ALLOCATE_RXDMA_IN_FRAGMENT(frag,start_tx_dma);
-	LINK_TO_BCM2835_DMA_CB(frag->set_tx_dma_next)->next =
-		frag->start_tx_dma->dmablock_dma;
-	LINK_TO_BCM2835_DMA_CB(frag->start_tx_dma)->ti =
-		BCM2835_DMA_TI_WAIT_RESP ;
-	LINK_TO_BCM2835_DMA_CB(frag->start_tx_dma)->src =
-		LINK_FIELD_DMAADDR(frag->start_tx_dma,pad[0]);
-	LINK_TO_BCM2835_DMA_CB(frag->set_tx_dma_next)->dst =
-		bs->dma_tx.bus_addr+BCM2835_DMA_CS;
-	LINK_TO_BCM2835_DMA_CB(frag->start_tx_dma)->length =
-		4;
-	LINK_TO_BCM2835_DMA_CB(frag->start_tx_dma)->pad[0] =
-		BCM2835_DMA_CS_ACTIVE;
 
-	/* message_finished + interrupt */
-	ALLOCATE_TXDMA_IN_FRAGMENT(frag,message_finished);
-	LINK_TO_BCM2835_DMA_CB(frag->set_tx_dma_next)->pad[0] =
-		frag->message_finished->dmablock_dma;
-	LINK_TO_BCM2835_DMA_CB(frag->message_finished)->ti =
-		BCM2835_DMA_TI_WAIT_RESP
-		| BCM2835_DMA_TI_S_INC
-		| BCM2835_DMA_TI_D_INC
-		;
-	LINK_TO_BCM2835_DMA_CB(frag->message_finished)->src =
-		LINK_FIELD_DMAADDR(frag->message_finished,pad[0]);
-	LINK_TO_BCM2835_DMA_CB(frag->message_finished)->length =
-		8;
-	/* need to set:
-	 * * dst = The address which gets the latest tranfer
-	 * * pad[0] = the fragment that was finished
-	 * * pad[1] = possibly spi_message pointer
-	 */ 
+	/* the trigger IRQ message in TX */
+	ADD_TO_DMA_FRAGMENT(frag,message_finished,dma_tx,
+			_FIXED(TI),     (
+				BCM2835_DMA_TI_WAIT_RESP
+				| BCM2835_DMA_TI_S_INC
+				| BCM2835_DMA_TI_D_INC),
+			_FIXED(SRC),    FIELD_DMA_ADDR(
+				frag->message_finished,pad[0]),
+			_FIXED(DST),    bs->dma_status_bus_addr,
+			_FIXED(LEN),    8,
+			_FIXED(STRIDE), 0,0,
+			_VARY(PAD0),   0,/* not sure what is needed here yet */
+			_VARY(PAD0),   1 /* not sure what is needed here yet */
+		);
+
+	/* prepare the tx-DMA - setting the next address from which to load
+	 the DMA control block */
+	ADD_TO_DMA_FRAGMENT(frag,set_tx_dma_next,dma_rx,
+			_FIXED(TI),     BCM2835_DMA_TI_WAIT_RESP,
+			_FIXED(SRC),    FIELD_DMA_ADDR(
+				frag->set_tx_dma_next,pad[0]),
+			_FIXED(DST),    (bs->dma_tx.bus_addr
+					+BCM2835_DMA_ADDR),
+			_FIXED(LEN),    4,
+			_FIXED(STRIDE), 0,0,
+			_FIXED(PAD0),   FIELD_DMA_ADDR(
+				frag->message_finished,ti),
+			_IGNORE(PAD1),  0
+		);
+
+	/* and start the tx-DMA */
+	ADD_TO_DMA_FRAGMENT(frag,start_tx_dma,dma_rx,
+			_FIXED(TI),     BCM2835_DMA_TI_WAIT_RESP,
+			_FIXED(SRC),    FIELD_DMA_ADDR(
+				frag->start_tx_dma,pad[0]),
+			_FIXED(DST),    (bs->dma_tx.bus_addr
+					+BCM2835_DMA_CS),
+			_FIXED(LEN),    4,
+			_FIXED(STRIDE), 0,0,
+			_FIXED(PAD0),   BCM2835_DMA_CS_ACTIVE,
+			_IGNORE(PAD1),  0
+		);
+	DMA_LINK(frag,set_tx_dma_next,start_tx_dma);
+
 	return &frag->fragment;
 
 error:
@@ -705,7 +851,7 @@ int bcm2835dma_spi_compo_add_config_transfer(
 	struct spi_master * master = spi->master;
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	int cs,ret;
-
+#if 0
 	/* get the object from the correct chain */
 	struct dma_fragment_setup_transfer* 
 		frag = (struct dma_fragment_setup_transfer*)
@@ -787,7 +933,7 @@ int bcm2835dma_spi_compo_add_config_transfer(
 		);
 
 	/* and now we can link it */
-
+#endif
 	return ret;
 }
 
@@ -809,11 +955,11 @@ int bcm2835dma_spi_compo_add_transfer(
 			gfpflags);
 	if (!frag)
 		return -ENOMEM;
-
+#if 0
 	ret=_bcm2835dma_spi_compo_add_transfer_helper(
 		xfer,compo,frag,gfpflags
 		);
-
+#endif
 	/* and now we can link it */
 
 	return ret;
@@ -906,6 +1052,7 @@ int bcm2835dma_spi_compo_add_cs_change(
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	int cs;
 
+#if 0
 	/* get the object from the correct chain */
 	struct dma_fragment_cs_deselect* 
 		frag = (struct dma_fragment_cs_deselect*)
@@ -932,7 +1079,7 @@ int bcm2835dma_spi_compo_add_cs_change(
 	/* and the bitmap */
 	LINK_TO_BCM2835_DMA_CB(frag->cs_deselect)->pad[0] =
 		1<<(cs%32);
-
+#endif
 	/* a cs-change requires a reconfig, so we return 1 */
 	return 1;
 
