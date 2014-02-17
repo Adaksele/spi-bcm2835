@@ -48,8 +48,7 @@ struct bcm2835dma_dma_status {
 };
 
 struct bcm2835dma_spi_device_data {
-	/* the dma address - primarily used for releasing this */
-	dma_addr_t bus_addr;
+	struct list_head spi_device_data_chain;
 	/* the SPI Registers for Set/Reset values */
 	u32 spi_cs_set;
 	u32 spi_cs_reset;
@@ -58,6 +57,7 @@ struct bcm2835dma_spi_device_data {
 	dma_addr_t chipselect_release_gpio_reg;
 	u32        chipselect_bitfield;
 	u8         chipselect_gpio;
+	char       chipselect_name[20];
 };
 
 struct bcm2835dma_spi {
@@ -83,6 +83,8 @@ struct bcm2835dma_spi {
 	struct dma_fragment_cache fragment_cs_deselect;
 	struct dma_fragment_cache fragment_delay;
 	struct dma_fragment_cache fragment_trigger_irq;
+	/* the device configs list */
+	struct list_head spi_device_data_chain;
 };
 
 struct dma_fragment *bcm2835_spi_dmafragment_create_composite(

@@ -424,8 +424,6 @@ struct dma_fragment *bcm2835_spi_dmafragment_create_setup_transfer(
 	 * * dst to correct bus address
 	 */
 
-	dma_fragment_dump(&frag->fragment,&bcm2835dma_cb_dump,0);
-
 	return &frag->fragment;
 
 error:

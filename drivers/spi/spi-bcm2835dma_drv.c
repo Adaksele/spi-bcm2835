@@ -31,8 +31,9 @@
  *    and the mode is not reverted when not used
  *  * if there is a transfer of say 13 bytes, then a total of 16 bytes will get
  *    (over)written, so any tightly packed data would get overwritten
- *    Not sure how we should approach such a situation  - if this is not a valid
- *    situation with drivers right now, then maybe we should make it a policy
+ *    Not sure how we should approach such a situation  - if this is not a
+ *    valid situation with drivers right now, then maybe we should make it a
+ *    policy
  */
 #include "spi-bcm2835dma.h"
 
@@ -335,9 +336,9 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 	return status;
 }
 
-#ifdef CONFIG_MACH_BCM2708
 
 static void bcm2835dma_set_gpio_mode(u8 pin,u32 mode) {
+#ifdef CONFIG_MACH_BCM2708
 	/* TODO - PINMUX */
 	u32 *gpio = ioremap(0x20200000, SZ_16K);
 
@@ -349,93 +350,140 @@ static void bcm2835dma_set_gpio_mode(u8 pin,u32 mode) {
 	v |= (mode & 7) << shift;
 	*reg= v;
 	iounmap(gpio);
-}
 
 #endif
+}
 
-static void bcm2835dma_spi_init_pinmode(void) {
+static int bcm2835dma_spi_init_pinmode(void) {
+	int err;
+	err=gpio_request_one(BCM2835_SPI_GPIO_MISO,GPIOF_IN,
+			DRV_NAME":MISO");
+	if (err) {
+		printk(KERN_ERR DRV_NAME": problems requesting SPI:MISO"
+			" on GPIO %i - err %i\n",BCM2835_SPI_GPIO_MISO,err);
+		return err;
+	}
+	err=gpio_request_one(BCM2835_SPI_GPIO_MOSI,GPIOF_OUT_INIT_HIGH,
+			DRV_NAME":MOSI");
+	if (err) {
+		printk(KERN_ERR DRV_NAME": problems requesting SPI:MOSI"
+			" on GPIO %i - err %i\n",BCM2835_SPI_GPIO_MOSI,err);
+		return err;
+	}
+	err=gpio_request_one(BCM2835_SPI_GPIO_SCK,GPIOF_OUT_INIT_HIGH,
+			DRV_NAME":SCK");
+	if (err) {
+		printk(KERN_ERR DRV_NAME": problems requesting SPI:SCK"
+			"on GPIO %i - err %i\n",BCM2835_SPI_GPIO_SCK,err);
+		return err;
+	}
 	/* SET modes to ALT0=4 */
 	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_MISO,4);
 	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_MOSI,4);
 	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_SCK, 4);
+
+	return 0;
 }
 
-static void bcm2835dma_spi_restore_pinmodes(void) {
-	/* reset modes to INPUT */
-	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_MISO,0);
-	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_MOSI,0);
-	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_SCK, 0);
+static void bcm2835dma_spi_restore_pinmodes(void)
+{
+	gpio_free(BCM2835_SPI_GPIO_MISO);
+	gpio_free(BCM2835_SPI_GPIO_MOSI);
+	gpio_free(BCM2835_SPI_GPIO_SCK);
 }
 
-static void bcm2835dma_spi_cleanup(struct spi_device *spi) {
-	struct bcm2835dma_spi *bs = spi_master_get_devdata(spi->master);
+static void bcm2835dma_cleanup_spi_device_data(	struct bcm2835dma_spi_device_data *data)
+{
+	/* remove from chain */
+	list_del(&data->spi_device_data_chain);
+	/* release GPIO */
+	gpio_free(data->chipselect_gpio);
+	/* and release memory */
+	kfree(data);
+}
+
+static void bcm2835dma_spi_cleanup(struct spi_device *spi) 
+{
+	/* note that surprisingly this does not get called on driver unload */
 	struct bcm2835dma_spi_device_data *data=dev_get_drvdata(&spi->dev);
 	/* release the memory and GPIO allocated for the SPI device */
 	if (data) {
+		bcm2835dma_cleanup_spi_device_data(data);
 		dev_set_drvdata(&spi->dev,NULL);
-		gpio_direction_input(data->chipselect_gpio);
-		dma_pool_free(bs->pool,data,data->bus_addr);
 	}
 }
 
 static int bcm2835dma_spi_setup(struct spi_device *spi) {
-	struct bcm2835dma_spi *bs = spi_master_get_devdata(spi->master);
+	struct spi_master * master = spi->master;
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	struct bcm2835dma_spi_device_data *data;
-	u16        tmp;
-	u32        mode=spi->mode;
+	u32 tmp;
+	int err;
+
+	/* allocate data - if not allocated yet */
+	data=dev_get_drvdata(&spi->dev);
+	if (!data) {
+		data=kzalloc(sizeof(*data),GFP_KERNEL);
+		if (!data)
+			return -ENOMEM;
+		dev_set_drvdata(&spi->dev,data);
+		list_add(&data->spi_device_data_chain,
+			&bs->spi_device_data_chain);
+	}
 
 	/* calculate the real GPIO to use */
 	if (spi->master->cs_gpios) {
-		tmp = spi->cs_gpio;
+		data->chipselect_gpio = spi->cs_gpio;
 	} else {
 		switch (spi->chip_select) {
-		case 0:  tmp = BCM2835_SPI_GPIO_CS0 ; break;
-		case 1:  tmp = BCM2835_SPI_GPIO_CS1 ; break;
-		default: tmp = spi->chip_select     ; break;
+		case 0:  data->chipselect_gpio = BCM2835_SPI_GPIO_CS0 ; break;
+		case 1:  data->chipselect_gpio = BCM2835_SPI_GPIO_CS1 ; break;
+		default: data->chipselect_gpio = spi->chip_select     ; break;
 		}
 	}
 
 	/* check gpio for prohibited pins - MISO, MOSI, SCK are not allowed... */
 	if ((spi->mode & SPI_NO_CS)) {
-		switch (tmp) {
+		switch (data->chipselect_gpio) {
 		case BCM2835_SPI_GPIO_MISO:
 		case BCM2835_SPI_GPIO_MOSI:
 		case BCM2835_SPI_GPIO_SCK:
-			dev_err(&spi->dev, "Chipselect GPIO %i is not allowed as it is already used\n",tmp);
-			return -EPERM;
+			dev_err(&spi->dev, "Chipselect GPIO %i is not allowed"
+				" as it is conflicting with the standard SPI lines\n",
+				data->chipselect_gpio);
+			err=-EPERM;
+			goto error_free;
 		default: break;
 		}
 	}
 
-	/* allocate data - if not allocated yet */
-	data=dev_get_drvdata(&spi->dev);
-	if (!data) {
-		dma_addr_t t;
-		data=dma_pool_alloc(bs->pool,GFP_KERNEL,&t);
-		if (!data)
-			return -ENOMEM;
-		data->bus_addr=t;
-		dev_set_drvdata(&spi->dev,data);
-	}
-
 	/* set the chip_select fields correctly */
-	data->chipselect_gpio = tmp;
-	data->chipselect_bitfield = ((u32)1) << (tmp % 32);
+	data->chipselect_bitfield = ((u32)1) << (data->chipselect_gpio % 32);
 	/* shift right gpio by 5 bit to get the register offset we need to use*/
-	tmp >>= 5; 
-	/* based od SPI_CS configure it differently */
-	if (mode & SPI_CS_HIGH) {
-		/* configure the GPIO as low and output */
-		gpio_direction_output(data->chipselect_gpio,0);
-		/* and set the registers accordingly */
-		data->chipselect_select_gpio_reg  = 0x7e20001C + 4*tmp;
-		data->chipselect_release_gpio_reg = 0x7e200028 + 4*tmp;
+	data->chipselect_release_gpio_reg = 
+	data->chipselect_select_gpio_reg = 0x7e20001C 
+		+ 4 * (data->chipselect_gpio >> 5);
+	/* and create the name */
+	snprintf(data->chipselect_name,sizeof(data->chipselect_name),
+		DRV_NAME":CS%i",spi->chip_select);
+
+	/* based od SPI_CS configure the registers */
+	if (spi->mode & SPI_CS_HIGH) {
+		/* set the registers accordingly */
+		data->chipselect_release_gpio_reg += 12;
+		/* request the GPIO with correct defaults*/
+		err=gpio_request_one(data->chipselect_gpio,GPIOF_OUT_INIT_LOW,
+				data->chipselect_name);
+		if (err)
+			goto error_gpio;
 	} else {
-		/* configure the GPIO as high and output */
-		gpio_direction_output(data->chipselect_gpio,1);
-		/* and set the registers accordingly */
-		data->chipselect_select_gpio_reg = 0x7e200028 + 4*tmp;
-		data->chipselect_release_gpio_reg  = 0x7e20001C + 4*tmp;
+		/* set the registers accordingly */
+		data->chipselect_select_gpio_reg += 12;
+		/* request the GPIO */
+		err=gpio_request_one(data->chipselect_gpio,GPIOF_OUT_INIT_HIGH,
+				data->chipselect_name);
+		if (err)
+			goto error_gpio;
 	}
 	
 	/* and the CS register values used to configure SPI */
@@ -457,6 +505,13 @@ static int bcm2835dma_spi_setup(struct spi_device *spi) {
 		;
 
 	return 0;
+
+error_gpio:
+	dev_err(&spi->dev,"Error allocating GPIO%i - error %i\n",data->chipselect_gpio,err);
+error_free:
+	kfree(data);
+	dev_set_drvdata(&spi->dev,NULL);
+	return err;
 }
 
 static int bcm2835dma_spi_probe(struct platform_device *pdev)
@@ -489,6 +544,8 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 
 	bs = spi_master_get_devdata(master);
 
+	INIT_LIST_HEAD(&bs->spi_device_data_chain);
+
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res) {
 		dev_err(&pdev->dev, "could not get memory resource\n");
@@ -512,18 +569,20 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 
 	clk_prepare_enable(bs->clk);
 
-#ifdef CONFIG_MACH_BCM2708
 	/* configure pin function for SPI */
-	bcm2835dma_spi_init_pinmode();
-#endif
-
-	err=bcm2835dma_allocate_dma(master,pdev);
+	err = bcm2835dma_spi_init_pinmode();
+	if (err) {
+		dev_err(&pdev->dev, "could not register pins and set the mode: %d\n", err);
+		goto out_release_clock;
+	}
+	
+	err = bcm2835dma_allocate_dma(master,pdev);
 	if (err) {
 		dev_err(&pdev->dev, "could not register SPI master: %d\n", err);
 		goto out_release_dma;
 	}
 
-	/* initialise the hardware */
+	/* initialise the hardware with a reset of the SPI FIFO disabling an existing transfer */
 	writel(
 		BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX,
 		bs->spi_regs+BCM2835_SPI_CS);
@@ -537,6 +596,9 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 	return 0;
 out_release_dma:
 	bcm2835dma_release_dma(master);
+/*out_release_gpio: not used*/
+	bcm2835dma_spi_restore_pinmodes();
+out_release_clock:
 	clk_disable_unprepare(bs->clk);
 out_master_put:
 	spi_master_put(master);
@@ -547,8 +609,19 @@ static int bcm2835dma_spi_remove(struct platform_device *pdev)
 {
 	struct spi_master *master = platform_get_drvdata(pdev);
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
-
 	spi_unregister_master(master);
+
+	/* release the spi_dev parts that do not get released otherwise 
+	 * cleanup does not get called on the spi_device when unloading
+	 * the module
+	 */
+	while( !list_empty(&bs->spi_device_data_chain)) {
+		struct bcm2835dma_spi_device_data *data
+			= list_first_entry(&bs->spi_device_data_chain,
+                                        typeof(*data),
+					spi_device_data_chain);
+		bcm2835dma_cleanup_spi_device_data(data);
+        }
 
 	/* release pool - also releases all objects */
 	bcm2835dma_release_dma(master);
