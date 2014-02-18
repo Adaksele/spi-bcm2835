@@ -98,27 +98,33 @@ static int bcm2835dma_allocate_dmachannel(struct spi_master *master,
 {
         int ret;
 	/* fill in defaults */
-	d->base=NULL;
-	d->bus_addr=0;
-	d->chan=0;
-	d->irq=0;
-	d->handler=NULL;
-	d->desc=NULL;
+	d->base = NULL;
+	d->bus_addr = 0;
+	d->chan = 0;
+	d->irq = 0;
+	d->handler = NULL;
+	d->desc = NULL;
         /* register DMA channel */
         ret = bcm_dma_chan_alloc(BCM_DMA_FEATURE_FAST, 
 				(void**)&d->base, &d->irq);
         if (ret < 0) {
-		d->base=NULL;
-		d->chan=0;
-		d->irq=0;
+		d->base = NULL;
+		d->chan = 0;
+		d->irq = 0;
                 dev_err(&master->dev, "couldn't allocate a DMA channel\n");
                 return ret;
         }
         d->chan = ret;
-        dev_info(&master->dev, 
-		"DMA channel %d at address %pK with irq %d"
-		" and handler at %pf\n",
-                d->chan, d->base, d->irq,handler);
+	if (handler)
+		dev_info(&master->dev, 
+			"DMA channel %d at address %pK with irq %d"
+			" and handler at %pf\n",
+			d->chan, d->base, d->irq,handler);
+	else
+		dev_info(&master->dev, 
+			"DMA channel %d at address %pK with irq %d"
+			" and no handler\n",
+			d->chan, d->base, d->irq);
 	/* and reset the DMA - just in case */
 	writel(BCM2835_DMA_CS_RESET,d->base+BCM2835_DMA_CS);
 	writel(0,d->base+BCM2835_DMA_ADDR);
@@ -137,12 +143,11 @@ static int bcm2835dma_allocate_dmachannel(struct spi_master *master,
 		}
 	}
 	/* assign other data */
-	d->desc=desc;
-	d->handler=handler;
+	d->desc = desc;
+	d->handler = handler;
 	/* calculate the bus_addr */
-	d->bus_addr=(d->chan==15)?
-		0x7EE05000
-		: 0x7E007000 + 256*(d->chan);
+	d->bus_addr = (d->chan==15) ? BCM2835_REG_DMA15_BASE_BUS
+		: BCM2835_REG_DMA0_BASE_BUS + 256*(d->chan);
 	/* and return */
         return 0;
 }
@@ -215,14 +220,6 @@ static int bcm2835dma_allocate_dma(struct spi_master *master,
 	memset(bs->buffer_transmit_0x00.addr,0x00,
 		sizeof(struct bcm2835_dma_cb));
 	
-	bs->dma_status.addr=
-		dma_pool_alloc(bs->pool,GFP_KERNEL,
-			&bs->dma_status.bus_addr);
-	if (!bs->dma_status.addr)
-		/* TODO: errorhandling */
-		return -ENOMEM;
-	memset(bs->dma_status.addr,0x00,sizeof(struct bcm2835_dma_cb));
-
 	/* initialize DMA Fragment pools */
 	dma_fragment_cache_initialize(&bs->fragment_composite,
 				"composit fragments",
@@ -280,9 +277,6 @@ static void bcm2835dma_release_dma(struct spi_master *master)
 	dma_pool_free(bs->pool,
 		bs->buffer_receive_dummy.addr,
 		bs->buffer_receive_dummy.bus_addr);
-	dma_pool_free(bs->pool,
-		bs->dma_status.addr,
-		bs->dma_status.bus_addr);
 
 	dma_fragment_cache_release(&bs->fragment_composite);
 	dma_fragment_cache_release(&bs->fragment_setup_transfer);
@@ -397,7 +391,7 @@ static void bcm2835dma_cleanup_spi_device_data(	struct bcm2835dma_spi_device_dat
 	/* remove from chain */
 	list_del(&data->spi_device_data_chain);
 	/* release GPIO */
-	gpio_free(data->chipselect_gpio);
+	gpio_free(data->cs_gpio);
 	/* and release memory */
 	kfree(data);
 }
@@ -433,24 +427,24 @@ static int bcm2835dma_spi_setup(struct spi_device *spi) {
 
 	/* calculate the real GPIO to use */
 	if (spi->master->cs_gpios) {
-		data->chipselect_gpio = spi->cs_gpio;
+		data->cs_gpio = spi->cs_gpio;
 	} else {
 		switch (spi->chip_select) {
-		case 0:  data->chipselect_gpio = BCM2835_SPI_GPIO_CS0 ; break;
-		case 1:  data->chipselect_gpio = BCM2835_SPI_GPIO_CS1 ; break;
-		default: data->chipselect_gpio = spi->chip_select     ; break;
+		case 0:  data->cs_gpio = BCM2835_SPI_GPIO_CS0 ; break;
+		case 1:  data->cs_gpio = BCM2835_SPI_GPIO_CS1 ; break;
+		default: data->cs_gpio = spi->chip_select     ; break;
 		}
 	}
 
 	/* check gpio for prohibited pins - MISO, MOSI, SCK are not allowed... */
 	if ((spi->mode & SPI_NO_CS)) {
-		switch (data->chipselect_gpio) {
+		switch (data->cs_gpio) {
 		case BCM2835_SPI_GPIO_MISO:
 		case BCM2835_SPI_GPIO_MOSI:
 		case BCM2835_SPI_GPIO_SCK:
 			dev_err(&spi->dev, "Chipselect GPIO %i is not allowed"
 				" as it is conflicting with the standard SPI lines\n",
-				data->chipselect_gpio);
+				data->cs_gpio);
 			err=-EPERM;
 			goto error_free;
 		default: break;
@@ -458,30 +452,32 @@ static int bcm2835dma_spi_setup(struct spi_device *spi) {
 	}
 
 	/* set the chip_select fields correctly */
-	data->chipselect_bitfield = ((u32)1) << (data->chipselect_gpio % 32);
+	data->cs_bitfield = ((u32)1) << (data->cs_gpio % 32);
 	/* shift right gpio by 5 bit to get the register offset we need to use*/
-	data->chipselect_release_gpio_reg = 
-	data->chipselect_select_gpio_reg = 0x7e20001C 
-		+ 4 * (data->chipselect_gpio >> 5);
+	data->cs_deselect_gpio_reg = 
+	data->cs_select_gpio_reg = BCM2835_REG_GPIO_OUTPUT_SET_BASE_BUS
+		+ 4 * (data->cs_gpio >> 5);
 	/* and create the name */
-	snprintf(data->chipselect_name,sizeof(data->chipselect_name),
+	snprintf(data->cs_name,sizeof(data->cs_name),
 		DRV_NAME":CS%i",spi->chip_select);
 
 	/* based od SPI_CS configure the registers */
 	if (spi->mode & SPI_CS_HIGH) {
-		/* set the registers accordingly */
-		data->chipselect_release_gpio_reg += 12;
+		/* increment the registers accordingly */
+		data->cs_deselect_gpio_reg += (BCM2835_REG_GPIO_OUTPUT_CLEAR_BASE_BUS
+					- BCM2835_REG_GPIO_OUTPUT_SET_BASE_BUS);
 		/* request the GPIO with correct defaults*/
-		err=gpio_request_one(data->chipselect_gpio,GPIOF_OUT_INIT_LOW,
-				data->chipselect_name);
+		err=gpio_request_one(data->cs_gpio,GPIOF_OUT_INIT_LOW,
+				data->cs_name);
 		if (err)
 			goto error_gpio;
 	} else {
 		/* set the registers accordingly */
-		data->chipselect_select_gpio_reg += 12;
+		data->cs_select_gpio_reg += (BCM2835_REG_GPIO_OUTPUT_CLEAR_BASE_BUS
+					- BCM2835_REG_GPIO_OUTPUT_SET_BASE_BUS);
 		/* request the GPIO */
-		err=gpio_request_one(data->chipselect_gpio,GPIOF_OUT_INIT_HIGH,
-				data->chipselect_name);
+		err=gpio_request_one(data->cs_gpio,GPIOF_OUT_INIT_HIGH,
+				data->cs_name);
 		if (err)
 			goto error_gpio;
 	}
@@ -507,7 +503,7 @@ static int bcm2835dma_spi_setup(struct spi_device *spi) {
 	return 0;
 
 error_gpio:
-	dev_err(&spi->dev,"Error allocating GPIO%i - error %i\n",data->chipselect_gpio,err);
+	dev_err(&spi->dev,"Error allocating GPIO%i - error %i\n",data->cs_gpio,err);
 error_free:
 	kfree(data);
 	dev_set_drvdata(&spi->dev,NULL);
