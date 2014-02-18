@@ -124,11 +124,11 @@ struct dma_fragment_transfer {
  *   as above, so that we can simplify the linking pattern
  */
 struct dma_fragment_setup_transfer {
-	struct dma_fragment fragment;
+	struct dma_fragment_transfer fragment;
 	/* the individual objects - the first ones need to be identical 
 	   to the ones of dma_fragment_setup_transfer */
-	struct dma_link     *transfer_rx;
-	struct dma_link     *transfer_tx;
+	//struct dma_link     *transfer_rx;
+	//struct dma_link     *transfer_tx;
 	/* additional data */
 	struct dma_link     *cs_select;
 	struct dma_link     *reset_spi;
@@ -296,12 +296,11 @@ struct dma_fragment *bcm2835_spi_dmafragment_create_composite(
 				gfpflags				\
 				)))					\
 		goto error;						\
-	if ( dma_fragment_add(						\
-			(struct dma_fragment *)frag,			\
-			(struct dma_link *)frag->field			\
-			) )						\
-		goto error;						\
-	else {								\
+	dma_fragment_add(						\
+		(struct dma_fragment *)frag,				\
+		(struct dma_link *)frag->field				\
+		);							\
+	{								\
 		struct dma_link *link =					\
 			(struct dma_link *)frag->field;			\
 		struct bcm2835_dma_cb *block =				\
@@ -451,7 +450,7 @@ struct dma_fragment *bcm2835_spi_dmafragment_create_setup_transfer(
 
 	/* configure the tx transfer itself */
 	ADD_TO_DMA_FRAGMENT(
-		frag,transfer_tx,dma_tx,
+		frag,fragment.transfer_tx,dma_tx,
 		_MESG(TI),      BCM2835_DMA_TI_WAIT_RESP,
 		_VARY(SRC),     0, /* transfer.tx_dma */
 		_SPI(DST),      (BCM2835_SPI_BASE_BUS + BCM2835_SPI_FIFO),
@@ -472,7 +471,7 @@ struct dma_fragment *bcm2835_spi_dmafragment_create_setup_transfer(
 		_FIXED(LEN),    4,
 		_FIXED(STRIDE), 0,0,
 		_FIXED(PAD0),   (/* the dma address of the TX-transfer */
-			frag->transfer_tx->dmablock_dma),
+			frag->fragment.transfer_tx->dmablock_dma),
 		_IGNORE(PAD1),  0
 		);
 	LINK_DMA_LINK(frag,config_spi,set_tx_dma_next);
@@ -492,7 +491,7 @@ struct dma_fragment *bcm2835_spi_dmafragment_create_setup_transfer(
 	
 	/* configure the rx transfer itself */
 	ADD_TO_DMA_FRAGMENT(
-		frag,transfer_rx,dma_rx,
+		frag,fragment.transfer_rx,dma_rx,
 		_VARY(TI),      BCM2835_DMA_TI_WAIT_RESP,
 		_SPI(SRC),      (BCM2835_SPI_BASE_BUS + BCM2835_SPI_FIFO),
 		_SPI(DST),      0, /* transfer.rx_dma */
@@ -501,9 +500,9 @@ struct dma_fragment *bcm2835_spi_dmafragment_create_setup_transfer(
 		_IGNORE(PAD0),  0,
 		_IGNORE(PAD1),  0
 		);
-	LINK_DMA_LINK(frag,set_tx_dma_next,transfer_rx);
+	LINK_DMA_LINK(frag,set_tx_dma_next,fragment.transfer_rx);
 	
-	return &frag->fragment;
+	return &frag->fragment.fragment;
 
 error:
 	FREE_DMA_IN_FRAGMENT(frag,cs_select);
@@ -512,10 +511,10 @@ error:
 	FREE_DMA_IN_FRAGMENT(frag,config_spi);
 	FREE_DMA_IN_FRAGMENT(frag,set_tx_dma_next);
 	FREE_DMA_IN_FRAGMENT(frag,start_tx_dma);
-	FREE_DMA_IN_FRAGMENT(frag,transfer_rx);
-	FREE_DMA_IN_FRAGMENT(frag,transfer_tx);
+	FREE_DMA_IN_FRAGMENT(frag,fragment.transfer_rx);
+	FREE_DMA_IN_FRAGMENT(frag,fragment.transfer_tx);
 
-	dma_fragment_free(&frag->fragment);
+	dma_fragment_free(&frag->fragment.fragment);
 
 	return NULL;
 }
@@ -815,6 +814,21 @@ error:
 		function,src,dst,extra,gfpflags);			\
 	if (err)							\
 		goto error;
+
+#define LINK_TO_COMPOSITE(field)					\
+	dma_fragment_composite_add(					\
+		(struct dma_fragment *)frag,				\
+		(struct dma_fragment_composite *)composite);
+
+/*
+	link = dma_fragment_composite_get_last_dma_link(		\
+		list_prev_entry(&frag,dma_fragment_chain)		\
+		);							\
+	if (link) {							\
+		dma_link_to_cb(link)->next=				\
+			frag->field->dmablock_dma;			\
+	}
+*/
 
 /**
  * message_transform_copy_add - copy value to different location
@@ -1136,6 +1150,7 @@ int bcm2835dma_spi_compo_add_setup_transfer(
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	struct bcm2835dma_spi_device_data *spi_device_data=
 		dev_get_drvdata(&spi->dev);
+	struct dma_link *link;
 	int err=0;
 
 	/* fetch fragment from fragment_cache */
@@ -1183,9 +1198,9 @@ int bcm2835dma_spi_compo_add_setup_transfer(
 		vary,gfpflags);
 	if (err)
 		goto error;
-	/* link it to composite */
-	/* TODO */
-
+	/* link it to composite and also on DMA level*/
+	LINK_TO_COMPOSITE(cs_select);
+	
 	return 0;
 error:
 	return err;

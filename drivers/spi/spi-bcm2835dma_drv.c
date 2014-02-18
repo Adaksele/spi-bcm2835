@@ -59,15 +59,15 @@
 #define DRV_NAME	"spi-bcm2835dma"
 
 /* some module-parameters for debugging and corresponding */
-static bool debug_msg = 0;
+bool debug_msg = 0;
 module_param(debug_msg, bool, 0);
 MODULE_PARM_DESC(debug_msg, "Run the driver with message debugging enabled");
 
-static bool debug_dma = 0;
+bool debug_dma = 0;
 module_param(debug_dma, bool, 0);
 MODULE_PARM_DESC(debug_dma, "Run the driver with dma debugging enabled");
 
-static int delay_1us = 889;
+int delay_1us = 889;
 module_param(delay_1us, int, 0);
 MODULE_PARM_DESC(delay_1us,
 		"the value we need to use for a 1 us delay via dma transfers");

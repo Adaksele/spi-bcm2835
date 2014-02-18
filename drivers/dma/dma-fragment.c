@@ -36,8 +36,6 @@ struct dma_link *dma_link_alloc(struct device *dev,
 	block->device  = dev;
 
 	block->fragment = NULL;
-	INIT_LIST_HEAD(&block->fragment_dma_link_chain);
-
 	INIT_LIST_HEAD(&block->dma_link_chain);
 
 	block->dmablock = dma_pool_alloc(block->dmapool,
@@ -56,7 +54,6 @@ void dma_link_free(struct dma_link *block)
 	if (!block->dmablock)
 		return;
 
-	list_del(&block->fragment_dma_link_chain);
 	list_del(&block->dma_link_chain);
 
 	dma_pool_free(block->dmapool,block->dmablock,block->dmablock_dma);
@@ -83,7 +80,6 @@ void dma_link_dump(char* prefix,
 	dma_dump(indent,link,flags);
 }
 
-
 struct dma_fragment *dma_fragment_alloc(
 	struct device *device,
 	gfp_t gfpflags,size_t size)
@@ -97,8 +93,8 @@ struct dma_fragment *dma_fragment_alloc(
 	frag->size=s;
 	frag->device=device;
 	INIT_LIST_HEAD(&frag->cache_list);
-	INIT_LIST_HEAD(&frag->fragment_dma_link_chain);
 	INIT_LIST_HEAD(&frag->dma_link_chain);
+	INIT_LIST_HEAD(&frag->dma_fragment_chain);
 
 	return frag;
 }
@@ -107,29 +103,16 @@ void dma_fragment_free(struct dma_fragment *frag)
 {
 	struct dma_link *link;
 
-	while( !list_empty(&frag->fragment_dma_link_chain)) {
-		link = list_first_entry(&frag->fragment_dma_link_chain,
+	list_del(&frag->dma_fragment_chain);
+
+	while( !list_empty(&frag->dma_link_chain)) {
+		link = list_first_entry(&frag->dma_link_chain,
 					typeof(*link),
-					fragment_dma_link_chain);
+					dma_link_chain);
 		dma_link_free(link);
 	}
 
 	kfree(frag);
-}
-
-int dma_fragment_add(
-	struct dma_fragment *fragment,
-	struct dma_link *dmalink)
-{
-	list_add(
-		&dmalink->fragment_dma_link_chain,
-		&fragment->fragment_dma_link_chain
-		);
-	list_add(
-		&dmalink->dma_link_chain,
-		&fragment->dma_link_chain
-		);
-	return 0;
 }
 
 void dma_fragment_dump(struct dma_fragment *fragment,
@@ -166,10 +149,10 @@ void dma_fragment_dump(struct dma_fragment *fragment,
 			i,*ptr);
 		}
 	}
-	/* dump the fragments in fragment_dma_link_chain */
+	/* dump the fragments in dma_link_chain */
 	list_for_each_entry(link,
-			&fragment->fragment_dma_link_chain,
-			fragment_dma_link_chain) {
+			&fragment->dma_link_chain,
+			dma_link_chain) {
 		dma_link_dump("\t",dma_dump,link,flags);
 	}
 }

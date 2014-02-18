@@ -38,8 +38,7 @@ struct dma_fragment_cache;
  * @dmachannel: the dma channel for which this is scheduled
  * @dmapool: from which pool the block has been taken
  * @fragment: the fragment to which we belong
- * @fragment_dma_link_chain: the link chain to which we belong
- * @dma_link_chain: the active DMA link chain to which we belong
+ * @dma_link_chain: the link chain to which we belong
  */
 
 struct dma_link {
@@ -53,8 +52,6 @@ struct dma_link {
 	struct dma_pool     *dmapool;
 	/* the membership to a fragment */
 	struct dma_fragment *fragment;
-	struct list_head    fragment_dma_link_chain;
-	/* and for the (active) dma chain itself */
 	struct list_head    dma_link_chain;
 };
 
@@ -97,21 +94,21 @@ void dma_link_dump(char* prefix,
  * struct dma_fragment - a list of dma_links with means how to link Fragments quickly
  * @cache: to which fragment cache we belong
  * @cache_list: the list to link the objects in the cache
- * @fragment_dma_link_chain: the link chain connecting all the dma_link
-     objects belonging to this fragment
  * @dma_link_chain: the link chain connecting all the dma_link
-     objects belonging to this fragment - used for real dma scheduling
+ *   objects belonging to this fragment
+ * @dma_fragment_chain: a chain of several dma-fragments all belonging together
+ *   for a full transaction - this also means the dma-control-blocks are linked
+ *   to each other
  * @size: the size of this object
  * @device: the device to which this fragment belongs
  */
 struct dma_fragment {
 	struct dma_fragment_cache* cache;
-	struct list_head cache_list;
-	struct list_head fragment_dma_link_chain;
-	struct list_head dma_link_chain;
-	size_t           size;
-	struct device    *device;
-	/* TODO: preparedModificationList - for prepared statements */
+	struct list_head           cache_list;
+	struct list_head           dma_link_chain;
+	size_t                     size;
+	struct device              *device;
+	struct list_head           dma_fragment_chain;
 };
 
 /**
@@ -123,6 +120,7 @@ struct dma_fragment {
 struct dma_fragment* dma_fragment_alloc(
 	struct device *device,
 	gfp_t gfpflags, size_t size);
+
 /**
  * dma_fragment_free - allocate a new dma_fragment and initialize it empty
  * @fragment: the fragment to free
@@ -134,8 +132,14 @@ void dma_fragment_free(struct dma_fragment *fragment);
  * @fragment: the fragment to which to add
  * @dmalink: the link object of the DMA controlblock to add
  */
-int dma_fragment_add(struct dma_fragment *fragment,
-	struct dma_link *dmalink);
+static inline void dma_fragment_add(struct dma_fragment *fragment,
+				struct dma_link *dmalink)
+{
+	list_add(
+		&dmalink->dma_link_chain,
+		&fragment->dma_link_chain
+		);
+}
 
 /**
  * dma_fragment_dump - dump the given fragment
@@ -161,7 +165,6 @@ void dma_fragment_dump(struct dma_fragment *fragment,
  *   the dma fragment
  * @message_post_transform_chain: list of transforms to do after the DMA has
  *   finished
- * @message: the spi_message which we are handling
  */
 struct dma_fragment_composite {
 	struct dma_fragment fragment;
@@ -169,6 +172,29 @@ struct dma_fragment_composite {
 	struct list_head    message_pre_transform_chain;
 	struct list_head    message_post_transform_chain;
 };
+
+/**
+ * dma_fragment_composite_add: add a dma_fragment to the composite
+ * @fragment: the fragment to add
+ * @composite: the composite to which to add
+ */
+static inline void dma_fragment_composite_add(
+	struct dma_fragment *fragment,
+	struct dma_fragment_composite *composite)
+{
+	list_add(&fragment->dma_fragment_chain,
+		&composite->fragment.dma_fragment_chain);
+}
+
+/**
+ * dma_fragment_composite_remove: remove a dma_fragment from a composite
+ */
+static inline void dma_fragment_composite_remove(
+	struct dma_fragment* fragment)
+{
+	list_del_init(&fragment->dma_fragment_chain);
+	INIT_LIST_HEAD(&fragment->dma_fragment_chain);
+}
 
 /**
  * struct dma_fragment_cache - a cache of several fragments
