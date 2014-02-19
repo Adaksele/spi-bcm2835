@@ -3,8 +3,9 @@ PWD := $(shell pwd)
 
 ccflags-y := -I $(src)/include
 
-obj-m := spi-bcm2835dma.o
-spi-bcm2835dma-y := drivers/spi/spi-bcm2835dma_drv.o drivers/spi/spi-bcm2835dma_frag.o drivers/dma/dma-fragment.o drivers/dma/bcm2835-dma.o
+obj-m := spi-bcm2835dma.o dma-fragment.o
+spi-bcm2835dma-y := drivers/spi/spi-bcm2835dma_drv.o drivers/spi/spi-bcm2835dma_frag.o drivers/dma/bcm2835-dma.o
+dma-fragment-y := drivers/dma/dma-fragment.o
 
 all:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
