@@ -32,7 +32,8 @@ extern int delay_1us;
 static u32 static_zero = 0;
 
 /**
- * bcm2835dma_dump_dma_link - dumping wrapper arround the generic CB controll block
+ * bcm2835dma_dump_dma_link - dumping wrapper arround the generic 
+ * CB controll block
  * @prefix: the prefix on each line
  * @link: the dma_link to dump
  * @flags: some flags
@@ -47,26 +48,6 @@ void bcm2835dma_dump_dma_link(
 		link->dmablock,
 		link->dmablock_dma,
 		flags);
-}
-
-/**
- * *dma_link_to_bcm2835_dma_cb - helper to get the casted pointer of the DMA CB
- *   from the dmalink given
- * @dmalink: dma_link to cast
- */
-static inline struct bcm2835_dma_cb *dma_link_to_bcm2835_dma_cb(
-	struct dma_link * dmalink)
-{
-	return (struct bcm2835_dma_cb *)dmalink->dmablock;
-}
-
-/**
- * link_dma_link - links the second dma_link to get executed after the first
- * @first: the dma_link that is linked to the next
- * @second: the dma_link that is being linked to the first
- */
-static inline void link_dma_link(struct dma_link *first,struct dma_link * second) {
-	dma_link_to_bcm2835_dma_cb(first)->next = second->dmablock_dma;
 }
 
 /**
@@ -86,6 +67,16 @@ struct spi_message_transform {
 	void             *extra;
 };
 
+/**
+ * spi_message_transform_add - add a transformation to the list of 
+ *   message transforms
+ * @head: message transform list to which to add
+ * @transformation: the transformation function to call
+ * @src: 1st argument to transformation function
+ * @dst: 2nd argument to transformation function
+ * @extra: 3rd argument to transformation function
+ * @gfpflags: gfpflags to use during allocation
+ */
 static inline int spi_message_transform_add(
 	struct list_head *head,
 	int              (*transformation)(void* src, void* dst, void* extra),
@@ -110,7 +101,13 @@ static inline int spi_message_transform_add(
 	return 0;
 }
 
-static inline void spi_message_transform_release(struct list_head *head)
+/**
+ * spi_message_transform_release_all - release all message transformations
+ *   from this list freeing the memory
+ * @head: message transform list from which to remove all entries
+ */
+static inline void spi_message_transform_release_all(
+	struct list_head *head)
 {
 	while( !list_empty(head)) {
 		struct spi_message_transform *trans
@@ -180,12 +177,12 @@ struct dma_fragment *bcm2835_spi_dmafragment_create_composite(
 		dma_link_free(frag->field);
 
 /**
- * BCM2835_DMA_CB_MEMBER_DMA_ADDR - for a member in the DMA CB create the corresponding 
- *   dma-address
+ * BCM2835_DMA_CB_MEMBER_DMA_ADDR - for a member in the DMA CB create the
+ *   corresponding dma-address
  * @dmalink: dma_link to base this on
  * @member: the member field in the dma CB
  */
-#define BCM2835_DMA_CB_MEMBER_DMA_ADDR(dmalink,member)					\
+#define BCM2835_DMA_CB_MEMBER_DMA_ADDR(dmalink,member)			\
 	( dmalink->dmablock_dma + offsetof(struct bcm2835_dma_cb,member))
 /**
  * ADD_TO_DMA_FRAGMENT - add data to field in fragment and assign 
@@ -257,7 +254,7 @@ struct dma_fragment *bcm2835_spi_dmafragment_create_composite(
 		struct dma_link *link =					\
 			(struct dma_link *)frag->field;			\
 		struct bcm2835_dma_cb *block =				\
-			dma_link_to_bcm2835_dma_cb(link);		\
+			dma_link_to_cb(link);				\
 		if ( do_ti == 1 )					\
 			block->ti = v_ti;				\
 		if ( do_src == 1 )					\
@@ -272,6 +269,7 @@ struct dma_fragment *bcm2835_spi_dmafragment_create_composite(
 		if ( do_pad1 ==1 )					\
 			block->pad[1] = v_pad1;				\
 		block->stride = 0;					\
+		block->next = 0;					\
 	}
 
 /**
@@ -365,7 +363,7 @@ static inline void link_to_composite(
 		typeof(*last_link),
 		dma_link_chain);
 
-	dma_link_to_bcm2835_dma_cb(last_link)->next =
+	dma_link_to_cb(last_link)->next =
 		first_link->dmablock_dma;
 }
 
@@ -1027,14 +1025,17 @@ static inline int bcm2835dma_spi_compo_add_transfer_helper(
 	 *   dma_fragment_config_transfer
 	 */
 	if (vary | SPI_OPTIMIZE_VARY_LENGTH) {
-		/* if we vary length then we he have to see what the lultiple is */
+		/* if we vary length then we he have to see what the 
+		   multiple is */
 		if (vary | SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_4)
-			composite->last_transfer = (struct dma_fragment_transfer*)frag;
+			composite->last_transfer = 
+				(struct dma_fragment_transfer *)frag;
 		else
 			composite->last_transfer = NULL;
 	} else {
 		composite->last_transfer = 
-			(xfer->len % 4) ? NULL : (struct dma_fragment_transfer*)frag;
+			(xfer->len % 4) ? NULL : 
+			(struct dma_fragment_transfer *)frag;
 	}
 
 	return 0;
@@ -1189,7 +1190,7 @@ int bcm2835dma_spi_compo_add_cs_deselect(
 	composite->last_transfer=NULL;
 
 	/* link it to composite */
-	/* TODO */
+	link_to_composite((struct dma_fragment *)frag,composite);
 
 	return 0;
 error:
@@ -1299,7 +1300,7 @@ int bcm2835dma_spi_compo_add_delay(
 	composite->last_transfer=NULL;
 	
 	/* link it to composite */
-	/* TODO */
+	link_to_composite((struct dma_fragment *)frag,composite);
 
 	return 0;
 
@@ -1312,7 +1313,8 @@ error:
  *---------------------------------------------------------------------------*/
 
 /**
- * dma_fragment_trigger_irq - structure used to trigger an IRQ on DMA completion
+ * dma_fragment_trigger_irq - structure used to trigger an IRQ
+ *   on DMA completion
  * @fragment: the normal dma_fragment
  * all others are dma_links for quicker connection of fragments with
  * a spi_message/spi_transfer
@@ -1445,22 +1447,13 @@ int bcm2835dma_spi_compo_add_trigger_irq(
 		NULL);
 
 	/* link it to composite */
-	/* TODO */
+	link_to_composite((struct dma_fragment *)frag,composite);
 
 	return 0;
 
 error:
 	return err;
 }
-
-
-/*
- * helper functions  that are used for static-temporary and optimized cases
- */
-
-
-
-
 
 /**
  * spi_message_to_dmafragment - converts a spi_message to a dma_fragment

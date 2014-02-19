@@ -42,17 +42,21 @@
 #define BCM2835_REG_COUNTER_BASE_BUS           0x7e003000
 #define BCM2835_REG_COUNTER_64BIT_BUS          0x7e003004
 
-
 #define SPI_OPTIMIZE_VARY_TX                   (1<<0)
 #define SPI_OPTIMIZE_VARY_RX                   (1<<1)
 #define SPI_OPTIMIZE_VARY_FRQUENCY             (1<<2)
 #define SPI_OPTIMIZE_VARY_DELAY                (1<<3)
 #define SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_1    (1<<4)
-#define SPI_OPTIMIZE_VARY_LENGTH               SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_1
-#define SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_4    (1<<5)|SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_1
-#define SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_8    (1<<6)|SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_4
-#define SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_16   (1<<7)|SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_8
-#define SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_32   (1<<8)|SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_16
+#define SPI_OPTIMIZE_VARY_LENGTH            \
+	SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_1
+#define SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_4    (1<<5) \
+	| SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_1
+#define SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_8    (1<<6) \
+	| SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_4
+#define SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_16   (1<<7) \
+	| SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_8
+#define SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_32   (1<<8) \
+	|SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_16
 
 struct bcm2835_dmachannel {
 	void __iomem *base;
@@ -123,7 +127,7 @@ struct dma_fragment *bcm2835_spi_dmafragment_create_trigger_irq(
 /* the interrupt-handlers */
 irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id);
 
-/** 
+/**
  * dmalink_to_cb - casts dma_link to a control_block
  * @dmalink: the dmalink to use
  */
@@ -131,4 +135,14 @@ static inline struct bcm2835_dma_cb * dma_link_to_cb(
 	struct dma_link *link)
 {
 	return (struct bcm2835_dma_cb *)(link->dmablock);
+}
+
+/**
+ * link_dma_link - links the second dma_link to get executed after the first
+ * @first: the dma_link that is linked to the next
+ * @second: the dma_link that is being linked to the first
+ */
+static inline void link_dma_link(struct dma_link *first,
+				struct dma_link * second) {
+	dma_link_to_cb(first)->next = second->dmablock_dma;
 }
