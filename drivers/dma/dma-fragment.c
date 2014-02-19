@@ -163,7 +163,7 @@ void dma_fragment_dump(struct dma_fragment *fragment,
 }
 EXPORT_SYMBOL_GPL(dma_fragment_dump);
 
-static struct dma_fragment *dma_fragment_cache_add(
+struct dma_fragment *dma_fragment_cache_add(
 	struct dma_fragment_cache *cache,
 	gfp_t gfpflags,
 	int toidle)
@@ -185,7 +185,7 @@ static struct dma_fragment *dma_fragment_cache_add(
 	if (gfpflags != GFP_KERNEL)
 		cache->allocated_atomic ++;
 	/* add to corresponding list */
-	if (toidle)
+	if (flags && DMA_FRAGMENT_CACHE_TO_IDLE)
 		list_add(&frag->cache_list,&cache->idle);
 	else
 		list_add(&frag->cache_list,&cache->active);

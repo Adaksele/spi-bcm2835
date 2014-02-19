@@ -240,15 +240,73 @@ int dma_fragment_cache_initialize(struct dma_fragment_cache *cache,
  */
 void dma_fragment_cache_release(struct dma_fragment_cache *cache);
 
+/**
+ * dma_fragment_cache_add - add an item to the dma cache
+ * @cache: the cache to which to add an item
+ * @gfpflags: the flags used for allocation
+ * @flags: some allocation flags.
+ */
+struct dma_fragment *dma_fragment_cache_add(
+	struct dma_fragment_cache *cache,
+	gfp_t gfpflags,
+	int flags);
+#define DMA_FRAGMENT_CACHE_TO_IDLE (1<<0)
+
+/**
+ * dma_fragment_cache_fetch - fetch an object from dma_fragment_cache
+ *   creating new ones if needed
+ * @cache: the cache from which to fetch
+ * @gfpflags: flags to use in case we need to allocate a new object
+ */
 static inline struct dma_fragment *dma_fragment_cache_fetch(
 	struct dma_fragment_cache *cache,gfp_t gfpflags)
 {
-	return NULL;
+	unsigned long flags;
+	int is_empty;
+	struct dma_fragment *frag = NULL;
+
+	/* fetch from cache if it exists*/
+	spin_lock_irqsave(&cache->lock,flags);
+	is_empty = list_empty(&cache->idle);
+	if (!is_empty) {
+		frag = list_first_entry(
+			&cache->idle,
+			typeof(*frag),
+			cache_list);
+		list_move(&frag->cache_list,&cache->active);
+		is_empty = list_empty(&cache->idle);
+	}
+	spin_unlock_irqrestore(&cache->lock,flags);
+
+	/* allocate fragment outside of lock and add to active queue */
+	if (!frag)
+		frag = dma_fragment_cache_add(cache,gfpflags,0);
+
+	/* in case the cache is empty after fetching
+	   and we are not in IRQ context, then allocate an additional
+	   fragment and add it to the idle list
+	   this hopefully helps reduce allocation time spent in 
+	   interrupts...
+	*/
+	if ( (is_empty) && (gfpflags==GFP_KERNEL) ) {
+		dma_fragment_cache_add(cache,gfpflags,1);
+	}
+
+	return frag;
 }
 
+/**
+ * dma_fragment_cache_return - return an object to dma_fragment_cache
+ * @cache - the cache in question
+ * @fragment - the dma_fragment to return
+ */
 static inline void dma_fragment_cache_return(
 	struct dma_fragment_cache *cache,struct dma_fragment *fragment)
 {
+	unsigned long flags;
+	spin_lock_irqsave(&cache->lock,flags);
+	list_move(&fragment->cache_list,&cache->idle);
+	spin_unlock_irqrestore(&cache->lock,flags);
 }
 
 #endif /* __DMAFRAGMENT_H */
