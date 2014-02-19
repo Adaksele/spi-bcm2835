@@ -30,6 +30,8 @@ void bcm2835_dma_cb_dump(
 	dma_addr_t dmablock_dma,
 	int flags)
 {
+	struct bcm2835_dma_cb_stride *stride =
+		(struct bcm2835_dma_cb_stride *)&dmablock->stride;
 	dev_printk(KERN_INFO,dev,
 		"%saddr:\t%pK\n"
 		,prefix,dmablock);
@@ -50,13 +52,13 @@ void bcm2835_dma_cb_dump(
 		"%slength:\t%u\n",
 		prefix,dmablock->length);
 	dev_printk(KERN_INFO,dev,
-		"%ssstride:\t%i\n",
-		prefix,dmablock->stride_src);
+		"%ss_str.:\t%i\n",
+		prefix,stride->src);
 	dev_printk(KERN_INFO,dev,
-		"%sdstr.:\t%i\n",
-		prefix,dmablock->stride_dst);
+		"%sd_str.:\t%i\n",
+		prefix,stride->dst);
 	dev_printk(KERN_INFO,dev,
-		"%ssstr.:\t%08x\n",
+		"%snext:\t%08x\n",
 		prefix,dmablock->next);
 	dev_printk(KERN_INFO,dev,
 		"%spad0:\t%08x\n",

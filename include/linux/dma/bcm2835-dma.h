@@ -81,19 +81,32 @@
  * @length: the length of the transfer
  * @stride_src: striding for src in 2D DMA-mode
  * @stride_dst: striding for dst in 2D DMA-mode
- * @next: the link to the next DMA control block to get exectued (0 for none)
- * @pad: padding - can get used for some data without having to allocate extra dma memory
+ * @next: the link to the next DMA control block to get exectued
+ *        (0 for none)
+ * @pad: padding - can get used for some data without having to
+ *       allocate extra dma memory
  */
 struct bcm2835_dma_cb {
 	u32        ti;
 	dma_addr_t src;
 	dma_addr_t dst;
 	u32        length;
-	s16        stride_src;
-	s16        stride_dst;
+	u32        stride;
 	dma_addr_t next;
 	u32        pad[2];
 };
+
+struct bcm2835_dma_cb_stride {
+	s16 src;
+	s16 dst;
+};
+
+static inline u32 bcm2835_dma_cb_compose_stride(s16 src_stride, s16 dst_stride) {
+	struct bcm2835_dma_cb_stride tmp;
+	tmp.src=src_stride;
+	tmp.dst=dst_stride;
+	return *((u32*)&tmp);
+}
 
 void bcm2835_dma_cb_dump(
 	char *prefix,
