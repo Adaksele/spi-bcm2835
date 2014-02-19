@@ -48,6 +48,7 @@ struct dma_link *dma_link_alloc(struct device *dev,
 
 	return block;
 }
+EXPORT_SYMBOL_GPL(dma_link_alloc);
 
 void dma_link_free(struct dma_link *block)
 {
@@ -60,6 +61,7 @@ void dma_link_free(struct dma_link *block)
 
 	kfree(block);
 }
+EXPORT_SYMBOL_GPL(dma_link_free);
 
 void dma_link_dump(char* prefix,
 		void (*dma_dump)(
@@ -79,6 +81,7 @@ void dma_link_dump(char* prefix,
 		prefix,link);
 	dma_dump(indent,link,flags);
 }
+EXPORT_SYMBOL_GPL(dma_link_dump);
 
 struct dma_fragment *dma_fragment_alloc(
 	struct device *device,
@@ -98,6 +101,7 @@ struct dma_fragment *dma_fragment_alloc(
 
 	return frag;
 }
+EXPORT_SYMBOL_GPL(dma_fragment_alloc);
 
 void dma_fragment_free(struct dma_fragment *frag)
 {
@@ -114,6 +118,7 @@ void dma_fragment_free(struct dma_fragment *frag)
 
 	kfree(frag);
 }
+EXPORT_SYMBOL_GPL(dma_fragment_free);
 
 void dma_fragment_dump(struct dma_fragment *fragment,
 		void (*dma_dump)(
@@ -156,6 +161,7 @@ void dma_fragment_dump(struct dma_fragment *fragment,
 		dma_link_dump("\t",dma_dump,link,flags);
 	}
 }
+EXPORT_SYMBOL_GPL(dma_fragment_dump);
 
 static struct dma_fragment *dma_fragment_cache_add(
 	struct dma_fragment_cache *cache,
@@ -188,6 +194,7 @@ static struct dma_fragment *dma_fragment_cache_add(
 	/* and return it */
 	return frag;
 }
+EXPORT_SYMBOL_GPL(dma_fragment_cache_add);
 
 int dma_fragment_cache_initialize(
 	struct dma_fragment_cache *cache,
@@ -218,6 +225,7 @@ int dma_fragment_cache_initialize(
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(dma_fragment_cache_initialize);
 
 void dma_fragment_cache_release(struct dma_fragment_cache* cache)
 {
@@ -242,14 +250,4 @@ void dma_fragment_cache_release(struct dma_fragment_cache* cache)
 		"out of which %lu were created without the GPF_KERNEL flag\n",
 		cache->name,cache->allocated,cache->allocated_atomic);
 }
-
-struct dma_fragment *dma_fragment_cache_fetch(
-	struct dma_fragment_cache *cache,gfp_t gfpflags) 
-{
-	return NULL;
-}
-
-void dma_fragment_cache_return(
-	struct dma_fragment_cache *cache,struct dma_fragment *fragment)
-{
-}
+EXPORT_SYMBOL_GPL(dma_fragment_cache_release);

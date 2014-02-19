@@ -240,10 +240,15 @@ int dma_fragment_cache_initialize(struct dma_fragment_cache *cache,
  */
 void dma_fragment_cache_release(struct dma_fragment_cache *cache);
 
-struct dma_fragment *dma_fragment_cache_fetch(
-	struct dma_fragment_cache *cache,gfp_t gfpflags);
+static inline struct dma_fragment *dma_fragment_cache_fetch(
+	struct dma_fragment_cache *cache,gfp_t gfpflags)
+{
+	return NULL;
+}
 
-void dma_fragment_cache_return(
-	struct dma_fragment_cache *cache,struct dma_fragment *fragment);
+static inline void dma_fragment_cache_return(
+	struct dma_fragment_cache *cache,struct dma_fragment *fragment)
+{
+}
 
 #endif /* __DMAFRAGMENT_H */
