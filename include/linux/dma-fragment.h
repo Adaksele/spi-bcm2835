@@ -226,6 +226,7 @@ struct dma_fragment_cache {
 	u32                count_allocated;
 	u32                count_allocated_kernel;
 	unsigned long      count_fetched;
+	u32                count_removed;
 
 	struct dma_fragment *(*allocateFragment)(struct device *,gfp_t);
 };
@@ -266,6 +267,14 @@ struct dma_fragment *dma_fragment_cache_add(
 	gfp_t gfpflags,
 	int flags);
 #define DMA_FRAGMENT_CACHE_TO_IDLE (1<<0)
+
+/**
+ * dma_fragment_cache_resize - adds/removes count items to/from cache
+ * @cache: the cache to operate on
+ * @size: thenumber of objects to add (negative to remove
+ */
+int dma_fragment_cache_resize(struct dma_fragment_cache* cache,
+			int size);
 
 /**
  * dma_fragment_cache_fetch - fetch an object from dma_fragment_cache

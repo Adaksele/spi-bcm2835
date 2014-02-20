@@ -202,7 +202,7 @@ struct dma_fragment *dma_fragment_cache_add(
 }
 EXPORT_SYMBOL_GPL(dma_fragment_cache_add);
 
-static ssize_t dma_fragment_cache_show_stats(
+static ssize_t dma_fragment_cache_sysfs_show(
 	struct device *dev,
 	struct device_attribute *attr,
 	char *buf)
@@ -220,17 +220,40 @@ static ssize_t dma_fragment_cache_show_stats(
 			"count_idle:\t%u\n"
 			"count_allocated:\t%u\n"
 			"count_allocated_kernel:\t%u\n"
-			"count_fetched:\t%lu\n",
+			"count_fetched:\t%lu\n"
+			"count_removed:\t%u\n",
 			cache->dev_attr.attr.name,
 			cache->count_active,
 			cache->count_idle,
 			cache->count_allocated,
 			cache->count_allocated_kernel,
-			cache->count_fetched
+			cache->count_fetched,
+			cache->count_removed
 		);
 	spin_unlock_irqrestore(&cache->lock,flags);
 
 	return size;
+}
+
+ssize_t dma_fragment_cache_sysfs_resize(
+	struct device *dev,
+	struct device_attribute *attr,
+	const char *buf, size_t count)
+{
+	struct dma_fragment_cache *cache =
+		container_of(attr,typeof(*cache),dev_attr);
+	s32 resize;
+	int err;
+
+	err=kstrtos32(buf,10,&resize);
+	if (err)
+		return -EPERM;
+
+	err=dma_fragment_cache_resize(cache,resize);
+	if (err<0)
+		return err;
+
+	return count;
 }
 
 #define SYSFS_PREFIX "dma_fragment_cache:"
@@ -262,9 +285,10 @@ int dma_fragment_cache_initialize(
 
 	cache->device             = device;
 	cache->dev_attr.attr.name = fullname;
-	cache->dev_attr.attr.mode = 0444;
-	cache->dev_attr.show      = dma_fragment_cache_show_stats;
-	cache->allocateFragment    = allocateFragment;
+	cache->dev_attr.attr.mode = S_IWUSR | S_IRUGO;
+	cache->dev_attr.show      = dma_fragment_cache_sysfs_show;
+	cache->dev_attr.store     = dma_fragment_cache_sysfs_resize;
+	cache->allocateFragment   = allocateFragment;
 
 	/* and expose the statistics on sysfs */
 	err = device_create_file(device, &cache->dev_attr);
@@ -278,17 +302,51 @@ int dma_fragment_cache_initialize(
 	}
 
 	/* now allocate new entries to fill the pool */
-	for (i = 0 ; i < initial_size ; i++) {
-		if (! dma_fragment_cache_add(cache,GFP_KERNEL,1)) {
-			device_remove_file(device,
-					&cache->dev_attr);
+	return dma_fragment_cache_resize(cache,initial_size);
+}
+EXPORT_SYMBOL_GPL(dma_fragment_cache_initialize);
+
+int dma_fragment_cache_resize(struct dma_fragment_cache* cache,
+	int size)
+{
+	int i;
+	struct dma_fragment *frag;
+	unsigned long flags;
+
+	if (size == 0)
+		return 0;
+	/* add up to size */
+	for (i = 0 ; i < size ; i++) {
+		if (! dma_fragment_cache_add(cache,GFP_KERNEL,1) ) {
 			return -ENOMEM;
 		}
 	}
+	/* remove up to size */
+	for (i = 0 ; i > size ; i--) {
+		spin_lock_irqsave(&cache->lock,flags);
 
+		/* return error on empty */
+		if ( list_empty(&cache->idle) ) {
+			spin_unlock_irqrestore(&cache->lock,flags);
+			return -ENOMEM;
+		}
+
+		/* now get object from idle and release it */
+		frag = list_first_entry(&cache->idle,struct dma_fragment,
+					cache_list);
+		list_del(&frag->cache_list);
+
+		cache->count_idle--;
+		cache->count_removed++;
+
+		spin_unlock_irqrestore(&cache->lock,flags);
+		/* and free it */
+		dma_fragment_free(frag);
+	}
 	return 0;
 }
-EXPORT_SYMBOL_GPL(dma_fragment_cache_initialize);
+EXPORT_SYMBOL_GPL(dma_fragment_cache_resize);
+
 
 void dma_fragment_cache_release(struct dma_fragment_cache* cache)
 {
