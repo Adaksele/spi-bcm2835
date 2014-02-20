@@ -1,5 +1,5 @@
 /*
- * Driver for DMA Fragments - initially used for BCM2835 DMA implementation
+ * Driver for DMA Fragments
  *
  * Copyright (C) 2014 Martin Sperl
  *
@@ -19,6 +19,8 @@
  *
  * 4567890123456789012345678901234567890123456789012345678901234567890123456789
  */
+#include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/dma-fragment.h>
 #include <linux/device.h>
 #include <linux/slab.h>
@@ -139,11 +141,12 @@ void dma_fragment_dump(struct dma_fragment *fragment,
 	if (fragment->cache) {
 		dev_printk(KERN_INFO,dev,
 			"\tcachen:\t%s\n",
-			fragment->cache->name);
+			fragment->cache->dev_attr.attr.name);
 	}
 	/* dump the extra data */
 	if (extrasize) {
-		u32 *ptr=(u32*)((void*)fragment+sizeof(struct dma_fragment));
+		u32 *ptr = (u32*)((void*)fragment
+				+ sizeof(struct dma_fragment));
 		int i;
 		dev_printk(KERN_INFO,dev,
 			"\textra\tsize: %i\n",
@@ -174,28 +177,63 @@ struct dma_fragment *dma_fragment_cache_add(
 		cache->device,
 		gfpflags);
 	if (!frag)
-		return NULL; 
+		return NULL;
 
 	frag->cache=cache;
 
 	spin_lock_irqsave(&cache->lock,flags);
 
 	/* gather statistics */
-	cache->allocated ++;
-	if (gfpflags != GFP_KERNEL)
-		cache->allocated_atomic ++;
+	cache->count_allocated ++;
+	if (gfpflags == GFP_KERNEL)
+		cache->count_allocated_kernel ++;
 	/* add to corresponding list */
-	if (flags && DMA_FRAGMENT_CACHE_TO_IDLE)
+	if (flags && DMA_FRAGMENT_CACHE_TO_IDLE) {
 		list_add(&frag->cache_list,&cache->idle);
-	else
+		cache->count_idle++;
+	} else {
 		list_add(&frag->cache_list,&cache->active);
-	
+		cache->count_active++;
+	}
+
 	spin_unlock_irqrestore(&cache->lock,flags);
 	/* and return it */
 	return frag;
 }
 EXPORT_SYMBOL_GPL(dma_fragment_cache_add);
 
+static ssize_t dma_fragment_cache_show_stats(
+	struct device *dev,
+	struct device_attribute *attr,
+	char *buf)
+{
+	struct dma_fragment_cache *cache =
+		container_of(attr,typeof(*cache),dev_attr);
+	ssize_t size;
+	unsigned long flags;
+
+	spin_lock_irqsave(&cache->lock,flags);
+	size = scnprintf(buf, PAGE_SIZE,
+			"dma_fragment_cache_info - 0.1\n"
+			"name: %s\n"
+			"count_active:\t%u\n"
+			"count_idle:\t%u\n"
+			"count_allocated:\t%u\n"
+			"count_allocated_kernel:\t%u\n"
+			"count_fetched:\t%lu\n",
+			cache->dev_attr.attr.name,
+			cache->count_active,
+			cache->count_idle,
+			cache->count_allocated,
+			cache->count_allocated_kernel,
+			cache->count_fetched
+		);
+	spin_unlock_irqrestore(&cache->lock,flags);
+
+	return size;
+}
+
+#define SYSFS_PREFIX "dma_fragment_cache:"
 int dma_fragment_cache_initialize(
 	struct dma_fragment_cache *cache,
 	const char* name,
@@ -205,23 +243,48 @@ int dma_fragment_cache_initialize(
 	int initial_size
 	)
 {
-	int i;
+	char *fullname;
+	int i,err;
+
+	memset(cache,0,sizeof(struct dma_fragment_cache));
 
 	spin_lock_init(&cache->lock);
 	INIT_LIST_HEAD(&cache->active);
 	INIT_LIST_HEAD(&cache->idle);
 
-	cache->name=name;
-	cache->device=device;
-	cache->allocateFragment=allocateFragment;
+	/* create name */
+	i=sizeof(SYSFS_PREFIX)+strlen(name);
+	fullname=kmalloc(i,GFP_KERNEL);
+	if (!fullname)
+		return -ENOMEM;
+	strncpy(fullname,SYSFS_PREFIX,i);
+	strncat(fullname,name,i);
+
+	cache->device             = device;
+	cache->dev_attr.attr.name = fullname;
+	cache->dev_attr.attr.mode = 0444;
+	cache->dev_attr.show      = dma_fragment_cache_show_stats;
+	cache->allocateFragment    = allocateFragment;
+
+	/* and expose the statistics on sysfs */
+	err = device_create_file(device, &cache->dev_attr);
+	if (err) {
+		/* duplicate names result in errors */
+		cache->dev_attr.show=NULL;
+		dev_printk(KERN_ERR,cache->device,
+			"duplicate dma_fragment_cache name \"%s\"\n",
+			cache->dev_attr.attr.name);
+		return err;
+	}
 
 	/* now allocate new entries to fill the pool */
 	for (i = 0 ; i < initial_size ; i++) {
-		if (! dma_fragment_cache_add(cache,GFP_KERNEL,1))
+		if (! dma_fragment_cache_add(cache,GFP_KERNEL,1)) {
+			device_remove_file(device,
+					&cache->dev_attr);
 			return -ENOMEM;
+		}
 	}
-
-	/* and expose the statistics on sysfs */
 
 	return 0;
 }
@@ -235,19 +298,32 @@ void dma_fragment_cache_release(struct dma_fragment_cache* cache)
 	spin_lock_irqsave(&cache->lock,flags);
 
 	while( !list_empty(&cache->idle)) {
-		frag = list_first_entry(&cache->idle,struct dma_fragment, cache_list);
+		frag = list_first_entry(&cache->idle,struct dma_fragment,
+					cache_list);
 		list_del(&frag->cache_list);
 		dma_fragment_free(frag);
 	}
+	cache->count_idle=0;
 
 	if (! list_empty(&cache->active))
-		printk(KERN_ERR "the dma_fragment_cache %s is not totally idle\n",cache->name);
+		dev_printk(KERN_ERR,cache->device,
+			"the dma_fragment_cache %s is not totally idle"
+			" it contains %u entries\n",
+			cache->dev_attr.attr.name,
+			cache->count_active);
 
 	spin_unlock_irqrestore(&cache->lock,flags);
 
-	/* we could expose this statistics via sysfs - for now just when unloading the module */
-	printk(KERN_INFO "The DMA Fragment cache for %s has had %lu fragments created "
-		"out of which %lu were created without the GPF_KERNEL flag\n",
-		cache->name,cache->allocated,cache->allocated_atomic);
+	/* release sysfs info file */
+	if (cache->dev_attr.show)
+		device_remove_file(cache->device,
+				&cache->dev_attr);
+
+	/* and release name */
+	kfree(cache->dev_attr.attr.name);
 }
 EXPORT_SYMBOL_GPL(dma_fragment_cache_release);
+
+MODULE_DESCRIPTION("generic dma-fragment infrastructure");
+MODULE_AUTHOR("Martin Sperl <kernel@martin.sperl.org>");
+MODULE_LICENSE("GPL");

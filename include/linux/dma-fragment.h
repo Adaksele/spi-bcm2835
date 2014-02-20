@@ -33,7 +33,8 @@ struct dma_fragment_cache;
 
 /**
  * struct dma_link - the linked list of DMA control blocks
- * @dmablock: the pointer to the DMA control-block itself (void pointer to be of generic use)
+ * @dmablock: the pointer to the DMA control-block itself
+ *    (void pointer to be of generic use)
  * @dmablock_dma: the dma-buss address of the control block
  * @dmachannel: the dma channel for which this is scheduled
  * @dmapool: from which pool the block has been taken
@@ -91,14 +92,15 @@ void dma_link_dump(char* prefix,
 	);
 
 /**
- * struct dma_fragment - a list of dma_links with means how to link Fragments quickly
+ * struct dma_fragment - a list of dma_links with means to link
+ *    Fragments quickly
  * @cache: to which fragment cache we belong
  * @cache_list: the list to link the objects in the cache
  * @dma_link_chain: the link chain connecting all the dma_link
  *   objects belonging to this fragment
- * @dma_fragment_chain: a chain of several dma-fragments all belonging together
- *   for a full transaction - this also means the dma-control-blocks are linked
- *   to each other
+ * @dma_fragment_chain: a chain of several dma-fragments all belonging
+ *   together for a full transaction
+ *   - this also means the dma-control-blocks are linked to each other
  * @size: the size of this object
  * @device: the device to which this fragment belongs
  */
@@ -155,16 +157,16 @@ void dma_fragment_dump(struct dma_fragment *fragment,
 		int flags);
 
 /**
- * dma_fragment_composite - this is a composit dma fragment, that combines 
+ * dma_fragment_composite - this is a composit dma fragment, that combines
  *   several fragments to make up a full SPI transfer
- *   it can be a prepared version, in which case we also run the 
+ *   it can be a prepared version, in which case we also run the
  *   message transforms
  * @fragment: the normal dma_fragment
  * @is_prepared: flags that the dma_fragment is prepared already
- * @message_pre_transform_chain: list of transforms to do prior to scheduling
- *   the dma fragment
- * @message_post_transform_chain: list of transforms to do after the DMA has
- *   finished
+ * @message_pre_transform_chain: list of transforms to do prior
+ *   to scheduling the dma fragment
+ * @message_post_transform_chain: list of transforms to do after
+ *   the DMA has finished
  */
 struct dma_fragment_composite {
 	struct dma_fragment fragment;
@@ -198,22 +200,33 @@ static inline void dma_fragment_composite_remove(
 
 /**
  * struct dma_fragment_cache - a cache of several fragments
+ * @device: the device to which this cache belongs
+ * @dev_attr: the device attributes of this cache (includes the name)
  * @lock: lock for this structure
- * @name: name of the cache
  * @active: list of currently active fragments
  * @idle: list of currently idle fragments
- * @dmapool: the dmapool from which to allocate dma blocks 
- *    (this implicitly defines the size of the DMA CB)
+ * @count_active: number of currently active fragments
+ * @count_idle: number of currently idle fragments
+ * @count_allocated: number of allocated objects
+ * @count_allocated_kernel: number of allocated objects with GFP_KERNEL
+ * @count_fetched: number of fetches from this cache
  * @allocateFragment: the allocation code for fragments
  */
 struct dma_fragment_cache {
+	struct device      *device;
+	struct device_attribute dev_attr;
+
 	spinlock_t         lock;
-	const char         *name;
+
 	struct list_head   active;
 	struct list_head   idle;
-	struct device      *device;
-	unsigned long      allocated;
-	unsigned long      allocated_atomic;
+
+	u32                count_active;
+	u32                count_idle;
+	u32                count_allocated;
+	u32                count_allocated_kernel;
+	unsigned long      count_fetched;
+
 	struct dma_fragment *(*allocateFragment)(struct device *,gfp_t);
 };
 
@@ -221,7 +234,8 @@ struct dma_fragment_cache {
  * dma_fragment_cache_initialize: initialize the DMA Fragment cache
  * @cache: the cache to initialize
  * @name: name of cache
- * @allocateFragment: callback used to allocate a new fragment (without setting it up)
+ * @allocateFragment: callback used to allocate a new fragment
+ *       initilaizing it with generic values that are not changed
  * @device: the device for which we do this
  * @initial_size: the initial size of the pool
  * note this needs to get run in "normal" context
@@ -236,7 +250,8 @@ int dma_fragment_cache_initialize(struct dma_fragment_cache *cache,
 /**
  * dma_fragment_cache_release: release the DMA Fragment cache
  * @cache: the cache to release
- * note that this assumes that this assumes that the DMA engine is not working these control blocks
+ * note that this assumes that this assumes that the DMA-HW
+ * is not working with these control blocks
  */
 void dma_fragment_cache_release(struct dma_fragment_cache *cache);
 
@@ -276,20 +291,18 @@ static inline struct dma_fragment *dma_fragment_cache_fetch(
 		list_move(&frag->cache_list,&cache->active);
 		is_empty = list_empty(&cache->idle);
 	}
+	cache->count_fetched++;
 	spin_unlock_irqrestore(&cache->lock,flags);
 
 	/* allocate fragment outside of lock and add to active queue */
 	if (!frag)
 		frag = dma_fragment_cache_add(cache,gfpflags,0);
 
-	/* in case the cache is empty after fetching
-	   and we are not in IRQ context, then allocate an additional
-	   fragment and add it to the idle list
-	   this hopefully helps reduce allocation time spent in 
-	   interrupts...
-	*/
-	if ( (is_empty) && (gfpflags==GFP_KERNEL) ) {
-		dma_fragment_cache_add(cache,gfpflags,1);
+	/* if not in GFP_KERNEL context, then return immediately */
+	if (gfpflags == GFP_KERNEL) {
+		/* allocate one more to keep something idle in cache */
+		if (is_empty)
+			dma_fragment_cache_add(cache,gfpflags,1);
 	}
 
 	return frag;
