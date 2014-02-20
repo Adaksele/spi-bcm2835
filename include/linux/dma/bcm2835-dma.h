@@ -17,7 +17,6 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
- * 4567890123456789012345678901234567890123456789012345678901234567890123456789
  */
 
 #ifndef __BCM2835_DMA_H
@@ -101,7 +100,9 @@ struct bcm2835_dma_cb_stride {
 	s16 dst;
 };
 
-static inline u32 bcm2835_dma_cb_compose_stride(s16 src_stride, s16 dst_stride) {
+static inline u32 bcm2835_dma_cb_compose_stride(
+	s16 src_stride, s16 dst_stride)
+{
 	struct bcm2835_dma_cb_stride tmp;
 	tmp.src=src_stride;
 	tmp.dst=dst_stride;

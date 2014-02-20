@@ -1,5 +1,5 @@
 /*
- * Driver for DMA Fragments - initially used for BCM2835 DMA implementation
+ * helper code for bcm2835 dma controlblocks
  *
  * Copyright (C) 2014 Martin Sperl
  *
@@ -17,7 +17,6 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
- * 4567890123456789012345678901234567890123456789012345678901234567890123456789
  */
 #include <linux/dma/bcm2835-dma.h>
 #include <linux/printk.h>

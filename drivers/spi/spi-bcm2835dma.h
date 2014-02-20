@@ -26,9 +26,9 @@
  * 4567890123456789012345678901234567890123456789012345678901234567890123456789
  */
 
+#include <linux/spi/spi-dmafragment.h>
 #include <linux/dma/bcm2835-dma.h>
 #include <linux/spi/bcm2835.h>
-#include <linux/dma-fragment.h>
 #include <linux/interrupt.h>
 #include <linux/spi/spi.h>
 #include <linux/clk.h>
@@ -37,26 +37,10 @@
 /* DMA addresses of some of the used registers */
 #define BCM2835_REG_DMA0_BASE_BUS              0x7E007000
 #define BCM2835_REG_DMA15_BASE_BUS             0x7EE05000
-#define BCM2835_REG_GPIO_OUTPUT_SET_BASE_BUS   0x7e20001C 
+#define BCM2835_REG_GPIO_OUTPUT_SET_BASE_BUS   0x7e20001C
 #define BCM2835_REG_GPIO_OUTPUT_CLEAR_BASE_BUS 0x7e200028
 #define BCM2835_REG_COUNTER_BASE_BUS           0x7e003000
 #define BCM2835_REG_COUNTER_64BIT_BUS          0x7e003004
-
-#define SPI_OPTIMIZE_VARY_TX                   (1<<0)
-#define SPI_OPTIMIZE_VARY_RX                   (1<<1)
-#define SPI_OPTIMIZE_VARY_FRQUENCY             (1<<2)
-#define SPI_OPTIMIZE_VARY_DELAY                (1<<3)
-#define SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_1    (1<<4)
-#define SPI_OPTIMIZE_VARY_LENGTH            \
-	SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_1
-#define SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_4    (1<<5) \
-	| SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_1
-#define SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_8    (1<<6) \
-	| SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_4
-#define SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_16   (1<<7) \
-	| SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_8
-#define SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_32   (1<<8) \
-	|SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_16
 
 struct bcm2835_dmachannel {
 	void __iomem *base;
@@ -86,6 +70,7 @@ struct bcm2835dma_spi_device_data {
 };
 
 struct bcm2835dma_spi {
+	struct spi_dma_fragment_functions spi_dma_functions;
 	/* the SPI registers */
 	void __iomem *spi_regs;
 	/* the clock */
@@ -95,11 +80,6 @@ struct bcm2835dma_spi {
 	struct bcm2835_dmachannel dma_rx;
 	/* the DMA-able pool we use to allocate control blocks from */
 	struct dma_pool *pool;
-	/* some DMA able blocks for some read/write buffers */
-	struct {
-		void *addr;
-		dma_addr_t bus_addr;
-	} buffer_receive_dummy,buffer_transmit_0x00;
 	/* the fragment caches */
 	struct dma_fragment_cache fragment_composite;
 	struct dma_fragment_cache fragment_setup_transfer;
@@ -111,18 +91,8 @@ struct bcm2835dma_spi {
 	struct list_head spi_device_data_chain;
 };
 
-struct dma_fragment *bcm2835_spi_dmafragment_create_composite(
-	struct device *,gfp_t);
-struct dma_fragment *bcm2835_spi_dmafragment_create_setup_transfer(
-	struct device *,gfp_t);
-struct dma_fragment *bcm2835_spi_dmafragment_create_transfer(
-	struct device *,gfp_t);
-struct dma_fragment *bcm2835_spi_dmafragment_create_cs_deselect(
-	struct device *,gfp_t);
-struct dma_fragment *bcm2835_spi_dmafragment_create_delay(
-	struct device *,gfp_t);
-struct dma_fragment *bcm2835_spi_dmafragment_create_trigger_irq(
-	struct device *,gfp_t);
+int bcm2835dma_register_dmafragment_components(struct spi_master*);
+void bcm2835dma_release_dmafragment_components(struct spi_master*);
 
 /* the interrupt-handlers */
 irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id);

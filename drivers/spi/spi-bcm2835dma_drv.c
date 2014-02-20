@@ -1,13 +1,14 @@
 /*
- * Driver for Broadcom BCM2835 SPI Controllers
+ * Driver for Broadcom BCM2835 SPI Controllers using DMA-FRAGMENTS
  *
  * Copyright (C) 2012 Chris Boot
  * Copyright (C) 2013 Stephen Warren
  * Copyright (C) 2013 Martin Sperl
  *
  * This driver is inspired by:
- * spi-ath79.c, Copyright (C) 2009-2011 Gabor Juhos <juhosg@openwrt.org>
- * spi-atmel.c, Copyright (C) 2006 Atmel Corporation
+ * spi-bcm2835.c, Copyright (C) 2012 Chris Boot, 2013 Stephen Warren
+ * spi-ath79.c,   Copyright (C) 2009-2011 Gabor Juhos <juhosg@openwrt.org>
+ * spi-atmel.c,   Copyright (C) 2006 Atmel Corporation
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -23,17 +24,17 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
- * 4567890123456789012345678901234567890123456789012345678901234567890123456789
  */
 
 /* known limitations:
  *  * cs maps directly to GPIO (except for 0 and 1, which also map to 7+8)
  *    and the mode is not reverted when not used
- *  * if there is a transfer of say 13 bytes, then a total of 16 bytes will get
- *    (over)written, so any tightly packed data would get overwritten
- *    Not sure how we should approach such a situation  - if this is not a
- *    valid situation with drivers right now, then maybe we should make it a
- *    policy
+ *  * if there is a transfer of say 13 bytes, then a total of 16 bytes
+ *    will get (over)written, so any tightly packed data would get
+ *    overwritten.
+ *    Not sure how we should approach such a situation - if this is not a
+ *    valid situation with drivers right now, then maybe we should make
+ *    it a policy
  */
 #include "spi-bcm2835dma.h"
 
@@ -61,16 +62,19 @@
 /* some module-parameters for debugging and corresponding */
 bool debug_msg = 0;
 module_param(debug_msg, bool, 0);
-MODULE_PARM_DESC(debug_msg, "Run the driver with message debugging enabled");
+MODULE_PARM_DESC(debug_msg,
+		"Run the driver with message debugging enabled");
 
 bool debug_dma = 0;
 module_param(debug_dma, bool, 0);
-MODULE_PARM_DESC(debug_dma, "Run the driver with dma debugging enabled");
+MODULE_PARM_DESC(debug_dma,
+		"Run the driver with dma debugging enabled");
 
 int delay_1us = 889;
 module_param(delay_1us, int, 0);
 MODULE_PARM_DESC(delay_1us,
-		"the value we need to use for a 1 us delay via dma transfers");
+		"the value we need to use for a 1 us delay"
+		" via dma transfers");
 /* note that this value has some variation - based on other
  * activities happening on the bus...
  * this also adds memory overhead slowing down the whole system when there
@@ -82,14 +86,30 @@ module_param(use_transfer_one, bool, 0);
 MODULE_PARM_DESC(use_transfer_one,
 		"Run the driver with the transfer_one_message interface");
 
-/*
- * define the BCM2835 registers need to see where these go in the end
- * this should possibly go to bcm2835.h
- */
-
-
 static void bcm2835dma_release_dmachannel(struct spi_master *master,
-					struct bcm2835_dmachannel *d);
+			struct bcm2835_dmachannel *d)
+{
+	/* if no base, then we are not configured, so return */
+	if (!d->base)
+                return;
+	/* reset the DMA */
+	writel(BCM2835_DMA_CS_RESET,d->base+BCM2835_DMA_CS);
+	writel(0,d->base+BCM2835_DMA_ADDR);
+
+	/* release interrupt handler and dma */
+	if (d->handler)
+		free_irq(d->irq,master);
+        bcm_dma_chan_free(d->chan);
+
+	/* cleanup structure */
+        d->base = NULL;
+	d->bus_addr=0;
+        d->chan = 0;
+        d->irq = 0;
+	d->handler=NULL;
+	d->desc=NULL;
+}
+
 static int bcm2835dma_allocate_dmachannel(struct spi_master *master,
 					struct bcm2835_dmachannel *d,
 					irq_handler_t handler,
@@ -105,23 +125,29 @@ static int bcm2835dma_allocate_dmachannel(struct spi_master *master,
 	d->handler = NULL;
 	d->desc = NULL;
         /* register DMA channel */
-        ret = bcm_dma_chan_alloc(BCM_DMA_FEATURE_FAST, 
+#ifdef CONFIG_MACH_BCM2708
+        ret = bcm_dma_chan_alloc(BCM_DMA_FEATURE_FAST,
 				(void**)&d->base, &d->irq);
+#else
+	/* TODO - use dmaengine allocate */
+	ret = -1;
+#endif
         if (ret < 0) {
 		d->base = NULL;
 		d->chan = 0;
 		d->irq = 0;
-                dev_err(&master->dev, "couldn't allocate a DMA channel\n");
+                dev_err(&master->dev,
+			"couldn't allocate a DMA channel\n");
                 return ret;
         }
         d->chan = ret;
 	if (handler)
-		dev_info(&master->dev, 
+		dev_info(&master->dev,
 			"DMA channel %d at address %pK with irq %d"
 			" and handler at %pf\n",
 			d->chan, d->base, d->irq,handler);
 	else
-		dev_info(&master->dev, 
+		dev_info(&master->dev,
 			"DMA channel %d at address %pK with irq %d"
 			" and no handler\n",
 			d->chan, d->base, d->irq);
@@ -152,28 +178,14 @@ static int bcm2835dma_allocate_dmachannel(struct spi_master *master,
         return 0;
 }
 
-static void bcm2835dma_release_dmachannel(struct spi_master *master,
-			struct bcm2835_dmachannel *d)
+static void bcm2835dma_release_dma(struct spi_master *master)
 {
-	/* if no base, then we are not configured, so return */
-	if (!d->base)
-                return;
-	/* reset the DMA */
-	writel(BCM2835_DMA_CS_RESET,d->base+BCM2835_DMA_CS);
-	writel(0,d->base+BCM2835_DMA_ADDR);
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 
-	/* release interrupt handler and dma */
-	if (d->handler)
-		free_irq(d->irq,master);
-        bcm_dma_chan_free(d->chan);
+	bcm2835dma_release_dmachannel(master,&bs->dma_tx);
+	bcm2835dma_release_dmachannel(master,&bs->dma_rx);
 
-	/* cleanup structure */
-        d->base = NULL;
-	d->bus_addr=0;
-        d->chan = 0;
-        d->irq = 0;
-	d->handler=NULL;
-	d->desc=NULL;
+	bcm2835dma_release_dmafragment_components(master);
 }
 
 static int bcm2835dma_allocate_dma(struct spi_master *master,
@@ -185,110 +197,20 @@ static int bcm2835dma_allocate_dma(struct spi_master *master,
 	err=bcm2835dma_allocate_dmachannel(
 		master,&bs->dma_tx,bcm2835dma_spi_interrupt_dma_tx,"tx");
 	if (err)
-		return err;
+		goto error;
 	err=bcm2835dma_allocate_dmachannel(
 		master,&bs->dma_rx,NULL,"rx");
 	if (err)
-		return err;
+		goto error;
 
-	/* allocate pool - need to use pdev here */
-	bs->pool=dma_pool_create(
-                "DMA-CB-pool",
-                &pdev->dev,
-                sizeof(struct bcm2835_dma_cb),
-                64,
-                0
-                );
-	if (!bs->pool) {
-		dev_err(&master->dev, "could not allocate DMA-memory pool\n");
-		return -ENOMEM;
-	}
-	/* allocate some pages from pool for "standard" pages */
-	bs->buffer_receive_dummy.addr=
-		dma_pool_alloc(bs->pool,GFP_KERNEL,
-			&bs->buffer_receive_dummy.bus_addr);
-	if (!bs->buffer_receive_dummy.addr)
-		/* TODO: errorhandling */
-		return -ENOMEM;
-
-	bs->buffer_transmit_0x00.addr=
-		dma_pool_alloc(bs->pool,GFP_KERNEL,
-			&bs->buffer_transmit_0x00.bus_addr);
-	if (!bs->buffer_transmit_0x00.addr)
-		/* TODO: errorhandling */
-		return -ENOMEM;
-	memset(bs->buffer_transmit_0x00.addr,0x00,
-		sizeof(struct bcm2835_dma_cb));
-	
-	/* initialize DMA Fragment pools */
-	dma_fragment_cache_initialize(&bs->fragment_composite,
-				"composit fragments",
-				&bcm2835_spi_dmafragment_create_composite,
-				&master->dev,
-				5
-		);
-	dma_fragment_cache_initialize(&bs->fragment_setup_transfer,
-				"setup_spi_plus_transfer",
-				&bcm2835_spi_dmafragment_create_setup_transfer,
-				&master->dev,
-				5
-		);
-	dma_fragment_cache_initialize(&bs->fragment_transfer,
-				"transfer",
-				&bcm2835_spi_dmafragment_create_transfer,
-				&master->dev,
-				3
-		);
-	dma_fragment_cache_initialize(&bs->fragment_cs_deselect,
-				"fragment_cs_deselect",
-				&bcm2835_spi_dmafragment_create_cs_deselect,
-				&master->dev,
-				3
-		);
-	dma_fragment_cache_initialize(&bs->fragment_delay,
-				"fragment_delay",
-				&bcm2835_spi_dmafragment_create_delay,
-				&master->dev,
-				3
-		);
-	dma_fragment_cache_initialize(&bs->fragment_trigger_irq,
-				"fragment_trigger_irq",
-				&bcm2835_spi_dmafragment_create_trigger_irq,
-				&master->dev,
-				3
-		);
-
-	return 0;
+	/* and register the dmafragment_caches */
+	err=bcm2835dma_register_dmafragment_components(master);
+	if (!err)
+		return 0;
+error:
+	bcm2835dma_release_dma(master);
+	return -ENOMEM;
 }
-
-static void bcm2835dma_release_dma(struct spi_master *master)
-{
-	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
-
-	bcm2835dma_release_dmachannel(master,&bs->dma_tx);
-	bcm2835dma_release_dmachannel(master,&bs->dma_rx);
-
-	if (!bs->pool)
-		return;
-
-	dma_pool_free(bs->pool,
-		bs->buffer_transmit_0x00.addr,
-		bs->buffer_transmit_0x00.bus_addr);
-	dma_pool_free(bs->pool,
-		bs->buffer_receive_dummy.addr,
-		bs->buffer_receive_dummy.bus_addr);
-
-	dma_fragment_cache_release(&bs->fragment_composite);
-	dma_fragment_cache_release(&bs->fragment_setup_transfer);
-	dma_fragment_cache_release(&bs->fragment_transfer);
-	dma_fragment_cache_release(&bs->fragment_cs_deselect);
-	dma_fragment_cache_release(&bs->fragment_delay);
-	dma_fragment_cache_release(&bs->fragment_trigger_irq);
-	dma_pool_destroy(bs->pool);
-        bs->pool=NULL;
-}
-
-
 
 irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
 {
@@ -305,7 +227,7 @@ irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
 	 * setting/clearing WAIT_FOR_OUTSTANDING_WRITES
 	 * and we are not using it for the RX path
 	 */
-	writel(BCM2835_DMA_CS_INT, bs->dma_rx.base+BCM2708_DMA_CS);
+	writel(BCM2835_DMA_CS_INT, bs->dma_rx.base+BCM2835_DMA_CS);
 
 	/* release the control block chains until we reach the CB
 	 * this will also call complete
@@ -321,7 +243,7 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 {
 	//struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	int status=-EPERM;
-	
+
 	/* fetch DMA fragment */
 
 	/* and schedule it */
@@ -332,7 +254,8 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 
 
 static void bcm2835dma_set_gpio_mode(u8 pin,u32 mode) {
-#ifdef CONFIG_MACH_BCM2708
+	/* this is a bit of a hack, as there seems to be no official
+	   way of doing this... */
 	/* TODO - PINMUX */
 	u32 *gpio = ioremap(0x20200000, SZ_16K);
 
@@ -344,8 +267,6 @@ static void bcm2835dma_set_gpio_mode(u8 pin,u32 mode) {
 	v |= (mode & 7) << shift;
 	*reg= v;
 	iounmap(gpio);
-
-#endif
 }
 
 static int bcm2835dma_spi_init_pinmode(void) {
@@ -354,22 +275,25 @@ static int bcm2835dma_spi_init_pinmode(void) {
 			DRV_NAME":MISO");
 	if (err) {
 		printk(KERN_ERR DRV_NAME": problems requesting SPI:MISO"
-			" on GPIO %i - err %i\n",BCM2835_SPI_GPIO_MISO,err);
+			" on GPIO %i - err %i\n",BCM2835_SPI_GPIO_MISO,
+			err);
 		return err;
 	}
 	err=gpio_request_one(BCM2835_SPI_GPIO_MOSI,GPIOF_OUT_INIT_HIGH,
 			DRV_NAME":MOSI");
 	if (err) {
 		printk(KERN_ERR DRV_NAME": problems requesting SPI:MOSI"
-			" on GPIO %i - err %i\n",BCM2835_SPI_GPIO_MOSI,err);
-		return err;
+			" on GPIO %i - err %i\n",BCM2835_SPI_GPIO_MOSI,
+			err);
+		goto error_miso;
 	}
 	err=gpio_request_one(BCM2835_SPI_GPIO_SCK,GPIOF_OUT_INIT_HIGH,
 			DRV_NAME":SCK");
 	if (err) {
 		printk(KERN_ERR DRV_NAME": problems requesting SPI:SCK"
-			"on GPIO %i - err %i\n",BCM2835_SPI_GPIO_SCK,err);
-		return err;
+			"on GPIO %i - err %i\n",BCM2835_SPI_GPIO_SCK,
+			err);
+		goto error_mosi;
 	}
 	/* SET modes to ALT0=4 */
 	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_MISO,4);
@@ -377,16 +301,23 @@ static int bcm2835dma_spi_init_pinmode(void) {
 	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_SCK, 4);
 
 	return 0;
+error_mosi:
+	gpio_free(BCM2835_SPI_GPIO_MOSI);
+error_miso:
+	gpio_free(BCM2835_SPI_GPIO_MISO);
+	return err;
 }
 
 static void bcm2835dma_spi_restore_pinmodes(void)
 {
+	/* we assume this will reset the MODE */
 	gpio_free(BCM2835_SPI_GPIO_MISO);
 	gpio_free(BCM2835_SPI_GPIO_MOSI);
 	gpio_free(BCM2835_SPI_GPIO_SCK);
 }
 
-static void bcm2835dma_cleanup_spi_device_data(	struct bcm2835dma_spi_device_data *data)
+static void bcm2835dma_cleanup_spi_device_data(
+	struct bcm2835dma_spi_device_data *data)
 {
 	/* remove from chain */
 	list_del(&data->spi_device_data_chain);
@@ -396,10 +327,12 @@ static void bcm2835dma_cleanup_spi_device_data(	struct bcm2835dma_spi_device_dat
 	kfree(data);
 }
 
-static void bcm2835dma_spi_cleanup(struct spi_device *spi) 
+static void bcm2835dma_spi_cleanup(struct spi_device *spi)
 {
-	/* note that surprisingly this does not get called on driver unload */
-	struct bcm2835dma_spi_device_data *data=dev_get_drvdata(&spi->dev);
+	/* note that surprisingly this does not necessarily
+	   get called on driver unload */
+	struct bcm2835dma_spi_device_data *data
+		= dev_get_drvdata(&spi->dev);
 	/* release the memory and GPIO allocated for the SPI device */
 	if (data) {
 		bcm2835dma_cleanup_spi_device_data(data);
@@ -436,14 +369,17 @@ static int bcm2835dma_spi_setup(struct spi_device *spi) {
 		}
 	}
 
-	/* check gpio for prohibited pins - MISO, MOSI, SCK are not allowed... */
+	/* check gpio for prohibited pins
+	   - MISO, MOSI, SCK are not allowed... */
 	if ((spi->mode & SPI_NO_CS)) {
 		switch (data->cs_gpio) {
 		case BCM2835_SPI_GPIO_MISO:
 		case BCM2835_SPI_GPIO_MOSI:
 		case BCM2835_SPI_GPIO_SCK:
-			dev_err(&spi->dev, "Chipselect GPIO %i is not allowed"
-				" as it is conflicting with the standard SPI lines\n",
+			dev_err(&spi->dev,
+				"Chipselect GPIO %i is not allowed"
+				" as it is conflicting with the"
+				" standard SPI lines\n",
 				data->cs_gpio);
 			err=-EPERM;
 			goto error_free;
@@ -453,19 +389,21 @@ static int bcm2835dma_spi_setup(struct spi_device *spi) {
 
 	/* set the chip_select fields correctly */
 	data->cs_bitfield = ((u32)1) << (data->cs_gpio % 32);
-	/* shift right gpio by 5 bit to get the register offset we need to use*/
-	data->cs_deselect_gpio_reg = 
+	/* shift right gpio by 5 bit to get the
+	   register offset we need to use*/
+	data->cs_deselect_gpio_reg =
 	data->cs_select_gpio_reg = BCM2835_REG_GPIO_OUTPUT_SET_BASE_BUS
 		+ 4 * (data->cs_gpio >> 5);
-	/* and create the name */
+	/* and create the name for the gpio */
 	snprintf(data->cs_name,sizeof(data->cs_name),
 		DRV_NAME":CS%i",spi->chip_select);
 
 	/* based od SPI_CS configure the registers */
 	if (spi->mode & SPI_CS_HIGH) {
 		/* increment the registers accordingly */
-		data->cs_deselect_gpio_reg += (BCM2835_REG_GPIO_OUTPUT_CLEAR_BASE_BUS
-					- BCM2835_REG_GPIO_OUTPUT_SET_BASE_BUS);
+		data->cs_deselect_gpio_reg +=
+			(BCM2835_REG_GPIO_OUTPUT_CLEAR_BASE_BUS
+				- BCM2835_REG_GPIO_OUTPUT_SET_BASE_BUS);
 		/* request the GPIO with correct defaults*/
 		err=gpio_request_one(data->cs_gpio,GPIOF_OUT_INIT_LOW,
 				data->cs_name);
@@ -473,17 +411,18 @@ static int bcm2835dma_spi_setup(struct spi_device *spi) {
 			goto error_gpio;
 	} else {
 		/* set the registers accordingly */
-		data->cs_select_gpio_reg += (BCM2835_REG_GPIO_OUTPUT_CLEAR_BASE_BUS
-					- BCM2835_REG_GPIO_OUTPUT_SET_BASE_BUS);
+		data->cs_select_gpio_reg +=
+			(BCM2835_REG_GPIO_OUTPUT_CLEAR_BASE_BUS
+				- BCM2835_REG_GPIO_OUTPUT_SET_BASE_BUS);
 		/* request the GPIO */
 		err=gpio_request_one(data->cs_gpio,GPIOF_OUT_INIT_HIGH,
 				data->cs_name);
 		if (err)
 			goto error_gpio;
 	}
-	
+
 	/* and the CS register values used to configure SPI */
-	tmp= 
+	tmp=
 		BCM2835_SPI_CS_TA
 	        | BCM2835_SPI_CS_CS_01
 		| BCM2835_SPI_CS_CS_10
@@ -491,19 +430,20 @@ static int bcm2835dma_spi_setup(struct spi_device *spi) {
 		| ((spi->mode & SPI_CPHA) ? BCM2835_SPI_CS_CPHA : 0)
 		;
 	/* the values used to reset SPI FIFOs*/
-	data->spi_cs_reset = tmp 
+	data->spi_cs_reset = tmp
 		| BCM2835_SPI_CS_CLEAR_RX
 		| BCM2835_SPI_CS_CLEAR_TX
 		;
 	/* the values used to reenable DMA transfers */
-	data->spi_cs_set = tmp 
+	data->spi_cs_set = tmp
 		| BCM2835_SPI_CS_DMAEN
 		;
 
 	return 0;
 
 error_gpio:
-	dev_err(&spi->dev,"Error allocating GPIO%i - error %i\n",data->cs_gpio,err);
+	dev_err(&spi->dev,"Error allocating GPIO%i - error %i\n"
+		,data->cs_gpio,err);
 error_free:
 	kfree(data);
 	dev_set_drvdata(&spi->dev,NULL);
@@ -538,20 +478,25 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 
 	master->transfer = bcm2835dma_spi_transfer;
 
+	/* not sure if this is needed for the device tree case */
+	master->dev.coherent_dma_mask = pdev->dev.coherent_dma_mask;
+
 	bs = spi_master_get_devdata(master);
 
 	INIT_LIST_HEAD(&bs->spi_device_data_chain);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res) {
-		dev_err(&pdev->dev, "could not get memory resource\n");
+		dev_err(&pdev->dev,
+			"could not get memory resource\n");
 		err = -ENODEV;
 		goto out_master_put;
 	}
 
 	bs->spi_regs = devm_request_and_ioremap(&pdev->dev, res);
 	if (!bs->spi_regs) {
-		dev_err(&pdev->dev, "could not request/map memory region\n");
+		dev_err(&pdev->dev,
+			"could not request/map memory region\n");
 		err = -ENODEV;
 		goto out_master_put;
 	}
@@ -559,7 +504,9 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 	bs->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(bs->clk)) {
 		err = PTR_ERR(bs->clk);
-		dev_err(&pdev->dev, "could not get clk: %d\n", err);
+		dev_err(&pdev->dev,
+			"could not get clk: %d\n",
+			err);
 		goto out_master_put;
 	}
 
@@ -568,31 +515,40 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 	/* configure pin function for SPI */
 	err = bcm2835dma_spi_init_pinmode();
 	if (err) {
-		dev_err(&pdev->dev, "could not register pins and set the mode: %d\n", err);
+		dev_err(&pdev->dev,
+			"could not register pins and set the mode: %d\n",
+			err);
 		goto out_release_clock;
 	}
-	
+
+	err = spi_register_master(master);
+	if (err) {
+		dev_err(&pdev->dev,
+			"could not register SPI master: %d\n",
+			err);
+		goto out_release_gpio;
+	}
+
 	err = bcm2835dma_allocate_dma(master,pdev);
 	if (err) {
-		dev_err(&pdev->dev, "could not register SPI master: %d\n", err);
+		dev_err(&pdev->dev,
+			"could not register SPI master: %d\n",
+			err);
 		goto out_release_dma;
 	}
 
-	/* initialise the hardware with a reset of the SPI FIFO disabling an existing transfer */
+	/* initialise the hardware with a reset of the SPI FIFO
+	   disabling an existing transfer */
 	writel(
 		BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX,
 		bs->spi_regs+BCM2835_SPI_CS);
 
-	err = spi_register_master(master);
-	if (err) {
-		dev_err(&pdev->dev, "could not register SPI master: %d\n", err);
-		goto out_release_dma;
-	}
-
 	return 0;
 out_release_dma:
 	bcm2835dma_release_dma(master);
-/*out_release_gpio: not used*/
+/*out_release_dev: not used */
+	spi_unregister_master(master);
+out_release_gpio:
 	bcm2835dma_spi_restore_pinmodes();
 out_release_clock:
 	clk_disable_unprepare(bs->clk);
@@ -605,9 +561,8 @@ static int bcm2835dma_spi_remove(struct platform_device *pdev)
 {
 	struct spi_master *master = platform_get_drvdata(pdev);
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
-	spi_unregister_master(master);
 
-	/* release the spi_dev parts that do not get released otherwise 
+	/* release the spi_dev parts that do not get released otherwise
 	 * cleanup does not get called on the spi_device when unloading
 	 * the module
 	 */
@@ -622,15 +577,20 @@ static int bcm2835dma_spi_remove(struct platform_device *pdev)
 	/* release pool - also releases all objects */
 	bcm2835dma_release_dma(master);
 
+	/* in correct sequence */
+	spi_unregister_master(master);
+
 	/* Clear FIFOs, and disable the HW block */
 	if (bs->spi_regs)
 		writel(
-			BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX,
+			BCM2835_SPI_CS_CLEAR_RX
+			| BCM2835_SPI_CS_CLEAR_TX,
 			bs->spi_regs+BCM2835_SPI_CS);
 
 	bcm2835dma_spi_restore_pinmodes();
-	
+
 	clk_disable_unprepare(bs->clk);
+
 	spi_master_put(master);
 
 	return 0;
