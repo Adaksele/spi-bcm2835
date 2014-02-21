@@ -34,25 +34,6 @@ extern bool debug_dma;
 extern int delay_1us;
 static u32 static_zero = 0;
 
-/**
- * bcm2835dma_dump_dma_link - dumping wrapper arround the generic
- * CB controll block
- * @prefix: the prefix on each line
- * @link: the dma_link to dump
- * @flags: some flags
- */
-void bcm2835dma_dump_dma_link(
-	char *prefix,
-	struct dma_link *link,
-	int flags) {
-	bcm2835_dma_cb_dump(
-		prefix,
-		link->device,
-		link->dmablock,
-		link->dmablock_dma,
-		flags);
-}
-
 /*************************************************************************
  * the fragments themselves
  ************************************************************************/
@@ -207,9 +188,9 @@ void bcm2835dma_dump_dma_link(
 #define VARY_HELPER(flag,function,src,dst,extra)			\
 	if (vary & flag) {						\
 		err = spi_message_transform_add(			\
-			&composite->					\
-			composite.message_pre_transform_chain,		\
-			function,src,dst,extra,gfpflags);		\
+			&(composite->					\
+			composite.message_pre_transform_chain),		\
+			&function,src,dst,extra,gfpflags);		\
 	} else {							\
 		err = function(src,dst,extra);				\
 	}								\
@@ -218,8 +199,8 @@ void bcm2835dma_dump_dma_link(
 
 #define VARY_HELPER_POST(flag,function,src,dst,extra)			\
 	err = spi_message_transform_add(				\
-		&composite->composite.message_post_transform_chain,	\
-		function,src,dst,extra,gfpflags);			\
+		&(composite->composite.message_post_transform_chain),	\
+		&function,src,dst,extra,gfpflags);			\
 	if (err)							\
 		goto error;
 
@@ -785,21 +766,19 @@ int bcm2835dma_spi_compo_add_setup_transfer(
 	struct bcm2835dma_spi_device_data *spi_device_data=
 		dev_get_drvdata(&spi->dev);
 	int err=0;
-
 	/* fetch fragment from fragment_cache */
-	struct dma_fragment_setup_transfer* frag
-		= (typeof(frag)) dma_fragment_cache_fetch(
+	struct dma_fragment_setup_transfer* frag =
+		(typeof(frag)) dma_fragment_cache_fetch(
 			&bs->fragment_setup_transfer,
 			gfpflags);
 	if (!frag)
 		return -ENOMEM;
 
 	/* now start setting things up */
-
 	/* the CS part */
-	dma_link_to_cb(frag->cs_select->dmablock)->dst =
+	dma_link_to_cb(frag->cs_select)->dst =
 		spi_device_data->cs_select_gpio_reg;
-	dma_link_to_cb(frag->cs_select->dmablock)->pad[0] =
+	dma_link_to_cb(frag->cs_select)->pad[0] =
 		spi_device_data->cs_bitfield;
 
 	/* the SPI reset part */
@@ -831,6 +810,7 @@ int bcm2835dma_spi_compo_add_setup_transfer(
 		vary,gfpflags);
 	if (err)
 		goto error;
+
 	/* link it to composite and also on DMA level*/
 	link_to_composite((struct dma_fragment *)frag,composite);
 

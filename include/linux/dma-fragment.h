@@ -176,6 +176,34 @@ struct dma_fragment_composite {
 };
 
 /**
+ * dma_fragment_init - init an existing dma_fragment
+ * @fragment: the allocated fragment to initialize
+ */
+static inline int dma_fragment_init(struct dma_fragment_composite *frag) {
+	INIT_LIST_HEAD(&frag->message_pre_transform_chain);
+	INIT_LIST_HEAD(&frag->message_post_transform_chain);
+	return 0;
+}
+
+/**
+ * dma_fragment_composite_dump - dump the given fragment
+ * @fragment: the fragment to dump
+ * @dma_link_dump: the function which to use to dump the dmablock
+ * @flags: the flags for dumping the fragment
+ */
+static inline void dma_fragment_composite_dump(
+	struct dma_fragment_composite *fragment,
+	void (*dma_dump)(
+		char* prefix,
+		struct dma_link *block,
+		int flags),
+	int flags)
+{
+	dma_fragment_dump((struct dma_fragment *)fragment,dma_dump,flags);
+	/* todo - dump pre/post transforms */
+}
+
+/**
  * dma_fragment_composite_add: add a dma_fragment to the composite
  * @fragment: the fragment to add
  * @composite: the composite to which to add

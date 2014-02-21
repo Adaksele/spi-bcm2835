@@ -43,7 +43,9 @@ int spi_message_transform_add(
 	gfp_t            gfpflags
 	)
 {
-	struct spi_message_transform* trans =
+	struct spi_message_transform* trans;
+
+	trans =
 		kmalloc(sizeof(trans),gfpflags);
 	if (!trans)
 		return -ENOMEM;
@@ -93,6 +95,7 @@ struct dma_fragment *spi_dmafragment_create_composite(
 		= (typeof(frag))dma_fragment_alloc(
 			device,gfpflags,sizeof(*frag));
 
+	dma_fragment_init((struct dma_fragment_composite *)frag);
 	frag->last_setup_transfer = NULL;
 	frag->last_transfer = NULL;
 
