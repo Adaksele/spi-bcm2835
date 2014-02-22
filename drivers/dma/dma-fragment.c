@@ -25,81 +25,159 @@
 #include <linux/device.h>
 #include <linux/slab.h>
 
-struct dma_link *dma_link_alloc(struct device *dev,
-				struct dma_pool *pool,
-				u32 dmachannel,
+/**
+ * _tab_indent - helper function to return a tabbed indent string
+ * @indentdepth: the depth/tabs to return  in string
+ * returns string
+ */
+static const char *_tab_indent_string = "\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t";
+static inline const char *_tab_indent(int indent) {
+	indent=sizeof(_tab_indent_string)-indent;
+	if (indent < 0)
+		return _tab_indent_string;
+	else
+		return &_tab_indent_string[indent];
+}
+
+struct dma_link *dma_link_alloc(struct dma_pool *pool,
+				size_t size,
 				gfp_t gfpflags)
 {
-	struct dma_link *block = kmalloc(sizeof(*block),gfpflags);
-	if (!block)
+	struct dma_link *dmalink = kzalloc(
+		max(sizeof(*dmalink),size),
+		gfpflags);
+	if (!dmalink)
 		return NULL;
-	block->dmapool = pool;
-	block->dmachannel = dmachannel;
-	block->device  = dev;
 
-	block->fragment = NULL;
-	INIT_LIST_HEAD(&block->dma_link_chain);
+	INIT_LIST_HEAD(&dmalink->dma_link_list);
 
-	block->dmablock = dma_pool_alloc(block->dmapool,
-					gfpflags,
-					&block->dmablock_dma);
-	if (!block->dmablock) {
-		kfree(block);
+	dmalink->pool = pool;
+
+	dmalink->cb = dma_pool_alloc(
+		dmalink->pool,
+		gfpflags,
+		&dmalink->cb_dma);
+	if (!dmalink->cb) {
+		kfree(dmalink);
 		return NULL;
 	}
 
-	return block;
+	return dmalink;
 }
 EXPORT_SYMBOL_GPL(dma_link_alloc);
 
-void dma_link_free(struct dma_link *block)
+void dma_link_free(struct dma_link *dmalink)
 {
-	if (!block->dmablock)
+	if (!dmalink->cb)
 		return;
 
-	list_del(&block->dma_link_chain);
+	list_del(&dmalink->dma_link_list);
 
-	dma_pool_free(block->dmapool,block->dmablock,block->dmablock_dma);
+	dma_pool_free(dmalink->pool,
+		dmalink->cb,
+		dmalink->cb_dma);
 
-	kfree(block);
+	kfree(dmalink);
 }
+
 EXPORT_SYMBOL_GPL(dma_link_free);
 
-void dma_link_dump(char* prefix,
-		void (*dma_dump)(
-			char *prefix,
-			struct dma_link *link,
-			int flags),
+/**
+ * dma_link_cb_dump_generic - generic dma control block dumper
+ *   only dumps the binary data
+ * @link: the dma_link
+ * @dev: the device to dump
+ * @tindent: the number of tabs indenting
+ */
+static void dma_link_cb_dump_generic(
 		struct dma_link *link,
-		int flags)
+		struct device *dev,
+		int tindent)
 {
-	struct device *dev=link->device;
+	char   buffer[50];
+	char   *ptr;
+	size_t pos, bytesperline = 16;
+	for ( pos = 0, ptr = link->cb ;
+	      pos < link->size;
+	      ptr += bytesperline, pos += bytesperline ) {
+		hex_dump_to_buffer(
+			ptr, min(bytesperline,link->size - pos),
+			bytesperline, 1,
+			buffer,sizeof(buffer),
+			0
+			);
+		dev_printk(KERN_INFO,dev,
+			"%sdata %02x: %s\n",
+			_tab_indent(tindent),
+			pos,buffer
+			);
+	}
+}
 
-	char indent[16];
-	snprintf(indent,sizeof(indent),"%s\t",prefix);
+void dma_link_dump(
+	struct dma_link *link,
+	struct device *dev,
+	int tindent,
+	void (*dma_cb_dump)(struct dma_link *, struct device *, int)
+	)
+{
+	if (!dma_cb_dump)
+		dma_cb_dump = &dma_link_cb_dump_generic;
 
 	dev_printk(KERN_INFO,dev,
-		"%sdma_link at: %pK\n",
-		prefix,link);
-	dma_dump(indent,link,flags);
+		"%sdma_link at:\t%pK\n",
+		_tab_indent(tindent),
+		link);
+	tindent++;
+	dev_printk(KERN_INFO,dev,
+		"%scb_addr:\t%pK\n",
+		_tab_indent(tindent),
+		link->cb);
+	dev_printk(KERN_INFO,dev,
+		"%scb_addr:\t%08lx\n",
+		_tab_indent(tindent),
+		(long unsigned)link->cb_dma);
+	dev_printk(KERN_INFO,dev,
+		"%sdma_pool:\t%pK\n",
+		_tab_indent(tindent),
+		link->pool);
+	dev_printk(KERN_INFO,dev,
+		"%sdma_fragment:\t%pK\n",
+		_tab_indent(tindent),
+		link->fragment);
+	dev_printk(KERN_INFO,dev,
+		"%scb_dma:\t%08lx\n",
+		_tab_indent(tindent),
+		(long unsigned)link->cb_dma);
+	dma_cb_dump(link,dev,tindent);
 }
 EXPORT_SYMBOL_GPL(dma_link_dump);
+
+struct dma_fragment_transform *dma_fragment_transform_alloc(
+	enum dma_fragment_transform_type type,
+	int (*transform)(struct dma_fragment_transform *,void*, void*),
+	void *src, void *dst, void *extra,
+	gfp_t gfpflags) {
+	struct dma_fragment_transform *trans =
+		kmalloc(sizeof(*trans),gfpflags);
+	if (trans)
+		dma_fragment_transform_init(trans,type,transform,
+					src,dst,extra);
+	return trans;
+}
+EXPORT_SYMBOL_GPL(dma_fragment_transform_alloc);
 
 struct dma_fragment *dma_fragment_alloc(
 	struct device *device,
 	gfp_t gfpflags,size_t size)
 {
 	struct dma_fragment *frag;
-	size_t s=max(size,sizeof(*frag));
-	frag=kzalloc(s,gfpflags);
+	size_t s = max( size, sizeof(*frag) );
+	frag=kmalloc(s,gfpflags);
 	if (! frag)
 		return NULL;
 
-	frag->size=s;
-	frag->device=device;
-	INIT_LIST_HEAD(&frag->cache_list);
-	INIT_LIST_HEAD(&frag->dma_link_chain);
-	INIT_LIST_HEAD(&frag->dma_fragment_chain);
+	dma_fragment_init(frag,s);
 
 	return frag;
 }
@@ -109,12 +187,14 @@ void dma_fragment_free(struct dma_fragment *frag)
 {
 	struct dma_link *link;
 
-	list_del(&frag->dma_fragment_chain);
+	/* note: we do not remove from fragment cache */
 
-	while( !list_empty(&frag->dma_link_chain)) {
-		link = list_first_entry(&frag->dma_link_chain,
-					typeof(*link),
-					dma_link_chain);
+	/* remove all the dma_links belonging to us */
+	while( !list_empty(&frag->dma_link_list)) {
+		link = list_first_entry(
+			&frag->dma_link_list,
+			typeof(*link),
+			dma_link_list);
 		dma_link_free(link);
 	}
 
@@ -122,85 +202,121 @@ void dma_fragment_free(struct dma_fragment *frag)
 }
 EXPORT_SYMBOL_GPL(dma_fragment_free);
 
-void dma_fragment_dump(struct dma_fragment *fragment,
-		void (*dma_dump)(
-			char *prefix,
-			struct dma_link *block,
-			int flags),
-		int flags)
-{
+void dma_fragment_dump_generic(
+	struct dma_fragment * fragment,
+	struct device *dev,
+	int tindent) {
+	char   buffer[50];
+	char   *ptr = ((char*)fragment)+sizeof(fragment);
+	int    size = fragment->size - sizeof(fragment);
+	size_t pos, bytesperline = 16;
+	for ( pos = 0;
+	      pos < size;
+	      ptr += bytesperline, pos += bytesperline ) {
+		hex_dump_to_buffer(
+			ptr, min(bytesperline,size - pos),
+			bytesperline, 1,
+			buffer,sizeof(buffer),
+			0
+			);
+		dev_printk(KERN_INFO,dev,
+			"%sdata %02x: %s\n",
+			_tab_indent(tindent),
+			pos,buffer
+			);
+	}
+}
+
+void dma_fragment_dump(
+	struct dma_fragment *fragment,
+	struct device *dev,
+	int tindent,
+	int flags,
+	void (*dma_fragment_dump)(struct dma_fragment *,
+				struct device *,int),
+	void (*dma_cb_dump)(struct dma_link *,
+			struct device *,int)
+	) {
 	struct dma_link *link;
-	struct device *dev=fragment->device;
-	size_t extrasize=fragment->size-sizeof(struct dma_fragment);
+
+	if (!dma_fragment_dump)
+		dma_fragment_dump=&dma_fragment_dump_generic;
+
 	dev_printk(KERN_INFO,dev,
-		"Fragment at: %pK\n",
+		"%sdma_fragment at:\t%pK\n",
+		_tab_indent(tindent),
 		fragment);
+	tindent++;
 	dev_printk(KERN_INFO,dev,
-		"\tcache:\t%pK\n",
+		"%scache:\t%pK\n",
+		_tab_indent(tindent),
 		fragment->cache);
-	if (fragment->cache) {
-		dev_printk(KERN_INFO,dev,
-			"\tcachen:\t%s\n",
-			fragment->cache->dev_attr.attr.name);
-	}
-	/* dump the extra data */
-	if (extrasize) {
-		u32 *ptr = (u32*)((void*)fragment
-				+ sizeof(struct dma_fragment));
-		int i;
-		dev_printk(KERN_INFO,dev,
-			"\textra\tsize: %i\n",
-			extrasize);
-		for( i=0 ; extrasize>0 ; i++ , ptr++ , extrasize-=4) {
-		dev_printk(KERN_INFO,dev,
-			"\t\tdata[%2i]:\t%08x\n",
-			i,*ptr);
-		}
-	}
-	/* dump the fragments in dma_link_chain */
+
+	dma_fragment_dump(fragment,dev,tindent);
+
+	/* dump the individual dma_links */
 	list_for_each_entry(link,
-			&fragment->dma_link_chain,
-			dma_link_chain) {
-		dma_link_dump("\t",dma_dump,link,flags);
+			&fragment->dma_link_list,
+			dma_link_list) {
+		dma_link_dump(link,dev,tindent,dma_cb_dump);
 	}
 }
 EXPORT_SYMBOL_GPL(dma_fragment_dump);
 
-struct dma_fragment *dma_fragment_cache_add(
+#define SYSFS_PREFIX "dma_fragment_cache:"
+static ssize_t dma_fragment_cache_sysfs_show(
+	struct device *, struct device_attribute *, char *buf);
+static ssize_t dma_fragment_cache_sysfs_store(
+	struct device *, struct device_attribute *, const char *, size_t);
+
+int dma_fragment_cache_initialize(
 	struct dma_fragment_cache *cache,
-	gfp_t gfpflags,
-	int toidle)
+	struct device *device,
+	const char* name,
+	struct dma_fragment *(*allocateFragment)(struct device *, gfp_t),
+	int initial_size
+	)
 {
-	unsigned long flags;
+	char *fullname;
+	int i,err;
 
-	struct dma_fragment *frag=cache->allocateFragment(
-		cache->device,
-		gfpflags);
-	if (!frag)
-		return NULL;
+	memset(cache,0,sizeof(struct dma_fragment_cache));
 
-	frag->cache=cache;
+	spin_lock_init(&cache->lock);
 
-	spin_lock_irqsave(&cache->lock,flags);
+	INIT_LIST_HEAD(&cache->active);
+	INIT_LIST_HEAD(&cache->idle);
 
-	/* gather statistics */
-	cache->count_allocated ++;
-	if (gfpflags == GFP_KERNEL)
-		cache->count_allocated_kernel ++;
-	/* add to corresponding list */
-	if (flags && DMA_FRAGMENT_CACHE_TO_IDLE) {
-		list_add(&frag->cache_list,&cache->idle);
-		cache->count_idle++;
-	} else {
-		list_add(&frag->cache_list,&cache->active);
-		cache->count_active++;
+	/* create name */
+	i = sizeof(SYSFS_PREFIX)+strlen(name);
+	fullname = kmalloc(i,GFP_KERNEL);
+	if (!fullname)
+		return -ENOMEM;
+	strncpy(fullname,SYSFS_PREFIX,i);
+	strncat(fullname,name,i);
+
+	cache->device             = device;
+	cache->dev_attr.attr.name = fullname;
+	cache->dev_attr.attr.mode = S_IWUSR | S_IRUGO;
+	cache->dev_attr.show      = dma_fragment_cache_sysfs_show;
+	cache->dev_attr.store     = dma_fragment_cache_sysfs_store;
+	cache->allocateFragment   = allocateFragment;
+
+	/* and expose the statistics on sysfs */
+	err = device_create_file(device, &cache->dev_attr);
+	if (err) {
+		/* duplicate names result in errors */
+		cache->dev_attr.show = NULL;
+		dev_printk(KERN_ERR,cache->device,
+			"duplicate dma_fragment_cache name \"%s\"\n",
+			cache->dev_attr.attr.name);
+		return err;
 	}
 
-	spin_unlock_irqrestore(&cache->lock,flags);
-	/* and return it */
-	return frag;
+	/* now allocate new entries to fill the pool */
+	return dma_fragment_cache_resize(cache,initial_size);
 }
-EXPORT_SYMBOL_GPL(dma_fragment_cache_add);
+EXPORT_SYMBOL_GPL(dma_fragment_cache_initialize);
 
 static ssize_t dma_fragment_cache_sysfs_show(
 	struct device *dev,
@@ -235,7 +351,7 @@ static ssize_t dma_fragment_cache_sysfs_show(
 	return size;
 }
 
-ssize_t dma_fragment_cache_sysfs_resize(
+static ssize_t dma_fragment_cache_sysfs_store(
 	struct device *dev,
 	struct device_attribute *attr,
 	const char *buf, size_t count)
@@ -245,84 +361,38 @@ ssize_t dma_fragment_cache_sysfs_resize(
 	s32 resize;
 	int err;
 
-	err=kstrtos32(buf,10,&resize);
+	err = kstrtos32(buf,10,&resize);
 	if (err)
 		return -EPERM;
 
-	err=dma_fragment_cache_resize(cache,resize);
+	err = dma_fragment_cache_resize(cache,resize);
 	if (err<0)
 		return err;
 
 	return count;
 }
 
-#define SYSFS_PREFIX "dma_fragment_cache:"
-int dma_fragment_cache_initialize(
-	struct dma_fragment_cache *cache,
-	const char* name,
-	struct dma_fragment *(*allocateFragment)(
-		struct device *, gfp_t),
-	struct device *device,
-	int initial_size
-	)
-{
-	char *fullname;
-	int i,err;
-
-	memset(cache,0,sizeof(struct dma_fragment_cache));
-
-	spin_lock_init(&cache->lock);
-	INIT_LIST_HEAD(&cache->active);
-	INIT_LIST_HEAD(&cache->idle);
-
-	/* create name */
-	i=sizeof(SYSFS_PREFIX)+strlen(name);
-	fullname=kmalloc(i,GFP_KERNEL);
-	if (!fullname)
-		return -ENOMEM;
-	strncpy(fullname,SYSFS_PREFIX,i);
-	strncat(fullname,name,i);
-
-	cache->device             = device;
-	cache->dev_attr.attr.name = fullname;
-	cache->dev_attr.attr.mode = S_IWUSR | S_IRUGO;
-	cache->dev_attr.show      = dma_fragment_cache_sysfs_show;
-	cache->dev_attr.store     = dma_fragment_cache_sysfs_resize;
-	cache->allocateFragment   = allocateFragment;
-
-	/* and expose the statistics on sysfs */
-	err = device_create_file(device, &cache->dev_attr);
-	if (err) {
-		/* duplicate names result in errors */
-		cache->dev_attr.show=NULL;
-		dev_printk(KERN_ERR,cache->device,
-			"duplicate dma_fragment_cache name \"%s\"\n",
-			cache->dev_attr.attr.name);
-		return err;
-	}
-
-	/* now allocate new entries to fill the pool */
-	return dma_fragment_cache_resize(cache,initial_size);
-}
-EXPORT_SYMBOL_GPL(dma_fragment_cache_initialize);
-
 int dma_fragment_cache_resize(struct dma_fragment_cache* cache,
-	int size)
+	int resizeby)
 {
 	int i;
 	struct dma_fragment *frag;
 	unsigned long flags;
 
-	if (size == 0)
+	if (resizeby == 0)
 		return 0;
+
+	if ( abs(resizeby) > 1024 )
+		return -EPERM;
+
 	/* add up to size */
-	for (i = 0 ; i < size ; i++) {
+	for (i = 0 ; i < resizeby ; i++) {
 		if (! dma_fragment_cache_add(cache,GFP_KERNEL,1) ) {
 			return -ENOMEM;
 		}
 	}
 	/* remove up to size */
-	for (i = 0 ; i > size ; i--) {
+	for (i = 0 ; i > resizeby ; i--) {
 		spin_lock_irqsave(&cache->lock,flags);
 
 		/* return error on empty */
@@ -347,21 +417,56 @@ int dma_fragment_cache_resize(struct dma_fragment_cache* cache,
 }
 EXPORT_SYMBOL_GPL(dma_fragment_cache_resize);
 
+struct dma_fragment *dma_fragment_cache_add(
+	struct dma_fragment_cache *cache,
+	gfp_t gfpflags,
+	int toidle)
+{
+	unsigned long flags;
+
+	struct dma_fragment *frag =
+		cache->allocateFragment(cache->device,gfpflags);
+	if (!frag)
+		return NULL;
+
+	frag->cache = cache;
+
+	spin_lock_irqsave(&cache->lock, flags);
+
+	/* gather statistics */
+	cache->count_allocated ++;
+	if (gfpflags == GFP_KERNEL)
+		cache->count_allocated_kernel ++;
+	/* add to corresponding list */
+	if (flags && DMA_FRAGMENT_CACHE_TO_IDLE) {
+		list_add(&frag->cache_list, &cache->idle);
+		cache->count_idle++;
+	} else {
+		list_add(&frag->cache_list, &cache->active);
+		cache->count_active++;
+	}
+
+	spin_unlock_irqrestore(&cache->lock, flags);
+	/* and return it */
+	return frag;
+}
+EXPORT_SYMBOL_GPL(dma_fragment_cache_add);
 
 void dma_fragment_cache_release(struct dma_fragment_cache* cache)
 {
 	unsigned long flags;
 	struct dma_fragment *frag;
 
-	spin_lock_irqsave(&cache->lock,flags);
+	spin_lock_irqsave(&cache->lock, flags);
 
 	while( !list_empty(&cache->idle)) {
-		frag = list_first_entry(&cache->idle,struct dma_fragment,
+		frag = list_first_entry(&cache->idle,
+					struct dma_fragment,
 					cache_list);
 		list_del(&frag->cache_list);
 		dma_fragment_free(frag);
 	}
-	cache->count_idle=0;
+	cache->count_idle = 0;
 
 	if (! list_empty(&cache->active))
 		dev_printk(KERN_ERR,cache->device,

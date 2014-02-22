@@ -47,84 +47,6 @@
 	|SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_16
 
 /**
- * spi_message_transform - copies/transforms data from spi_message and
- *   spi_transfers into the DMA structure
- * @message_transform_chain: the list structure
- * @src: the source address from which to fetch the data
- * @dst: the destination address to which to copy the data
- * @extra: some extra data
- * @transformation: the transformation method
- */
-struct spi_message_transform {
-	struct list_head message_transform_chain;
-	int              (*transformation)(void* src, void* dst, void* extra);
-	void             *src;
-	void             *dst;
-	void             *extra;
-};
-
-/**
- * spi_message_transform_add - add a transformation to the list of
- *   message transforms
- * @head: message transform list to which to add
- * @transformation: the transformation function to call
- * @src: 1st argument to transformation function
- * @dst: 2nd argument to transformation function
- * @extra: 3rd argument to transformation function
- * @gfpflags: gfpflags to use during allocation
- */
-int spi_message_transform_add(
-	struct list_head *head,
-	int              (*transformation)(void* src, void* dst, void* extra),
-	void             *src,
-	void             *dst,
-	void             *extra,
-	gfp_t            gfpflags
-	);
-
-/**
- * spi_message_transform_release_all - release all message transformations
- *   from this list freeing the memory
- * @head: message transform list from which to remove all entries
- */
-void spi_message_transform_release_all(struct list_head *head);
-
-/**
- * spi_dma_fragment_composite - a composite structure with some extra data
- * @composite: the main composite structure
- * @last_setup_transfer: the pointer to the last setup_transfer structure
- * @last_transfer: the pointer to the last transfer structure
- *   (may be identical to setup_transfer)
- */
-struct spi_dma_fragment_composite {
-	/* the main composit structure */
-	struct dma_fragment_composite composite;
-	/* additional data */
-	void *last_setup_transfer;
-	void *last_transfer;
-	struct spi_transfer *last_xfer;
-};
-
-/**
- * dma_fragment_composite_dump - dump the given fragment
- * @fragment: the fragment to dump
- * @dma_link_dump: the function which to use to dump the dmablock
- * @flags: the flags for dumping the fragment
- */
-static inline void spi_dma_fragment_composite_dump(
-	struct spi_dma_fragment_composite *fragment,
-	void (*dma_dump)(
-		char* prefix,
-		struct dma_link *block,
-		int flags),
-	int flags)
-{
-	dma_fragment_composite_dump(
-		(struct dma_fragment_composite *)fragment,dma_dump,flags);
-}
-
-
-/**
  * spi_dma_fragment_functions: structure with functions to call
  *   to fill the dma_composite structure with components
  * @fragment_composite_cache: the cache fo dma_fragment_composite_spi objects
@@ -147,42 +69,30 @@ struct spi_dma_fragment_functions {
 	struct dma_fragment_cache* fragment_composite_cache;
 	int (*add_transfer)(struct spi_message *,
 			struct spi_transfer *,
-			struct spi_dma_fragment_composite *,
+			struct dma_fragment *,
 			u32,
 			gfp_t);
 	int (*add_setup_spi_transfer)(struct spi_message *,
 				struct spi_transfer *,
-				struct spi_dma_fragment_composite *,
+				struct dma_fragment *,
 				u32,
 				gfp_t);
 	int (*add_cs_deselect)(struct spi_message *,
 			struct spi_transfer *,
-			struct spi_dma_fragment_composite *,
+			struct dma_fragment *,
 			u32,
 			gfp_t);
 	int (*add_delay)(struct spi_message *,
 			struct spi_transfer *,
-			struct spi_dma_fragment_composite *,
+			struct dma_fragment *,
 			u32,
 			gfp_t);
 	int (*add_trigger_interrupt)(struct spi_message *,
 				struct spi_transfer *,
-				struct spi_dma_fragment_composite *,
+				struct dma_fragment *,
 				u32,
 				gfp_t);
 };
-
-/**
- * spi_dmafragment_create_composite - create a composite DMA fragment
- *   which will contain several other DMA fragments to create a complete
- *   transfer of an SPI message
- *   this is used for both prepared and unprepared messages
- * @device: for which device is this created
- * @gfpflags: which flags should get used for memory allocation purposes
- */
-struct dma_fragment *spi_dmafragment_create_composite(
-	struct device * device,gfp_t gfpflags);
-
 
 /**
  * spi_message_to_dma_fragment - converts a spi_message to a dma_fragment
@@ -194,10 +104,9 @@ struct dma_fragment *spi_dmafragment_create_composite(
  * * we could also create an automatically prepared version
  *     via a spi_message flag (e.g prepare on first use)
  */
-struct spi_dma_fragment_composite *spi_message_to_dma_fragment(
+struct dma_fragment *spi_message_to_dma_fragment(
 	struct spi_message *msg,
 	int flags,
 	gfp_t gfpflags);
-
 
 #endif /* __SPI_DMAFRAGMENT_H */

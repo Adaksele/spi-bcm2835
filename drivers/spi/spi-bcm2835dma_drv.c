@@ -81,25 +81,6 @@ MODULE_PARM_DESC(delay_1us,
  * is lots of memory access ...
  */
 
-/**
- * bcm2835dma_dump_dma_link - dumping wrapper arround the generic
- * CB controll block
- * @prefix: the prefix on each line
- * @link: the dma_link to dump
- * @flags: some flags
- */
-void bcm2835dma_dump_dma_link(
-	char *prefix,
-	struct dma_link *link,
-	int flags) {
-	bcm2835_dma_cb_dump(
-		prefix,
-		link->device,
-		link->dmablock,
-		link->dmablock_dma,
-		flags);
-}
-
 static void bcm2835dma_release_dmachannel(struct spi_master *master,
 			struct bcm2835_dmachannel *d)
 {
@@ -257,6 +238,7 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 {
 	//struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	int status=-EPERM;
+#if 0
 	struct spi_dma_fragment_composite *compo;
 
 	printk(KERN_ERR "HERE\n");
@@ -272,7 +254,7 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 	/* TODO */
 
 	printk(KERN_ERR "THERE\n");
-
+#endif
 	/* and return */
 	return status;
 }
@@ -455,12 +437,12 @@ static int bcm2835dma_spi_setup(struct spi_device *spi) {
 		| ((spi->mode & SPI_CPHA) ? BCM2835_SPI_CS_CPHA : 0)
 		;
 	/* the values used to reset SPI FIFOs*/
-	data->spi_cs_reset = tmp
+	data->spi_reset_fifo = tmp
 		| BCM2835_SPI_CS_CLEAR_RX
 		| BCM2835_SPI_CS_CLEAR_TX
 		;
 	/* the values used to reenable DMA transfers */
-	data->spi_cs_set = tmp
+	data->spi_config = tmp
 		| BCM2835_SPI_CS_DMAEN
 		;
 

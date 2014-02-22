@@ -59,8 +59,8 @@ struct bcm2835dma_dma_status {
 struct bcm2835dma_spi_device_data {
 	struct list_head spi_device_data_chain;
 	/* the SPI Registers for Set/Reset values */
-	u32 spi_cs_set;
-	u32 spi_cs_reset;
+	u32 spi_config;
+	u32 spi_reset_fifo;
 	/* the chip select parameters */
 	dma_addr_t cs_select_gpio_reg;
 	dma_addr_t cs_deselect_gpio_reg;
@@ -104,7 +104,7 @@ irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id);
 static inline struct bcm2835_dma_cb * dma_link_to_cb(
 	struct dma_link *link)
 {
-	return (struct bcm2835_dma_cb *)(link->dmablock);
+	return (struct bcm2835_dma_cb *)(link->cb);
 }
 
 /**
@@ -114,5 +114,5 @@ static inline struct bcm2835_dma_cb * dma_link_to_cb(
  */
 static inline void link_dma_link(struct dma_link *first,
 				struct dma_link * second) {
-	dma_link_to_cb(first)->next = second->dmablock_dma;
+	dma_link_to_cb(first)->next = second->cb_dma;
 }

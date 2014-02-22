@@ -33,27 +33,23 @@ struct dma_fragment_cache;
 
 /**
  * struct dma_link - the linked list of DMA control blocks
- * @dmablock: the pointer to the DMA control-block itself
- *    (void pointer to be of generic use)
- * @dmablock_dma: the dma-buss address of the control block
- * @dmachannel: the dma channel for which this is scheduled
- * @dmapool: from which pool the block has been taken
- * @fragment: the fragment to which we belong
- * @dma_link_chain: the link chain to which we belong
+ * @cb:            the pointer to the DMA control-block
+ * @cb_dma:        the dma-bus address of the control block
+ * @pool:          from which dma_pool the control-block has been taken
+ * @fragment:      the fragment to which we belong
+ * @dma_link_list: the list of linked dma_links to which we belong
  */
-
+struct dma_fragment;
 struct dma_link {
 	/* the control block itself */
-	void                *dmablock;
-	dma_addr_t          dmablock_dma;
-        /* dma channel */
-	u32                 dmachannel;
+	void                *cb;
+	dma_addr_t          cb_dma;
+	size_t              size;
 	/* the pool from which this has been allocated */
-	struct device       *device;
-	struct dma_pool     *dmapool;
+	struct dma_pool     *pool;
 	/* the membership to a fragment */
 	struct dma_fragment *fragment;
-	struct list_head    dma_link_chain;
+	struct list_head    dma_link_list;
 };
 
 /**
@@ -61,12 +57,10 @@ struct dma_link {
  * @dev: the device for which we allocate this.
  *   this typically contains a dma_pool structure somewhere to use)
  * @dmapool: the dma pool from which this is to get allocated
- * @dmachannel: the dma channel on which this is scheduled
  * @gfpflags: the flags to use for allocation
  */
-struct dma_link *dma_link_alloc(struct device *dev,
-				struct dma_pool*pool,
-				u32 dmachannel,
+struct dma_link *dma_link_alloc(struct dma_pool *pool,
+				size_t size,
 				gfp_t gfpflags);
 
 /**
@@ -77,41 +71,112 @@ void dma_link_free(struct dma_link *block);
 
 /**
  * dma_link_dump - dump the dma_link object
- * @prefix: prefix used for output
- * @dma_dump: dump function for the dmablock
- * @block: the dma_link to dump
- * @flags: some flags (for extensions)
+ * @link: the dma_link to dump
+ * @dev: device used for printing
+ * @tindent: the number of tab indents to add
+ * @dma_cb_dump: optional dump function for the dma control block itself
  */
-void dma_link_dump(char* prefix,
-		void (*dma_dump)(
-			char *prefix,
-			struct dma_link *block,
-			int flags),
-		struct dma_link *block,
-		int flags
+void dma_link_dump(
+	struct dma_link *link,
+	struct device *dev,
+	int tindent,
+	void (*dma_cb_dump)(struct dma_link *, struct device *, int)
 	);
 
 /**
- * struct dma_fragment - a list of dma_links with means to link
- *    Fragments quickly
- * @cache: to which fragment cache we belong
- * @cache_list: the list to link the objects in the cache
- * @dma_link_chain: the link chain connecting all the dma_link
- *   objects belonging to this fragment
- * @dma_fragment_chain: a chain of several dma-fragments all belonging
- *   together for a full transaction
- *   - this also means the dma-control-blocks are linked to each other
- * @size: the size of this object
- * @device: the device to which this fragment belongs
+ * dma_fragment_transform_channel - the transform happens during this phase
+ * @DMA_FRAGMENT_TRANSFORM_TYPE_LINK: when linking dma_fragments
+ * @DMA_FRAGMENT_TRANSFORM_TYPE_PRE_EXE: prior to executing the fragment
+ * @DMA_FRAGMENT_TRANSFROM_TYPE_POST_EXE: after executing the fragment
+ */
+enum dma_fragment_transform_type {
+	DMA_FRAGMENT_TRANSFORM_TYPE_LINK     = 0,
+	DMA_FRAGMENT_TRANSFROM_TYPE_PRE_EXE  = 1,
+	DMA_FRAGMENT_TRANSFROM_TYPE_POST_EXE = 2,
+};
+
+/**
+ * dma_fragment_transform - an action taken with certain arguments
+ * @transform_list: list of transforms to get executed in sequence
+ * @extra_transform_list: list of transforms that to get executed
+ *   in sequence
+ * @src: source pointer for transform
+ * @dst: destination pointer for transform
+ * @extra: some extra information
+ * @type: the type of transform
+ */
+struct dma_fragment_transform {
+	struct list_head transform_list;
+	int (*transform)(struct dma_fragment_transform *,
+			void* data1, void* data2);
+	void *src;
+	void *dst;
+	void *extra;
+	enum dma_fragment_transform_type type;
+};
+
+static inline void dma_fragment_transform_init(
+	struct dma_fragment_transform *trans,
+	enum dma_fragment_transform_type type,
+	int (*transform)(struct dma_fragment_transform *,
+			void *, void *),
+	void *src,
+	void *dst,
+	void *extra)
+{
+	INIT_LIST_HEAD(&trans->transform_list);
+	trans->type      = type;
+	trans->transform = transform;
+	trans->src       = src;
+	trans->dst       = dst;
+	trans->extra     = extra;
+}
+
+struct dma_fragment_transform *dma_fragment_transform_alloc(
+	enum dma_fragment_transform_type type,
+	int (*transform)(struct dma_fragment_transform *,void*, void*),
+	void *src,void *dst,void *extra,
+	gfp_t gfpflags);
+
+/**
+ * dma_fragment - a collection of connected dma_links
+ * @size: size of this fragment (may be embedded)
+ * @cache: the dma_fragment_cache to which this fragment belongs
+ * @cache_list: the list inside the dma_fragment_cache
+ * @dma_link_list: the list of dma_links
+ * @link_transform_list: list of tasks that need to get run when linking
+ *   the fragment together
+ * @pre_transform_list: list of tasks that need to get run prior to
+ *   the fragment getting scheduled
+ * @post_transform_list: list of tasks that need to get run after the
+ *   the fragment dma finished.
  */
 struct dma_fragment {
-	struct dma_fragment_cache* cache;
-	struct list_head           cache_list;
-	struct list_head           dma_link_chain;
-	size_t                     size;
-	struct device              *device;
-	struct list_head           dma_fragment_chain;
+	size_t size;
+	void* cache;
+	struct list_head cache_list;
+	struct list_head dma_link_list;
+
+	struct list_head transform_list;
 };
+
+/**
+ * dma_fragment_init - initialize the dma_fragment
+ * @fragment: fragment to initialize
+ * @size: real-size of fragment
+ */
+static inline void dma_fragment_init(struct dma_fragment* fragment,
+				size_t size)
+{
+	size = max( size, sizeof(*fragment) );
+	memset(fragment,0,size);
+	fragment->size=size;
+
+	INIT_LIST_HEAD(&fragment->cache_list);
+	INIT_LIST_HEAD(&fragment->dma_link_list);
+
+	INIT_LIST_HEAD(&fragment->transform_list);
+}
 
 /**
  * dma_fragment_alloc - allocate a new dma_fragment and initialize it empty
@@ -126,108 +191,55 @@ struct dma_fragment* dma_fragment_alloc(
 /**
  * dma_fragment_free - allocate a new dma_fragment and initialize it empty
  * @fragment: the fragment to free
+ * note:
+ *   this call does NOT disconnect from fragment_cache
  */
 void dma_fragment_free(struct dma_fragment *fragment);
 
 /**
- * dma_fragment_add - add DMA controlblock to the fragment
+ * dma_fragment_add_dma_link - add DMA controlblock to the fragment
  * @fragment: the fragment to which to add
  * @dmalink: the link object of the DMA controlblock to add
  */
-static inline void dma_fragment_add(struct dma_fragment *fragment,
+static inline void dma_fragment_add_dma_link(struct dma_fragment *fragment,
 				struct dma_link *dmalink)
 {
-	list_add(
-		&dmalink->dma_link_chain,
-		&fragment->dma_link_chain
-		);
+	list_add(&dmalink->dma_link_list, &fragment->dma_link_list);
+}
+/**
+ * dma_fragment_add_dma_transform - add DMA transform to the fragment
+ * @fragment: the fragment to which to add
+ * @dmalink: the link object of the DMA controlblock to add
+ */
+static inline void dma_fragment_add_dma_fragment_transform(
+	struct dma_fragment *fragment,
+	struct dma_fragment_transform *transform
+	)
+{
+	list_add_tail(&transform->transform_list,
+		&fragment->transform_list);
 }
 
 /**
  * dma_fragment_dump - dump the given fragment
  * @fragment: the fragment to dump
- * @dma_link_dump: the function which to use to dump the dmablock
+ * @tindent: the number of tab indents to add
  * @flags: the flags for dumping the fragment
+ * @dma_link_dump: the function which to use to dump the dmablock
  */
 void dma_fragment_dump(struct dma_fragment *fragment,
-		void (*dma_dump)(
-			char* prefix,
-			struct dma_link *block,
-			int flags),
-		int flags);
+		struct device *dev,
+		int tindent,
+		int flags,
+		void (*dma_fragment_dump)(struct dma_fragment *,
+					struct device *,int),
+		void (*dma_cb_dump)(struct dma_link *,
+				struct device *,int)
+	);
 
 /**
- * dma_fragment_composite - this is a composit dma fragment, that combines
- *   several fragments to make up a full SPI transfer
- *   it can be a prepared version, in which case we also run the
- *   message transforms
- * @fragment: the normal dma_fragment
- * @is_prepared: flags that the dma_fragment is prepared already
- * @message_pre_transform_chain: list of transforms to do prior
- *   to scheduling the dma fragment
- * @message_post_transform_chain: list of transforms to do after
- *   the DMA has finished
- */
-struct dma_fragment_composite {
-	struct dma_fragment fragment;
-	int is_prepared;
-	struct list_head    message_pre_transform_chain;
-	struct list_head    message_post_transform_chain;
-};
-
-/**
- * dma_fragment_init - init an existing dma_fragment
- * @fragment: the allocated fragment to initialize
- */
-static inline int dma_fragment_init(struct dma_fragment_composite *frag) {
-	INIT_LIST_HEAD(&frag->message_pre_transform_chain);
-	INIT_LIST_HEAD(&frag->message_post_transform_chain);
-	return 0;
-}
-
-/**
- * dma_fragment_composite_dump - dump the given fragment
- * @fragment: the fragment to dump
- * @dma_link_dump: the function which to use to dump the dmablock
- * @flags: the flags for dumping the fragment
- */
-static inline void dma_fragment_composite_dump(
-	struct dma_fragment_composite *fragment,
-	void (*dma_dump)(
-		char* prefix,
-		struct dma_link *block,
-		int flags),
-	int flags)
-{
-	dma_fragment_dump((struct dma_fragment *)fragment,dma_dump,flags);
-	/* todo - dump pre/post transforms */
-}
-
-/**
- * dma_fragment_composite_add: add a dma_fragment to the composite
- * @fragment: the fragment to add
- * @composite: the composite to which to add
- */
-static inline void dma_fragment_composite_add(
-	struct dma_fragment *fragment,
-	struct dma_fragment_composite *composite)
-{
-	list_add(&fragment->dma_fragment_chain,
-		&composite->fragment.dma_fragment_chain);
-}
-
-/**
- * dma_fragment_composite_remove: remove a dma_fragment from a composite
- */
-static inline void dma_fragment_composite_remove(
-	struct dma_fragment* fragment)
-{
-	list_del_init(&fragment->dma_fragment_chain);
-	INIT_LIST_HEAD(&fragment->dma_fragment_chain);
-}
-
-/**
- * struct dma_fragment_cache - a cache of several fragments
+ * struct dma_fragment_cache - cache of several dma_fragments
+ *   used to avoid setup costs of memory allocation and initialization
  * @device: the device to which this cache belongs
  * @dev_attr: the device attributes of this cache (includes the name)
  * @lock: lock for this structure
@@ -241,14 +253,17 @@ static inline void dma_fragment_composite_remove(
  * @allocateFragment: the allocation code for fragments
  */
 struct dma_fragment_cache {
+	/* the device and device_attribute used for sysfs */
 	struct device      *device;
 	struct device_attribute dev_attr;
 
 	spinlock_t         lock;
 
+	/* idle/active list */
 	struct list_head   active;
 	struct list_head   idle;
 
+	/* the counters exposed via sysfs */
 	u32                count_active;
 	u32                count_idle;
 	u32                count_allocated;
@@ -256,26 +271,26 @@ struct dma_fragment_cache {
 	unsigned long      count_fetched;
 	u32                count_removed;
 
-	struct dma_fragment *(*allocateFragment)(struct device *,gfp_t);
+	/* allocation function */
+	struct dma_fragment *(*allocateFragment)(struct device *, gfp_t);
 };
 
 /**
- * dma_fragment_cache_initialize: initialize the DMA Fragment cache
- * @cache: the cache to initialize
- * @name: name of cache
- * @allocateFragment: callback used to allocate a new fragment
- *       initilaizing it with generic values that are not changed
- * @device: the device for which we do this
- * @initial_size: the initial size of the pool
- * note this needs to get run in "normal" context
+ * dma_fragment_cache_initialize - initialize a dma_fragment cache
+ * @cache:            the cache to initialize
+ * @device:           the device for which we run this cache
+ * @name:             the identifier of the dma_fragment_cache
+ * @allocateFragment: the fragment allocation/initialization function
+ * @initial_size:     the initial size of the cache
  */
-int dma_fragment_cache_initialize(struct dma_fragment_cache *cache,
-				const char *name,
-				struct dma_fragment *(*allocateFragment)(
-					struct device *, gfp_t),
-				struct device *device,
-				int initial_size
+int dma_fragment_cache_initialize(
+	struct dma_fragment_cache *cache,
+	struct device *device,
+	const char *name,
+	struct dma_fragment *(*allocateFragment)(struct device *, gfp_t),
+	int initial_size
 	);
+
 /**
  * dma_fragment_cache_release: release the DMA Fragment cache
  * @cache: the cache to release
@@ -290,19 +305,21 @@ void dma_fragment_cache_release(struct dma_fragment_cache *cache);
  * @gfpflags: the flags used for allocation
  * @flags: some allocation flags.
  */
+#define DMA_FRAGMENT_CACHE_TO_IDLE (1<<0)
 struct dma_fragment *dma_fragment_cache_add(
 	struct dma_fragment_cache *cache,
 	gfp_t gfpflags,
 	int flags);
-#define DMA_FRAGMENT_CACHE_TO_IDLE (1<<0)
 
 /**
- * dma_fragment_cache_resize - adds/removes count items to/from cache
- * @cache: the cache to operate on
- * @size: thenumber of objects to add (negative to remove
+ * dma_fragment_cache_resize - add/remove items from the idle list
+ * @cache: the cache to resize
+ * @resizeby: increase/decrease the number of items in idle by this number
  */
-int dma_fragment_cache_resize(struct dma_fragment_cache* cache,
-			int size);
+int dma_fragment_cache_resize(
+	struct dma_fragment_cache *cache,
+	int resizeby
+	);
 
 /**
  * dma_fragment_cache_fetch - fetch an object from dma_fragment_cache
