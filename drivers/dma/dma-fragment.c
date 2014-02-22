@@ -154,14 +154,15 @@ void dma_link_dump(
 EXPORT_SYMBOL_GPL(dma_link_dump);
 
 struct dma_fragment_transform *dma_fragment_transform_alloc(
-	enum dma_fragment_transform_type type,
-	int (*transform)(struct dma_fragment_transform *,void*, void*),
+	int (*transform)(struct dma_fragment_transform *,
+			struct dma_fragment *, void *),
 	void *src, void *dst, void *extra,
+	size_t size,
 	gfp_t gfpflags) {
 	struct dma_fragment_transform *trans =
-		kmalloc(sizeof(*trans),gfpflags);
+		kzalloc(max(size,sizeof(*trans)),gfpflags);
 	if (trans)
-		dma_fragment_transform_init(trans,type,transform,
+		dma_fragment_transform_init(trans,transform,
 					src,dst,extra);
 	return trans;
 }

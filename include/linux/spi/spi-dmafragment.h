@@ -34,32 +34,13 @@
 #define SPI_OPTIMIZE_VARY_RX                   (1<<1)
 #define SPI_OPTIMIZE_VARY_FRQUENCY             (1<<2)
 #define SPI_OPTIMIZE_VARY_DELAY                (1<<3)
-#define SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_1    (1<<4)
-#define SPI_OPTIMIZE_VARY_LENGTH            \
-	SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_1
-#define SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_4    (1<<5) \
-	| SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_1
-#define SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_8    (1<<6) \
-	| SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_4
-#define SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_16   (1<<7) \
-	| SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_8
-#define SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_32   (1<<8) \
-	|SPI_OPTIMIZE_VARY_LENGTH_MULTIPLE_16
+#define SPI_OPTIMIZE_VARY_LENGTH               (1<<4)
 
 /**
  * spi_dma_fragment_functions: structure with functions to call
  *   to fill the dma_composite structure with components
  * @fragment_composite_cache: the cache fo dma_fragment_composite_spi objects
  *   that can get used/reused
- * @add_setup_spi_transfer: the function to setup SPI correctly
- *   (including CS,...) and initiate the first transfer this also gets
- *   called whenever something important changes (like bits, speed,...)
- * @add_transfer: the function to schedule a single SPI transfer
- *   (transmit/receive)
- * @add_cs_deselect: the function to deselect CS and an (optinal) delay prior
-     to the CS - may trigger a subsequent setup_spi for the next transfer.
- * @add_delay: function that adds a delay of delay_usec
- * @add_trigger_interrupt: function that adds triggering an interrupt
  * Notes:
  * * right now we assume that the master_device_data contains this structure
  *   right at the first address - that is until we get this structure into
@@ -67,32 +48,28 @@
  */
 struct spi_dma_fragment_functions {
 	struct dma_fragment_cache* fragment_composite_cache;
-	int (*add_transfer)(struct spi_message *,
-			struct spi_transfer *,
-			struct dma_fragment *,
-			u32,
-			gfp_t);
-	int (*add_setup_spi_transfer)(struct spi_message *,
-				struct spi_transfer *,
-				struct dma_fragment *,
-				u32,
-				gfp_t);
-	int (*add_cs_deselect)(struct spi_message *,
-			struct spi_transfer *,
-			struct dma_fragment *,
-			u32,
-			gfp_t);
-	int (*add_delay)(struct spi_message *,
-			struct spi_transfer *,
-			struct dma_fragment *,
-			u32,
-			gfp_t);
-	int (*add_trigger_interrupt)(struct spi_message *,
-				struct spi_transfer *,
-				struct dma_fragment *,
-				u32,
-				gfp_t);
 };
+
+struct spi_merged_dma_fragments {
+	struct dma_fragment fragment;
+
+	struct spi_message *message;
+	struct spi_transfer *transfer;
+
+	u32 vary_mask;
+
+	struct dma_link *link_txdma_next;
+	u32 *total_length;
+};
+
+static inline struct dma_fragment *spi_merged_dma_fragments_alloc(
+	struct device *device,gfp_t gfpflags)
+{
+	return dma_fragment_alloc(device,
+				sizeof(struct spi_merged_dma_fragments),
+				gfpflags);
+}
+
 
 /**
  * spi_message_to_dma_fragment - converts a spi_message to a dma_fragment

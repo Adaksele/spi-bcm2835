@@ -47,21 +47,28 @@ extern int delay_1us;
  */
 #define THIS_BCM2835_DMA_CB_MEMBER_DMA_ADDR(member)			\
 	( link->cb_dma + offsetof(struct bcm2835_dma_cb,member))
-
 /**
- * START_CREATE_FRAGMENT_ALLOCATE - macro that contains repetitive code
- *   used by all allocate functions
- * @struct_name: name of structure to allocate as frag
+ * START_CREATE_FRAGMENT_COMMON- macro that contains repetitive
+ *   variable definitions used by all allocate functions
+ *    (a bit separated to avoid some warnings)
+ * note: no semicolon for the last define, as we run into compiler
+ *   warnings otherwise when it sees ";;" and then some more variable
+ *   definitions and then complains about "mixed declaration and code"
  */
 #define START_CREATE_FRAGMENT_COMMON()					\
 	struct spi_master * master = (struct spi_master *)device;	\
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);	\
 	struct dma_pool *pool = bs->pool;				\
 	struct dma_link *link;						\
-	struct bcm2835_dma_cb *cb;
+	struct bcm2835_dma_cb *cb
 
-#define START_CREATE_FRAGMENT_ALLOCATE(struct_name)			\
-	START_CREATE_FRAGMENT_COMMON()					\
+/**
+ * START_CREATE_FRAGMENT_ALLOCATE - macro that contains repetitive code
+ *   used by all allocate functions forfragment allocation
+ * @struct_name: name of structure to allocate as frag
+ */
+
+#define START_CREATE_FRAGMENT_COMMON_ALLOCATE(struct_name)		\
 	struct struct_name *frag =					\
 		(struct struct_name *) dma_fragment_alloc(		\
 			device,gfpflags,				\
@@ -70,11 +77,22 @@ extern int delay_1us;
 		return NULL;
 
 /**
+ * START_CREATE_FRAGMENT_ALLOCATE - macro that contains repetitive code
+ *   used by most allocate functions
+ * @struct_name: name of structure to allocate as frag
+ */
+#define START_CREATE_FRAGMENT_ALLOCATE(struct_name)			\
+	START_CREATE_FRAGMENT_COMMON();					\
+	START_CREATE_FRAGMENT_COMMON_ALLOCATE(struct_name);
+
+/**
  * END_CREATE_FRAGMENT_ALLOCATE - macro that contains repetitive code
  *   used by all alloc functions
  */
 #define END_CREATE_FRAGMENT_ALLOCATE()			\
-	return (struct dma_fragment*)frag;	\
+	dma_fragment_set_default_links(			\
+		(struct dma_fragment*)frag);		\
+	return (struct dma_fragment*)frag;		\
 error:							\
         dma_fragment_free((struct dma_fragment*)frag);	\
 	return NULL;
@@ -105,19 +123,16 @@ error:							\
 
 static inline int bcm2835dma_schedule_fragment_transform(
 	struct dma_fragment *frag,
-	enum dma_fragment_transform_type type,
-	int (*transform)(struct dma_fragment_transform *,
-                        void* data1, void* data2),
-	size_t offset,
+	int (*transformer)(struct dma_fragment_transform *,
+			struct dma_fragment *frag, void *data),
+	void *src, void *dst, void *extra,
 	gfp_t gfpflags)
 {
 	struct dma_fragment_transform *trans =
 		dma_fragment_transform_alloc(
-			type,transform,
-			(void*) offset,
-			frag,
-			NULL,
-			gfpflags
+			transformer,
+			src,dst,extra,
+			0,gfpflags
 			);
 	if (trans) {
 		dma_fragment_add_dma_fragment_transform(
@@ -127,57 +142,46 @@ static inline int bcm2835dma_schedule_fragment_transform(
 		return 1;
 }
 
-static int bcm2835dma_fragment_transform_spi(
+static int bcm2835dma_fragment_transform_spi_data_offset(
 	struct dma_fragment_transform * transform,
-	void *data1, void *data2)
+	struct dma_fragment *fragtocast, void *vp)
 {
-	struct spi_message *msg = data1;
-	/* struct spi_transfer *xfer = data2; */
-	struct spi_device *spi = msg->spi;
-	struct bcm2835dma_spi_device_data *data
-                = dev_get_drvdata(&spi->dev);
-	memcpy(transform->dst,
-		((char *)data)+(u32)transform->src,
-		4);
+	/* the merged fragment */
+	struct spi_merged_dma_fragments *merged_frag =
+		(typeof(merged_frag)) vp;
+	/* the dma_fragment to chain */
+	struct dma_fragment *frag =
+		(typeof(frag)) fragtocast;
+
+	/* the spi device */
+	struct spi_device *spi = merged_frag->message->spi;
+
+	/* pointer to spi_device_data as a char pointer*/
+	char *base=dev_get_drvdata(&spi->dev);
+	base += (u32)transform->src;
+	*((u32*)transform->dst) = *((u32*)(base));
 	return 0;
 }
 
 #define SPI(field,value) _SPI(field,value)
 #define _SPI(field,value)						\
 	if (bcm2835dma_schedule_fragment_transform(			\
-			&frag->fragment,				\
-			DMA_FRAGMENT_TRANSFORM_TYPE_LINK,		\
-			bcm2835dma_fragment_transform_spi,		\
+			(struct dma_fragment*)frag, /* dirty cast */	\
+			/* assuming the fragment is at the beginning */	\
+			/* of the structure - needed for simplicity */	\
+			bcm2835dma_fragment_transform_spi_data_offset,	\
+			(void*)						\
 			offsetof(struct bcm2835dma_spi_device_data,	\
 				value),					\
+			&((struct bcm2835_dma_cb*)link->cb)->field,	\
+			NULL,						\
 			gfpflags)					\
 		)							\
 		goto error;
 
-static int bcm2835dma_fragment_transform_txdma(
-	struct dma_fragment_transform * transform,
-	void *data1, void *data2)
-{
-	struct spi_message *msg = data1;
-	/* struct spi_transfer *xfer = data2; */
-	struct spi_master *master = msg->spi->master;
-	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
-
-	*((u32*)transform->dst) = bs->dma_tx.bus_addr
-		+ (u32)transform->src;
-
-	return 0;
-}
-
-#define TXDMA(field,offset) _TXDMA(field,offset)
-#define _TXDMA(field,offset)						\
-	if (bcm2835dma_schedule_fragment_transform(			\
-			&frag->fragment,				\
-			DMA_FRAGMENT_TRANSFORM_TYPE_LINK,		\
-			bcm2835dma_fragment_transform_txdma,		\
-			offset,						\
-			gfpflags))					\
-		goto error;
+/* note: we may have this information when creating the fragment,
+   so no real need, if we have the information at that time available */
+#define TXDMA(field,offset) cb->field = bs->dma_tx.bus_addr+offset
 
 /* these vary messages */
 #define VARYMSG(a,b)
@@ -186,51 +190,82 @@ static int bcm2835dma_fragment_transform_txdma(
 #define IGNORE(...)
 
 /*------------------------------------------------------------------------
- * simple allocator for merged fragments
- *----------------------------------------------------------------------*/
-static struct dma_fragment *bcm2835dma_spi_create_fragment_merged(
-	struct device *device,gfp_t gfpflags)
-{
-	return dma_fragment_alloc(device,0,gfpflags);
-}
-
-/*------------------------------------------------------------------------
  * allocator for transfers
  *----------------------------------------------------------------------*/
-struct dma_fragment_transfer_rxtx {
-	/* the individual objects */
-	struct dma_link     *rx;
-	struct dma_link     *tx;
+struct dma_fragment_transfer {
+	struct dma_fragment fragment;
+	struct dma_link     *xfer_rx;
+	struct dma_link     *xfer_tx;
 };
 
 static int bcm2835dma_spi_create_fragment_transfer_common(
-	struct dma_fragment_transfer_rxtx *frag,
+	struct dma_fragment_transfer *frag,
 	struct device *device,
 	gfp_t gfpflags)
 {
 	START_CREATE_FRAGMENT_COMMON();
-	if (0==1)
-		goto error;
+	/* the rx transfer - equivalent to:
+	 * for (i=0 ; i<xfer->length; i++)
+	 *   xfer->rx_buf[i] = readl(BCM2835_SPI_FIFO);
+	 * of 0 - in case the buffer is empty
+	 */
+	ADD_DMA_LINK_TO_FRAGMENT(xfer_rx);
+	VARYXFER(ti,    xfer.rx_addr);
+	FIXED(src,      (BCM2835_SPI_BASE_BUS + BCM2835_SPI_FIFO));
+	VARYXFER(dst,    xfer.rx_addr);
+	VARYXFER(length,xfer.length);
+
+	/* the tx transfer - equivalent to:
+	 * for (i=0 ; i<xfer->length; i++)
+	 *   writel(xfer->tx_buf[i],BCM2835_SPI_FIFO);
+	 * of 0 - in case the buffer is empty
+	 */
+	ADD_DMA_LINK_TO_FRAGMENT(xfer_tx);
+	VARYXFER(ti,    xfer.tx_addr);
+	VARYXFER(src,    xfer.tx_addr);
+	FIXED(dst,      (BCM2835_SPI_BASE_BUS + BCM2835_SPI_FIFO));
+	VARYXFER(length,xfer.length);
+	FIXED(pad[0],   0); /* in case we have no pointer, so use this */
+
 	return 0;
 error:
 	return 1;
 }
 
-
-struct dma_fragment_transfer {
-	struct dma_fragment fragment;
-	struct dma_fragment_transfer_rxtx transfer;
-};
+static int bcm2835dma_fragment_transform_linktx(
+	struct dma_fragment_transform * transform,
+	struct dma_fragment *fragtocast, void *vp);
 
 static struct dma_fragment *bcm2835dma_spi_create_fragment_transfer(
 	struct device *device,gfp_t gfpflags)
 {
-	START_CREATE_FRAGMENT_ALLOCATE(dma_fragment_transfer);
+	START_CREATE_FRAGMENT_COMMON_ALLOCATE(dma_fragment_transfer);
 	if (
 		bcm2835dma_spi_create_fragment_transfer_common(
-			&frag->transfer,device, gfpflags)
+			frag,device, gfpflags)
 		)
 		goto error;
+	/* need to add special linktos for the case where we can not
+	   have start and end being in the same dma channel
+	   (relevant for transfers with only 2 DMA CBs on 2 channels)
+	   in this case we link the RX DMA so we can only use the
+	   rx transfer
+	 */
+	frag->fragment.link_head = frag->xfer_rx;
+	frag->fragment.link_tail = frag->xfer_rx;
+
+	/* we also need to link the tx_channel to the previous, but as
+	   this only happens during dma-fragment linking, we need to
+	   schedule it
+	 */
+	if (bcm2835dma_schedule_fragment_transform(
+			&frag->fragment,
+			bcm2835dma_fragment_transform_linktx,
+			NULL,NULL,NULL,
+			gfpflags)
+		)
+		goto error;
+
 
 	END_CREATE_FRAGMENT_ALLOCATE();
 }
@@ -239,9 +274,7 @@ static struct dma_fragment *bcm2835dma_spi_create_fragment_transfer(
  * allocator for setting up spi and transfer
  *----------------------------------------------------------------------*/
 struct dma_fragment_config_spi_transfer {
-	struct dma_fragment fragment;
-	/* the rx/tx structure */
-	struct dma_fragment_transfer_rxtx transfer;
+	struct dma_fragment_transfer fragment;
 	/* additional data */
 	struct dma_link     *cs_select;
 	struct dma_link     *reset_spi_fifo;
@@ -336,41 +369,165 @@ struct dma_fragment *bcm2835dma_spi_create_fragment_config_spi_transfer(
 	/* the Transfer portion is a bit tricky...
 	 * so most of the varies will get managed by a specific transform
 	 */
-
-	/* and the tx transfer - equivalent to:
-	 * for (i=0 ; i<xfer->length; i++)
-	 *   writel(xfer->tx_buf[i],BCM2835_SPI_FIFO);
-	 * of 0 - in case the buffer is empty
-	 */
-	ADD_DMA_LINK_TO_FRAGMENT(transfer.tx);
-	/* we can not link here in a normal way
+	if (
+		bcm2835dma_spi_create_fragment_transfer_common(
+			&frag->fragment,device, gfpflags)
+		)
+		goto error;
+	/* we can not link tx here in a normal way
 	 * but we have to assign it to pad0 instead...
 	 */
 	((struct bcm2835_dma_cb *)(frag->set_tx_dma_next->cb))
-		->pad[0]=link->cb_dma;
-	VARYXFER(ti,    xfer.tx_addr);
-	VARYXFER(src,    xfer.tx_addr);
-	FIXED(dst,      (BCM2835_SPI_BASE_BUS + BCM2835_SPI_FIFO));
-	VARYXFER(length,xfer.length);
-	FIXED(pad[0],   0); /* in case we have no pointer, so use this */
+		->pad[0]=frag->fragment.xfer_tx->cb_dma;
 
-	/* and the rx transfer - equivalent to:
-	 * for (i=0 ; i<xfer->length; i++)
-	 *   xfer->rx_buf[i] = readl(BCM2835_SPI_FIFO);
-	 * of 0 - in case the buffer is empty
-	 */
-	ADD_DMA_LINK_TO_FRAGMENT(transfer.rx);
+	/* and we need to link xfer_rx to the correct dma */
+	link = frag->fragment.xfer_rx;
 	LINKTO(start_tx_dma);
-	VARYXFER(ti,xfer.rx_addr);
-	FIXED(src,      (BCM2835_SPI_BASE_BUS + BCM2835_SPI_FIFO));
-	VARYXFER(dst,    xfer.rx_addr);
-	VARYXFER(length,xfer.length);
 
-
+	/* we also need to configure the link for a subsequent transfer */
 
 	/* TODO: mark it as a single transfer */
 
 	END_CREATE_FRAGMENT_ALLOCATE();
+}
+
+/*------------------------------------------------------------------------
+ * helper transforms for config_transfer and transfer
+ *----------------------------------------------------------------------*/
+
+static int bcm2835dma_fragment_transform_linktx(
+	struct dma_fragment_transform * transform,
+	struct dma_fragment *fragtocast, void *vp)
+
+{
+	/* the merged fragment */
+	struct spi_merged_dma_fragments *merged_frag =
+		(typeof(merged_frag)) vp;
+
+	/* the dma_fragment_transfer to chain */
+	struct dma_fragment_transfer *frag =
+		(typeof(frag)) fragtocast;
+
+	/* src is defining if we are a setup_transfer or not */
+	struct dma_fragment_config_spi_transfer *setup = transform->src;
+
+	/* the info about the current message and transfer */
+	struct spi_message  *mesg = merged_frag -> message;
+	struct spi_transfer *xfer = merged_frag -> transfer;
+
+	/* set the effective vary flags */
+	u32 vary = 0; /* (xfer->var & merged_frag->vary_mask) */
+
+	/* link already assigned to tx */
+	struct dma_link *link_tx=frag->xfer_tx;
+	struct bcm2835_dma_cb *cb_tx = (struct bcm2835_dma_cb *)link_tx->cb;
+	struct dma_link *link_rx=frag->xfer_rx;
+	struct bcm2835_dma_cb *cb_rx = (struct bcm2835_dma_cb *)link_rx->cb;
+
+	/* link the fragments */
+	if (merged_frag->link_txdma_next) {
+		((struct bcm2835_dma_cb *)(
+                        merged_frag->link_txdma_next->cb))->next =
+			link_tx->cb_dma;
+	}
+	/* link this one against 0 - just in case we are ther last one */
+	cb_tx->next = 0;
+
+	/* need to reset total length if we have started */
+	if (setup) {
+		merged_frag->total_length =
+			&((struct bcm2835_dma_cb *)
+				setup->config_clock_length->cb)->pad[1];
+		*merged_frag->total_length = 0;
+	}
+	/* check fixed->vary and vary->fixed situations -
+	   also there is an issue with resetting the total xfer
+	 */
+
+	/* first handle length vary */
+	if (vary & SPI_OPTIMIZE_VARY_LENGTH) { /* the case of vary */
+		/* we always reset SPI after such a transfer,
+		 * but we allow the one before to be of fixed length!
+		 */
+		merged_frag -> link_txdma_next = NULL;
+		/* if there is a value in total_length, then this means:
+		   we have had a fixed transfer previously,
+		   so we do not start at 0 from the transfer,
+		   thus we need to set it to this value via the transforms
+		*/
+		if (*merged_frag->total_length)
+			/* TODO: schedule transform that is setting
+			   * value at merged_frag->total_length to the
+			   * value so far (=*merged_frag->total_length)
+			   */
+			*merged_frag->total_length *=1 ;
+		/* schedule copy add */
+	} else { /* the static case */
+		/* if length is a multiple of 4, then allow link with next */
+		merged_frag -> link_txdma_next =
+			(xfer->len % 4) ? NULL : link_tx;
+		/* copy length to rx/tx */
+		cb_rx->length = xfer->len;
+		cb_tx->length = xfer->len;
+		*(merged_frag->total_length) += xfer->len;
+	}
+
+	/* now handle the xfer cases */
+	if (vary & (SPI_OPTIMIZE_VARY_TX|SPI_OPTIMIZE_VARY_RX)) {
+		/* schedule the setup */
+	} else {
+		/* call here immediately */
+	}
+	/* in both cases we need to set up transforms that unmap */
+	if (mesg->is_dma_mapped) {
+		/* schedule unmap */
+	}
+#if 0
+ {
+
+		} else {
+			if (xfer->tx_buff) {
+				cb_tx->src = tx_buff;
+				cb_tx->ti  = BCM2835_DMA_TI_WAIT_RESP
+					| BCM2835_DMA_TI_NO_WIDE_BURSTS
+					| BCM2835_DMA_TI_S_INC;
+			} else  {
+				cb_tx->src = TODO;
+				cb_tx->ti = BCM2835_DMA_TI_WAIT_RESP
+					| BCM2835_DMA_TI_NO_WIDE_BURSTS
+					| BCM2835_DMA_TI_S_IGNORE;
+			}
+		}
+	} else {
+		/* similar to the above, but we have to dma_map and more */
+		return -1;
+	}
+
+
+	/* TODO - all the transfers which are vary related */
+	if (merged_frag->vary_mask) {
+		return -EPERM;
+	} else {
+
+		if (mesg->is_dma_mapped) {
+			if (xfer->tx_dma) {
+				((struct bcm2835_dma_cb *)frag->xfer_tx->cb)
+					-> src = xfer->tx_dma;
+			} else {
+				((struct bcm2835_dma_cb *)frag->xfer_tx->cb)
+					-> src =
+					( link->cb_dma + offsetof(struct bcm2835_dma_cb,member));
+xfer->tx_dma;
+			}
+		} else {
+		}
+		if (
+
+
+	/* and set it up as the next one */
+	merged_frag->link_txdma_next = frag->xfer_tx;
+#endif
+	return 0;
 }
 
 /*------------------------------------------------------------------------
@@ -458,7 +615,7 @@ int bcm2835dma_register_dmafragment_components(
 		&bs->fragment_composite,
 		&master->dev,
 		"merged_fragments",
-		&bcm2835dma_spi_create_fragment_merged,
+		&spi_merged_dma_fragments_alloc,
 		3
 		);
 	if (err)
@@ -508,21 +665,6 @@ int bcm2835dma_register_dmafragment_components(
 		);
 	if (err)
 		goto error;
-#if 0
-	/* and assign spi_dma_fragment_functions */
-	bs->spi_dma_functions.fragment_composite_cache =
-		&bs->fragment_composite;
-	bs->spi_dma_functions.add_setup_spi_transfer =
-		bcm2835dma_spi_compo_add_setup_transfer;
-	bs->spi_dma_functions.add_transfer =
-		bcm2835dma_spi_compo_add_transfer;
-	bs->spi_dma_functions.add_cs_deselect =
-		bcm2835dma_spi_compo_add_cs_deselect;
-	bs->spi_dma_functions.add_delay =
-		bcm2835dma_spi_compo_add_delay;
-	bs->spi_dma_functions.add_trigger_interrupt =
-		bcm2835dma_spi_compo_add_trigger_irq;
-#endif
 
 	return 0;
 error:

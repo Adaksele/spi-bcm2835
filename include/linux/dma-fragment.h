@@ -84,58 +84,59 @@ void dma_link_dump(
 	);
 
 /**
- * dma_fragment_transform_channel - the transform happens during this phase
- * @DMA_FRAGMENT_TRANSFORM_TYPE_LINK: when linking dma_fragments
- * @DMA_FRAGMENT_TRANSFORM_TYPE_PRE_EXE: prior to executing the fragment
- * @DMA_FRAGMENT_TRANSFROM_TYPE_POST_EXE: after executing the fragment
- */
-enum dma_fragment_transform_type {
-	DMA_FRAGMENT_TRANSFORM_TYPE_LINK     = 0,
-	DMA_FRAGMENT_TRANSFROM_TYPE_PRE_EXE  = 1,
-	DMA_FRAGMENT_TRANSFROM_TYPE_POST_EXE = 2,
-};
-
-/**
  * dma_fragment_transform - an action taken with certain arguments
  * @transform_list: list of transforms to get executed in sequence
- * @extra_transform_list: list of transforms that to get executed
- *   in sequence
+ * @transformer: the transformation function
  * @src: source pointer for transform
  * @dst: destination pointer for transform
  * @extra: some extra information
- * @type: the type of transform
  */
 struct dma_fragment_transform {
 	struct list_head transform_list;
-	int (*transform)(struct dma_fragment_transform *,
-			void* data1, void* data2);
+	int (*transformer)(struct dma_fragment_transform *,
+			struct dma_fragment *, void *);
 	void *src;
 	void *dst;
 	void *extra;
-	enum dma_fragment_transform_type type;
 };
 
+/**
+ * dma_fragment_transform_init - initialize an existing transform
+ * @trans: the transform to initialize
+ * @transformer: the transformation function
+ * @src: source pointer for transform
+ * @dst: destination pointer for transform
+ * @extra: some extra information
+ */
 static inline void dma_fragment_transform_init(
 	struct dma_fragment_transform *trans,
-	enum dma_fragment_transform_type type,
-	int (*transform)(struct dma_fragment_transform *,
-			void *, void *),
+	int (*transformer)(struct dma_fragment_transform *,
+			struct dma_fragment *, void *),
 	void *src,
 	void *dst,
 	void *extra)
 {
 	INIT_LIST_HEAD(&trans->transform_list);
-	trans->type      = type;
-	trans->transform = transform;
-	trans->src       = src;
-	trans->dst       = dst;
-	trans->extra     = extra;
+	trans->transformer = transformer;
+	trans->src         = src;
+	trans->dst         = dst;
+	trans->extra       = extra;
 }
 
+/**
+ * dma_fragment_transform_allocate - allocate and initialize a transform
+ * @trans: the transform to initialize
+ * @transformer: the transformation function
+ * @src: source pointer for transform
+ * @dst: destination pointer for transform
+ * @extra: some extra information
+ * @size: size of the structure to allocate
+ */
 struct dma_fragment_transform *dma_fragment_transform_alloc(
-	enum dma_fragment_transform_type type,
-	int (*transform)(struct dma_fragment_transform *,void*, void*),
+	int (*transform)(struct dma_fragment_transform *,
+			struct dma_fragment *, void *),
 	void *src,void *dst,void *extra,
+	size_t size,
 	gfp_t gfpflags);
 
 /**
@@ -144,12 +145,9 @@ struct dma_fragment_transform *dma_fragment_transform_alloc(
  * @cache: the dma_fragment_cache to which this fragment belongs
  * @cache_list: the list inside the dma_fragment_cache
  * @dma_link_list: the list of dma_links
- * @link_transform_list: list of tasks that need to get run when linking
- *   the fragment together
- * @pre_transform_list: list of tasks that need to get run prior to
- *   the fragment getting scheduled
- * @post_transform_list: list of tasks that need to get run after the
- *   the fragment dma finished.
+ * @transform_list: list of transforms that need to get
+ * @link_head: the dma_link that is the first in sequence
+ * @link_tail: the dma_link that is the last in sequence
  */
 struct dma_fragment {
 	size_t size;
@@ -158,6 +156,9 @@ struct dma_fragment {
 	struct list_head dma_link_list;
 
 	struct list_head transform_list;
+
+	struct dma_link *link_head;
+	struct dma_link *link_tail;
 };
 
 /**
@@ -197,6 +198,26 @@ struct dma_fragment* dma_fragment_alloc(
 void dma_fragment_free(struct dma_fragment *fragment);
 
 /**
+ * dma_fragment_set_default_links - sets links to first and last of
+ *   dma_link_list if not set
+ * @fragment: the fragment to manage
+ */
+static inline void dma_fragment_set_default_links(
+	struct dma_fragment *fragment)
+{
+	if (list_empty(&fragment->dma_link_list))
+		return;
+	if (!fragment->link_head)
+		fragment->link_head = list_first_entry(
+			&fragment->dma_link_list,
+			struct dma_link,dma_link_list);
+	if (!fragment->link_tail)
+		fragment->link_tail = list_last_entry(
+			&fragment->dma_link_list,
+			struct dma_link,dma_link_list);
+}
+
+/**
  * dma_fragment_add_dma_link - add DMA controlblock to the fragment
  * @fragment: the fragment to which to add
  * @dmalink: the link object of the DMA controlblock to add
@@ -206,6 +227,7 @@ static inline void dma_fragment_add_dma_link(struct dma_fragment *fragment,
 {
 	list_add(&dmalink->dma_link_list, &fragment->dma_link_list);
 }
+
 /**
  * dma_fragment_add_dma_transform - add DMA transform to the fragment
  * @fragment: the fragment to which to add
