@@ -94,7 +94,7 @@ void dma_link_dump(
 struct dma_fragment_transform {
 	struct list_head transform_list;
 	int (*transformer)(struct dma_fragment_transform *,
-			struct dma_fragment *, void *);
+			struct dma_fragment *, void *,gfp_t);
 	void *src;
 	void *dst;
 	void *extra;
@@ -111,7 +111,7 @@ struct dma_fragment_transform {
 static inline void dma_fragment_transform_init(
 	struct dma_fragment_transform *trans,
 	int (*transformer)(struct dma_fragment_transform *,
-			struct dma_fragment *, void *),
+			struct dma_fragment *, void *,gfp_t),
 	void *src,
 	void *dst,
 	void *extra)
@@ -134,10 +134,28 @@ static inline void dma_fragment_transform_init(
  */
 struct dma_fragment_transform *dma_fragment_transform_alloc(
 	int (*transform)(struct dma_fragment_transform *,
-			struct dma_fragment *, void *),
+			struct dma_fragment *, void *,gfp_t),
 	void *src,void *dst,void *extra,
 	size_t size,
 	gfp_t gfpflags);
+
+static inline int dma_fragment_transform_write_u32(
+	struct dma_fragment_transform * transform,
+	struct dma_fragment *fragment, void *data,
+	gfp_t gfpflags)
+{
+	*((u32*)transform->dst) = (u32)transform->src;
+	return 0;
+}
+
+static inline int dma_fragment_transform_copy_u32(
+	struct dma_fragment_transform * transform,
+	struct dma_fragment *fragment, void *data,
+	gfp_t gfpflags)
+{
+	*((u32*)transform->dst) = *((u32*)transform->src);
+	return 0;
+}
 
 /**
  * dma_fragment - a collection of connected dma_links

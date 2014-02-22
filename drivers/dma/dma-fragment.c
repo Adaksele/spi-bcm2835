@@ -155,7 +155,7 @@ EXPORT_SYMBOL_GPL(dma_link_dump);
 
 struct dma_fragment_transform *dma_fragment_transform_alloc(
 	int (*transform)(struct dma_fragment_transform *,
-			struct dma_fragment *, void *),
+			struct dma_fragment *, void *,gfp_t),
 	void *src, void *dst, void *extra,
 	size_t size,
 	gfp_t gfpflags) {
