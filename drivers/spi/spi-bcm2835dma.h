@@ -69,6 +69,18 @@ struct bcm2835dma_spi_device_data {
 	char       cs_name[20];
 };
 
+struct bcm2835dma_spi_merged_dma_fragments {
+	struct spi_merged_dma_fragments spi_fragments;
+	u32 vary_mask;
+
+	struct dma_link *link_txdma_next;
+	u32 *total_length;
+
+	u32 speed_hz;
+	u32 speed_cdiv;
+	u32 delay_half_cycle_dma_length;
+};
+
 struct bcm2835dma_spi {
 	struct spi_dma_fragment_functions spi_dma_functions;
 	/* the SPI registers */

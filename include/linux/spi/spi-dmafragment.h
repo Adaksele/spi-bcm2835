@@ -55,11 +55,6 @@ struct spi_merged_dma_fragments {
 
 	struct spi_message *message;
 	struct spi_transfer *transfer;
-
-	u32 vary_mask;
-
-	struct dma_link *link_txdma_next;
-	u32 *total_length;
 };
 
 static inline struct dma_fragment *spi_merged_dma_fragments_alloc(
