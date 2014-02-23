@@ -217,6 +217,21 @@ struct dma_fragment_transfer {
 	struct dma_link     *xfer_tx;
 };
 
+struct dma_fragment_config_spi_transfer {
+	struct dma_fragment_transfer fragment;
+	/* additional data */
+	struct dma_link     *cs_select;
+	struct dma_link     *reset_spi_fifo;
+	struct dma_link     *config_clock_length;
+	struct dma_link     *config_spi;
+	struct dma_link     *set_tx_dma_next;
+	struct dma_link     *start_tx_dma;
+	/* some of the timing data that we need
+	   - filled in based on the SPI-clock */
+	u32 clock_divider;
+	u32 delay_transfers_half_cycle;
+};
+
 static int bcm2835dma_spi_create_fragment_transfer_common(
 	struct dma_fragment_transfer *frag,
 	struct device *device,
@@ -250,169 +265,6 @@ static int bcm2835dma_spi_create_fragment_transfer_common(
 error:
 	return 1;
 }
-
-static int bcm2835dma_fragment_transform_linktx(
-	struct dma_fragment_transform *,
-	struct dma_fragment *, void *,gfp_t);
-
-static struct dma_fragment *bcm2835dma_spi_create_fragment_transfer(
-	struct device *device,gfp_t gfpflags)
-{
-	START_CREATE_FRAGMENT_COMMON_ALLOCATE(dma_fragment_transfer);
-	if (
-		bcm2835dma_spi_create_fragment_transfer_common(
-			frag,device, gfpflags)
-		)
-		goto error;
-	/* need to add special linktos for the case where we can not
-	   have start and end being in the same dma channel
-	   (relevant for transfers with only 2 DMA CBs on 2 channels)
-	   in this case we link the RX DMA so we can only use the
-	   rx transfer
-	 */
-	frag->fragment.link_head = frag->xfer_rx;
-	frag->fragment.link_tail = frag->xfer_rx;
-
-	/* we also need to link the tx_channel to the previous, but as
-	   this only happens during dma-fragment linking, we need to
-	   schedule it
-	 */
-	if (bcm2835dma_schedule_fragment_transform(
-			&frag->fragment,
-			bcm2835dma_fragment_transform_linktx,
-			NULL,NULL,NULL,
-			gfpflags)
-		)
-		goto error;
-
-
-	END_CREATE_FRAGMENT_ALLOCATE();
-}
-
-/*------------------------------------------------------------------------
- * allocator for setting up spi and transfer
- *----------------------------------------------------------------------*/
-struct dma_fragment_config_spi_transfer {
-	struct dma_fragment_transfer fragment;
-	/* additional data */
-	struct dma_link     *cs_select;
-	struct dma_link     *reset_spi_fifo;
-	struct dma_link     *config_clock_length;
-	struct dma_link     *config_spi;
-	struct dma_link     *set_tx_dma_next;
-	struct dma_link     *start_tx_dma;
-	/* some of the timing data that we need
-	   - filled in based on the SPI-clock */
-	u32 clock_divider;
-	u32 delay_transfers_half_cycle;
-};
-
-struct dma_fragment *bcm2835dma_spi_create_fragment_config_spi_transfer(
-	struct device *device,gfp_t gfpflags)
-{
-	START_CREATE_FRAGMENT_ALLOCATE(dma_fragment_config_spi_transfer);
-
-	/* before we do any of this we need to
-	 * schedule a cdiv calculator */
-	/* TODO */
-
-	/* select chipselect - equivalent to:
-	   writel(spi_dev_data->cs_bitfield,
-  	          spi_dev_data->cs_select_gpio_reg);
-	*/
-	ADD_DMA_LINK_TO_FRAGMENT(cs_select);
-	FIXED(ti,     BCM2835_DMA_TI_WAIT_RESP);
-	FIXED(src,    THIS_BCM2835_DMA_CB_MEMBER_DMA_ADDR(pad[0]));
-	SPI  (dst,    cs_select_gpio_reg);
-	FIXED(length, 4);
-	SPI  (pad[0], cs_bitfield);
-
-	/* reset SPI fifos - equivalent to:
-	 * writel(spi_dev_data->spi_reset_fifo,BCM2835_SPI_CS);
-	 */
-	ADD_DMA_LINK_TO_FRAGMENT(reset_spi_fifo);
-	LINKTO(cs_select);
-	FIXED(ti,     BCM2835_DMA_TI_WAIT_RESP);
-	FIXED(src,    THIS_BCM2835_DMA_CB_MEMBER_DMA_ADDR(pad[0]));
-	FIXED(dst,    (BCM2835_SPI_BASE_BUS + BCM2835_SPI_CS));
-	FIXED(length, 4);
-	SPI(pad[0],   spi_reset_fifo);
-
-	/* configure clock divider and transfer length  - equivalent to:
-	 * writel(cdiv, BCM2835_SPI_CLK);
-	 * writel(total transfer length, BCM2835_SPI_DLEN);
-	 */
-	ADD_DMA_LINK_TO_FRAGMENT(config_clock_length);
-	LINKTO(reset_spi_fifo);
-	FIXED(ti,     BCM2835_DMA_TI_WAIT_RESP);
-	FIXED(src,    THIS_BCM2835_DMA_CB_MEMBER_DMA_ADDR(pad[0]));
-	FIXED(dst,    (BCM2835_SPI_BASE_BUS + BCM2835_SPI_CLK));
-	FIXED(length, 8);
-	VARY (pad[0], clock_speed);
-	IGNORE(pad[1],/* the total DMA length we can only set on link time */);
-
-	/* configure and start spi - equivalent to:
-	 * writel(spi_dev_data->spi_config,BCM2835_SPI_CS);
-	 */
-	ADD_DMA_LINK_TO_FRAGMENT(config_spi);
-	LINKTO(config_clock_length);
-	FIXED(ti,     BCM2835_DMA_TI_WAIT_RESP);
-	FIXED(src,    THIS_BCM2835_DMA_CB_MEMBER_DMA_ADDR(pad[0]));
-	FIXED(dst,    (BCM2835_SPI_BASE_BUS + BCM2835_SPI_CS));
-	FIXED(length, 4);
-	SPI  (pad[0], spi_config);
-
-	/* set up the tx-dma start address - equivalent to:
-	 * writel(dma_address_of_tx_transfer,txdma_base+BCM2835_DMA_ADDR);
-	 */
-	ADD_DMA_LINK_TO_FRAGMENT(set_tx_dma_next);
-	LINKTO(config_spi);
-	FIXED(ti,     BCM2835_DMA_TI_WAIT_RESP);
-	FIXED(src,    THIS_BCM2835_DMA_CB_MEMBER_DMA_ADDR(pad[0]));
-	TXDMA(dst,    BCM2835_DMA_ADDR);
-	FIXED(length, 4);
-	IGNORE(pad[0],/* this is set later, when we know the dma_addr
-			 of the TX-DMA-transfer */);
-
-	/* start the tx-dma - equivalent to:
-	 * writel(BCM2835_DMA_CS_ACTIVE,txdma_base+BCM2835_DMA_ADDR);
-	 */
-	ADD_DMA_LINK_TO_FRAGMENT(start_tx_dma);
-	LINKTO(set_tx_dma_next);
-	FIXED(ti,     BCM2835_DMA_TI_WAIT_RESP);
-	FIXED(src,    THIS_BCM2835_DMA_CB_MEMBER_DMA_ADDR(pad[0]));
-	TXDMA(dst,    BCM2835_DMA_CS);
-	FIXED(length, 4);
-	FIXED(pad[0], BCM2835_DMA_CS_ACTIVE);
-
-	/* the Transfer portion is a bit tricky...
-	 * so most of the varies will get managed by a specific transform
-	 */
-	if (
-		bcm2835dma_spi_create_fragment_transfer_common(
-			&frag->fragment,device, gfpflags)
-		)
-		goto error;
-	/* we can not link tx here in a normal way
-	 * but we have to assign it to pad0 instead...
-	 */
-	((struct bcm2835_dma_cb *)(frag->set_tx_dma_next->cb))
-		->pad[0]=frag->fragment.xfer_tx->cb_dma;
-
-	/* and we need to link xfer_rx to the correct dma */
-	link = frag->fragment.xfer_rx;
-	LINKTO(start_tx_dma);
-
-	/* we also need to configure the link for a subsequent transfer */
-
-	/* TODO: mark it as a single transfer */
-
-	END_CREATE_FRAGMENT_ALLOCATE();
-}
-
-/*------------------------------------------------------------------------
- * helper transforms for config_transfer and transfer
- *----------------------------------------------------------------------*/
 
 static int bcm2835dma_fragment_transform_copyadd_length(
 	struct dma_fragment_transform * transform,
@@ -693,6 +545,213 @@ static int bcm2835dma_fragment_transform_linktx(
 	}
 
 	return ret;
+}
+
+static struct dma_fragment *bcm2835dma_spi_create_fragment_transfer(
+	struct device *device,gfp_t gfpflags)
+{
+	START_CREATE_FRAGMENT_COMMON_ALLOCATE(dma_fragment_transfer);
+	if (
+		bcm2835dma_spi_create_fragment_transfer_common(
+			frag,device, gfpflags)
+		)
+		goto error;
+	/* need to add special linktos for the case where we can not
+	   have start and end being in the same dma channel
+	   (relevant for transfers with only 2 DMA CBs on 2 channels)
+	   in this case we link the RX DMA so we can only use the
+	   rx transfer
+	 */
+	frag->fragment.link_head = frag->xfer_rx;
+	frag->fragment.link_tail = frag->xfer_rx;
+
+	/* we also need to link the tx_channel to the previous, but as
+	   this only happens during dma-fragment linking, we need to
+	   schedule it
+	 */
+	if (bcm2835dma_schedule_fragment_transform(
+			&frag->fragment,
+			bcm2835dma_fragment_transform_linktx,
+			NULL,NULL,NULL,
+			gfpflags)
+		)
+		goto error;
+
+
+	END_CREATE_FRAGMENT_ALLOCATE();
+}
+
+/*------------------------------------------------------------------------
+ * allocator for setting up spi and transfer
+ *----------------------------------------------------------------------*/
+
+static int bcm2835dma_fragment_transform_speed_hz(
+	struct dma_fragment_transform * transform,
+	struct dma_fragment *fragtocast, void *vp,
+	gfp_t gfpflags)
+{
+	/* the merged fragment */
+	struct bcm2835dma_spi_merged_dma_fragments *merged_frag =
+		(typeof(merged_frag)) vp;
+
+	/* src is defining if we are a setup_transfer or not */
+	struct dma_fragment_config_spi_transfer *setup =
+		(typeof(setup)) fragtocast;
+	struct bcm2835_dma_cb *cb = setup->config_clock_length->cb;
+
+	/* the info about the current message and transfer */
+	struct spi_message  *mesg = merged_frag->spi_fragments.message;
+	struct spi_transfer *xfer = merged_frag->spi_fragments.transfer;
+
+	struct spi_master *master=mesg->spi->master;
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+
+	/* transform to what we need */
+	u32 spi_hz = xfer->speed_hz;
+	u32 clk_hz = clk_get_rate(bs->clk);
+	u32 cdiv;
+
+	/* set the current speed */
+	merged_frag->speed_hz = spi_hz;
+
+	/* now calculate the clock divider and other delay cycles */
+        if (spi_hz >= clk_hz / 2) {
+                cdiv = 2; /* clk_hz/2 is the fastest we can go */
+        } else if (spi_hz) {
+		cdiv = DIV_ROUND_UP(clk_hz,spi_hz);
+                /* as per documentation CDIV must be a power of two
+		   but empirically NOTRO found that it is not needed,
+		   so we do not add the following:
+		   cdiv = roundup_pow_of_two(cdiv);
+		*/
+                if (cdiv >= 65536)
+                        cdiv = 0; /* 0 is the slowest we can go */
+        } else
+                cdiv = 0; /* 0 is the slowest we can go */
+
+	/* and set the clock divider */
+	merged_frag->speed_cdiv = cdiv;
+	cb->pad[0] = cdiv;
+
+	/* and now calculate the delay for a half clock cycle
+	   - for now we assume that it is equal to clk_div */
+	if (cdiv)
+		merged_frag->delay_half_cycle_dma_length  = cdiv;
+	else
+		merged_frag->delay_half_cycle_dma_length  = 65535;
+
+	return 0;
+}
+VARY_TRANSFORM_HELPER(SPI_OPTIMIZE_VARY_FRQUENCY,
+		bcm2835dma_fragment_transform_speed_hz,_vary)
+
+struct dma_fragment *bcm2835dma_spi_create_fragment_config_spi_transfer(
+	struct device *device,gfp_t gfpflags)
+{
+	START_CREATE_FRAGMENT_ALLOCATE(dma_fragment_config_spi_transfer);
+
+	/* before we do any of this we need to
+	 * schedule a cdiv calculator */
+	/* TODO */
+
+	/* select chipselect - equivalent to:
+	   writel(spi_dev_data->cs_bitfield,
+  	          spi_dev_data->cs_select_gpio_reg);
+	*/
+	ADD_DMA_LINK_TO_FRAGMENT(cs_select);
+	FIXED(ti,     BCM2835_DMA_TI_WAIT_RESP);
+	FIXED(src,    THIS_BCM2835_DMA_CB_MEMBER_DMA_ADDR(pad[0]));
+	SPI  (dst,    cs_select_gpio_reg);
+	FIXED(length, 4);
+	SPI  (pad[0], cs_bitfield);
+
+	/* reset SPI fifos - equivalent to:
+	 * writel(spi_dev_data->spi_reset_fifo,BCM2835_SPI_CS);
+	 */
+	ADD_DMA_LINK_TO_FRAGMENT(reset_spi_fifo);
+	LINKTO(cs_select);
+	FIXED(ti,     BCM2835_DMA_TI_WAIT_RESP);
+	FIXED(src,    THIS_BCM2835_DMA_CB_MEMBER_DMA_ADDR(pad[0]));
+	FIXED(dst,    (BCM2835_SPI_BASE_BUS + BCM2835_SPI_CS));
+	FIXED(length, 4);
+	SPI(pad[0],   spi_reset_fifo);
+
+	/* configure clock divider and transfer length  - equivalent to:
+	 * writel(cdiv, BCM2835_SPI_CLK);
+	 * writel(total transfer length, BCM2835_SPI_DLEN);
+	 */
+	ADD_DMA_LINK_TO_FRAGMENT(config_clock_length);
+	LINKTO(reset_spi_fifo);
+	FIXED(ti,     BCM2835_DMA_TI_WAIT_RESP);
+	FIXED(src,    THIS_BCM2835_DMA_CB_MEMBER_DMA_ADDR(pad[0]));
+	FIXED(dst,    (BCM2835_SPI_BASE_BUS + BCM2835_SPI_CLK));
+	FIXED(length, 8);
+	VARY (pad[0], clock_divider);
+	VARY (pad[1],/* the total DMA length we can only set on link time */);
+
+	/* configure and start spi - equivalent to:
+	 * writel(spi_dev_data->spi_config,BCM2835_SPI_CS);
+	 */
+	ADD_DMA_LINK_TO_FRAGMENT(config_spi);
+	LINKTO(config_clock_length);
+	FIXED(ti,     BCM2835_DMA_TI_WAIT_RESP);
+	FIXED(src,    THIS_BCM2835_DMA_CB_MEMBER_DMA_ADDR(pad[0]));
+	FIXED(dst,    (BCM2835_SPI_BASE_BUS + BCM2835_SPI_CS));
+	FIXED(length, 4);
+	SPI  (pad[0], spi_config);
+
+	/* set up the tx-dma start address - equivalent to:
+	 * writel(dma_address_of_tx_transfer,txdma_base+BCM2835_DMA_ADDR);
+	 */
+	ADD_DMA_LINK_TO_FRAGMENT(set_tx_dma_next);
+	LINKTO(config_spi);
+	FIXED(ti,     BCM2835_DMA_TI_WAIT_RESP);
+	FIXED(src,    THIS_BCM2835_DMA_CB_MEMBER_DMA_ADDR(pad[0]));
+	TXDMA(dst,    BCM2835_DMA_ADDR);
+	FIXED(length, 4);
+	IGNORE(pad[0],/* this is set later, when we know the dma_addr
+			 of the TX-DMA-transfer */);
+
+	/* start the tx-dma - equivalent to:
+	 * writel(BCM2835_DMA_CS_ACTIVE,txdma_base+BCM2835_DMA_ADDR);
+	 */
+	ADD_DMA_LINK_TO_FRAGMENT(start_tx_dma);
+	LINKTO(set_tx_dma_next);
+	FIXED(ti,     BCM2835_DMA_TI_WAIT_RESP);
+	FIXED(src,    THIS_BCM2835_DMA_CB_MEMBER_DMA_ADDR(pad[0]));
+	TXDMA(dst,    BCM2835_DMA_CS);
+	FIXED(length, 4);
+	FIXED(pad[0], BCM2835_DMA_CS_ACTIVE);
+
+	/* the Transfer portion is a bit tricky...
+	 * so most of the varies will get managed by a specific transform
+	 */
+	if (
+		bcm2835dma_spi_create_fragment_transfer_common(
+			&frag->fragment,device, gfpflags)
+		)
+		goto error;
+	/* we can not link tx here in a normal way
+	 * but we have to assign it to pad0 instead...
+	 */
+	((struct bcm2835_dma_cb *)(frag->set_tx_dma_next->cb))
+		->pad[0]=frag->fragment.xfer_tx->cb_dma;
+
+	/* and we need to link xfer_rx to the correct dma */
+	link = frag->fragment.xfer_rx;
+	LINKTO(start_tx_dma);
+
+	/* schedule the SPI divider calculation */
+	if (bcm2835dma_schedule_fragment_transform(
+		&frag->fragment.fragment,
+		&bcm2835dma_fragment_transform_speed_hz_vary,
+		NULL,
+		NULL,
+		NULL,
+		gfpflags))
+		goto error;
+
+	END_CREATE_FRAGMENT_ALLOCATE();
 }
 
 /*------------------------------------------------------------------------
@@ -1071,27 +1130,6 @@ static inline int message_transform_speed_to_clockdivider(
 	else
 		frag->delay_transfers_half_cycle = 65535;
 
-	return 0;
-}
-
-
-/**
- * message_transform_delay_us - calculate the value needed for delaying
- *    by a requested amount of usecs
- * @src: pointer to the value of delay_us
- *        (if zero, then delay by 0.5 clock)
- * @dst: pointer to where to store it (typically length)
- * @extra: dma_fragment_setup_transfer for the timing data
- */
-static inline int message_transform_delay_us(
-	void *src, void *dst, void *extra)
-{
-	struct dma_fragment_setup_transfer * frag = extra;
-	u32 delay_us=(*(u32*)src);
-	if (delay_us)
-		*(u32*)dst = delay_us * delay_1us;
-	else
-		*(u32*)dst = frag->delay_transfers_half_cycle;
 	return 0;
 }
 
