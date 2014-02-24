@@ -47,7 +47,7 @@
  *   we get this structure into spi_master...
  */
 struct spi_dma_fragment_functions {
-	struct dma_fragment_cache* fragment_composite_cache;
+	struct dma_fragment_cache *fragment_merged_cache;
 };
 
 struct spi_merged_dma_fragments {

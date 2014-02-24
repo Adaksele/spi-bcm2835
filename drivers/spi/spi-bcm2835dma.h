@@ -72,7 +72,7 @@ struct bcm2835dma_spi_device_data {
 struct bcm2835dma_spi_merged_dma_fragments {
 	struct spi_merged_dma_fragments spi_fragments;
 
-	struct dma_link *link_txdma_next;
+	u32 *txdma_link_to_here;
 	u32 *total_length;
 
 	u32 speed_hz;
@@ -92,7 +92,7 @@ struct bcm2835dma_spi {
 	/* the DMA-able pool we use to allocate control blocks from */
 	struct dma_pool *pool;
 	/* the fragment caches */
-	struct dma_fragment_cache fragment_composite;
+	struct dma_fragment_cache fragment_merged;
 	struct dma_fragment_cache fragment_setup_spi;
 	struct dma_fragment_cache fragment_transfer;
 	struct dma_fragment_cache fragment_cs_deselect;

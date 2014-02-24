@@ -271,17 +271,12 @@ void dma_fragment_dump(
 	struct device *dev,
 	int tindent,
 	int flags,
-	void (*dma_fragment_dump)(struct dma_fragment *,
-				struct device *,int),
 	void (*dma_cb_dump)(struct dma_link *,
 			struct device *,int)
 	) {
 	struct dma_link *link;
 	struct dma_fragment_transform *transform;
 	int i;
-
-	if (!dma_fragment_dump)
-		dma_fragment_dump=&dma_fragment_dump_generic;
 
 	dev_printk(KERN_INFO,dev,
 		"%sDMA-Fragment:\t%pK\n",
@@ -302,7 +297,12 @@ void dma_fragment_dump(
 			_tab_indent(tindent),
 			fragment->desc);
 
-	dma_fragment_dump(fragment,dev,tindent);
+	/* dump extra data */
+	if (sizeof(*fragment) < fragment->size)
+		_dump_extra_data(
+			((char*)fragment)+sizeof(*fragment),
+			fragment->size-sizeof(*fragment),
+			dev,tindent);
 
 	/* dump the individual dma_links */
 	dev_printk(KERN_INFO,dev,"%sDMA-Links:\n",

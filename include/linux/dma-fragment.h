@@ -294,8 +294,6 @@ void dma_fragment_dump(struct dma_fragment *fragment,
 		struct device *dev,
 		int tindent,
 		int flags,
-		void (*dma_fragment_dump)(struct dma_fragment *,
-					struct device *,int),
 		void (*dma_cb_dump)(struct dma_link *,
 				struct device *,int)
 	);

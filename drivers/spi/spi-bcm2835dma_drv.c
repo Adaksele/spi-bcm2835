@@ -238,27 +238,26 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 {
 	//struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	int status=-EPERM;
-	struct spi_dma_fragment_composite *compo;
+	struct dma_fragment *merged;
 
 	printk(KERN_ERR "HERE\n");
-#if 0
 	/* fetch DMA fragment */
-	compo = spi_message_to_dma_fragment(message,0,GFP_ATOMIC);
+	merged = spi_message_to_dma_fragment(message,0,GFP_ATOMIC);
 
 	/* and schedule it */
-	if (compo)
-		spi_dma_fragment_composite_dump(
-			compo,
-			&bcm2835dma_dump_dma_link,
-			0);
+	if (merged)
+		dma_fragment_dump(
+			merged,
+			&message->spi->dev,
+			0,0,
+			&bcm2835_dma_link_dump
+			);
 	/* and free the composite */
 	/* TODO */
-#endif
 	printk(KERN_ERR "THERE\n");
 	/* and return */
 	return status;
 }
-
 
 static void bcm2835dma_set_gpio_mode(u8 pin,u32 mode) {
 	/* this is a bit of a hack, as there seems to be no official
