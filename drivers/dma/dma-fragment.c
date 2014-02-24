@@ -31,12 +31,33 @@
  * returns string
  */
 static const char *_tab_indent_string = "\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t";
+
 static inline const char *_tab_indent(int indent) {
-	indent=sizeof(_tab_indent_string)-indent;
-	if (indent < 0)
-		return _tab_indent_string;
-	else
-		return &_tab_indent_string[indent];
+	return &_tab_indent_string[16-min(16,indent)];
+}
+
+static inline void _dump_extra_data(char* data, int size,
+				struct device *dev,int tindent)
+{
+	char   buffer[50];
+	int offset=0;
+	int bytes_per_line = 16;
+	while (size>0) {
+		hex_dump_to_buffer(
+			data, min(bytes_per_line,size),
+			bytes_per_line, 1,
+			buffer,sizeof(buffer),
+			0
+			);
+		dev_printk(KERN_INFO,dev,
+			"%sdata %02x: %s\n",
+			_tab_indent(tindent),
+			offset,buffer
+			);
+		data   += bytes_per_line;
+		size   -= bytes_per_line;
+		offset += bytes_per_line;
+	}
 }
 
 struct dma_link *dma_link_alloc(struct dma_pool *pool,
@@ -94,24 +115,18 @@ static void dma_link_cb_dump_generic(
 		struct device *dev,
 		int tindent)
 {
-	char   buffer[50];
-	char   *ptr;
-	size_t pos, bytesperline = 16;
-	for ( pos = 0, ptr = link->cb ;
-	      pos < link->size;
-	      ptr += bytesperline, pos += bytesperline ) {
-		hex_dump_to_buffer(
-			ptr, min(bytesperline,link->size - pos),
-			bytesperline, 1,
-			buffer,sizeof(buffer),
-			0
-			);
-		dev_printk(KERN_INFO,dev,
-			"%sdata %02x: %s\n",
-			_tab_indent(tindent),
-			pos,buffer
-			);
-	}
+	const char *indent=_tab_indent(tindent);
+	dev_printk(KERN_INFO,dev, "%scb_addr:\t%pK\n",
+		indent,
+		link->cb);
+	dev_printk(KERN_INFO,dev, "%scb_dma:\t\t%08lx\n",
+		indent,
+		(long unsigned)link->cb_dma);
+	if (sizeof(*link) < link->size)
+		_dump_extra_data(
+			((char*)link)+sizeof(*link),
+			link->size-sizeof(*link),
+			dev,tindent);
 }
 
 void dma_link_dump(
@@ -121,35 +136,28 @@ void dma_link_dump(
 	void (*dma_cb_dump)(struct dma_link *, struct device *, int)
 	)
 {
+	const char *indent = _tab_indent(tindent);
+
 	if (!dma_cb_dump)
 		dma_cb_dump = &dma_link_cb_dump_generic;
 
-	dev_printk(KERN_INFO,dev,
-		"%sdma_link at:\t%pK\n",
-		_tab_indent(tindent),
+	dev_printk(KERN_INFO,dev, "%sdma_link:\t%pK\n", indent,
 		link);
-	tindent++;
-	dev_printk(KERN_INFO,dev,
-		"%scb_addr:\t%pK\n",
-		_tab_indent(tindent),
-		link->cb);
-	dev_printk(KERN_INFO,dev,
-		"%scb_addr:\t%08lx\n",
-		_tab_indent(tindent),
-		(long unsigned)link->cb_dma);
-	dev_printk(KERN_INFO,dev,
-		"%sdma_pool:\t%pK\n",
-		_tab_indent(tindent),
+	dev_printk(KERN_INFO,dev, "%sdma_pool:\t%pK\n", indent,
 		link->pool);
-	dev_printk(KERN_INFO,dev,
-		"%sdma_fragment:\t%pK\n",
-		_tab_indent(tindent),
-		link->fragment);
-	dev_printk(KERN_INFO,dev,
-		"%scb_dma:\t%08lx\n",
-		_tab_indent(tindent),
-		(long unsigned)link->cb_dma);
-	dma_cb_dump(link,dev,tindent);
+	dev_printk(KERN_INFO,dev, "%sdma_fragment:\t%pK - %s\n", indent,
+		link->fragment,link->fragment->desc);
+	if (link->desc) {
+		if ((link->fragment) && (link->fragment->desc))
+			dev_printk(KERN_INFO,dev,
+				"%sdescription:\t%s.%s\n", indent,
+				link->fragment->desc,link->desc);
+		else
+			dev_printk(KERN_INFO,dev,
+				"%sdescription:\t%s\n", indent,
+				link->desc);
+	}
+	dma_cb_dump(link,dev,tindent+1);
 }
 EXPORT_SYMBOL_GPL(dma_link_dump);
 
@@ -162,11 +170,37 @@ struct dma_fragment_transform *dma_fragment_transform_alloc(
 	struct dma_fragment_transform *trans =
 		kzalloc(max(size,sizeof(*trans)),gfpflags);
 	if (trans)
-		dma_fragment_transform_init(trans,transform,
+		dma_fragment_transform_init(trans,size,transform,
 					src,dst,extra);
 	return trans;
 }
 EXPORT_SYMBOL_GPL(dma_fragment_transform_alloc);
+
+void dma_fragment_transform_dump(
+	struct dma_fragment_transform *trans,
+	struct device *dev,
+	int tindent)
+{
+	const char *indent = _tab_indent(tindent);
+
+	dev_printk(KERN_INFO,dev, "%saddr:\t%p\n", indent,
+		trans);
+	dev_printk(KERN_INFO,dev, "%sfunc:\t%pf\n", indent,
+		trans->transformer);
+	dev_printk(KERN_INFO,dev, "%ssrc:\t%08lx\n", indent,
+		(long unsigned)trans->src);
+	dev_printk(KERN_INFO,dev, "%sdst:\t%08lx\n", indent,
+		(long unsigned)trans->dst);
+	dev_printk(KERN_INFO,dev, "%sextra:\t%08lx\n", 	indent,
+		(long unsigned)trans->extra);
+
+	if (sizeof(*trans) < trans->size)
+		_dump_extra_data(
+			((char*)trans)+sizeof(*trans),
+			trans->size-sizeof(*trans),
+			dev,tindent);
+}
+EXPORT_SYMBOL_GPL(dma_fragment_transform_dump);
 
 struct dma_fragment *dma_fragment_alloc(
 	struct device *device,
@@ -187,8 +221,17 @@ EXPORT_SYMBOL_GPL(dma_fragment_alloc);
 void dma_fragment_free(struct dma_fragment *frag)
 {
 	struct dma_link *link;
+	struct dma_fragment_transform *transform;
 
-	/* note: we do not remove from fragment cache */
+	/* note: we do not remove from fragment cache,
+	   as it would require a lock */
+	if (!list_empty(&frag->cache_list)) {
+		printk(KERN_ERR "dma_fragment_free: %pK "
+			"is still a member of a dma_cache\n",
+			frag
+			);
+		return;
+	}
 
 	/* remove all the dma_links belonging to us */
 	while( !list_empty(&frag->dma_link_list)) {
@@ -199,33 +242,28 @@ void dma_fragment_free(struct dma_fragment *frag)
 		dma_link_free(link);
 	}
 
+	/* remove all the dma_fragment_transforms belonging to us */
+	while( !list_empty(&frag->transform_list)) {
+		transform = list_first_entry(
+			&frag->transform_list,
+			typeof(*transform),
+			transform_list);
+		dma_fragment_transform_free(transform);
+	}
+
 	kfree(frag);
 }
 EXPORT_SYMBOL_GPL(dma_fragment_free);
 
 void dma_fragment_dump_generic(
-	struct dma_fragment * fragment,
+	struct dma_fragment *fragment,
 	struct device *dev,
 	int tindent) {
-	char   buffer[50];
-	char   *ptr = ((char*)fragment)+sizeof(fragment);
-	int    size = fragment->size - sizeof(fragment);
-	size_t pos, bytesperline = 16;
-	for ( pos = 0;
-	      pos < size;
-	      ptr += bytesperline, pos += bytesperline ) {
-		hex_dump_to_buffer(
-			ptr, min(bytesperline,size - pos),
-			bytesperline, 1,
-			buffer,sizeof(buffer),
-			0
-			);
-		dev_printk(KERN_INFO,dev,
-			"%sdata %02x: %s\n",
-			_tab_indent(tindent),
-			pos,buffer
-			);
-	}
+	if (sizeof(*fragment) < fragment->size)
+		_dump_extra_data(
+			((char*)fragment)+sizeof(*fragment),
+			fragment->size-sizeof(*fragment),
+			dev,tindent);
 }
 
 void dma_fragment_dump(
@@ -239,27 +277,59 @@ void dma_fragment_dump(
 			struct device *,int)
 	) {
 	struct dma_link *link;
+	struct dma_fragment_transform *transform;
+	int i;
 
 	if (!dma_fragment_dump)
 		dma_fragment_dump=&dma_fragment_dump_generic;
 
 	dev_printk(KERN_INFO,dev,
-		"%sdma_fragment at:\t%pK\n",
+		"%sDMA-Fragment:\t%pK\n",
 		_tab_indent(tindent),
 		fragment);
 	tindent++;
 	dev_printk(KERN_INFO,dev,
+		"%saddr:\t%pK\n",
+		_tab_indent(tindent),
+		fragment);
+	dev_printk(KERN_INFO,dev,
 		"%scache:\t%pK\n",
 		_tab_indent(tindent),
 		fragment->cache);
+	if (fragment->desc)
+		dev_printk(KERN_INFO,dev,
+			"%sdescr:\t%s\n",
+			_tab_indent(tindent),
+			fragment->desc);
 
 	dma_fragment_dump(fragment,dev,tindent);
 
 	/* dump the individual dma_links */
+	dev_printk(KERN_INFO,dev,"%sDMA-Links:\n",
+		_tab_indent(tindent));
+	i=0;
 	list_for_each_entry(link,
 			&fragment->dma_link_list,
 			dma_link_list) {
-		dma_link_dump(link,dev,tindent,dma_cb_dump);
+		dev_printk(KERN_INFO,dev,
+			"%sDMA-Link %i:\n",
+			_tab_indent(tindent+1),
+			i++);
+		dma_link_dump(link, dev, tindent+2, dma_cb_dump);
+	}
+
+	/* dump the individual dma_fragment_transforms */
+	dev_printk(KERN_INFO,dev,"%sDMA-Transforms:\n",
+		_tab_indent(tindent));
+	i=0;
+	list_for_each_entry(transform,
+			&fragment->transform_list,
+			transform_list) {
+		dev_printk(KERN_INFO,dev,
+			"%sDMA-Transform %i:\n",
+			_tab_indent(tindent+1),
+			i++);
+		dma_fragment_transform_dump(transform, dev, tindent+2);
 	}
 }
 EXPORT_SYMBOL_GPL(dma_fragment_dump);
@@ -448,6 +518,7 @@ struct dma_fragment *dma_fragment_cache_add(
 	}
 
 	spin_unlock_irqrestore(&cache->lock, flags);
+
 	/* and return it */
 	return frag;
 }
@@ -464,7 +535,7 @@ void dma_fragment_cache_release(struct dma_fragment_cache* cache)
 		frag = list_first_entry(&cache->idle,
 					struct dma_fragment,
 					cache_list);
-		list_del(&frag->cache_list);
+		list_del_init(&frag->cache_list);
 		dma_fragment_free(frag);
 	}
 	cache->count_idle = 0;

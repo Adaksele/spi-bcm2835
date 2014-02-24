@@ -71,7 +71,6 @@ struct bcm2835dma_spi_device_data {
 
 struct bcm2835dma_spi_merged_dma_fragments {
 	struct spi_merged_dma_fragments spi_fragments;
-	u32 vary_mask;
 
 	struct dma_link *link_txdma_next;
 	u32 *total_length;
@@ -94,7 +93,7 @@ struct bcm2835dma_spi {
 	struct dma_pool *pool;
 	/* the fragment caches */
 	struct dma_fragment_cache fragment_composite;
-	struct dma_fragment_cache fragment_setup_transfer;
+	struct dma_fragment_cache fragment_setup_spi;
 	struct dma_fragment_cache fragment_transfer;
 	struct dma_fragment_cache fragment_cs_deselect;
 	struct dma_fragment_cache fragment_delay;

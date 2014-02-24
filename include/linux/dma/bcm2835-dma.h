@@ -24,6 +24,7 @@
 
 #include <linux/types.h>
 #include <linux/device.h>
+#include <linux/dma-fragment.h>
 
 /* the DMA registers and their bitflags */
 #define BCM2835_DMA_CS                                  0x00
@@ -110,10 +111,20 @@ static inline u32 bcm2835_dma_cb_compose_stride(
 }
 
 void bcm2835_dma_cb_dump(
-	char *prefix,
-	struct device *dev,
 	struct bcm2835_dma_cb *dmablock,
 	dma_addr_t dmablock_dma,
-	int flags);
+	struct device *dev,
+	int tindent);
+
+static inline void bcm2835_dma_link_dump(
+	struct dma_link *link,
+	struct device *dev,
+	int tindent)
+{
+	bcm2835_dma_cb_dump(
+		link->cb,
+		link->cb_dma,
+		dev,tindent);
+}
 
 #endif /* __BCM2835_DMA_H */

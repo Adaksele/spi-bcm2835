@@ -39,12 +39,12 @@
 /**
  * spi_dma_fragment_functions: structure with functions to call
  *   to fill the dma_composite structure with components
- * @fragment_composite_cache: the cache fo dma_fragment_composite_spi objects
- *   that can get used/reused
+ * @fragment_composite_cache: the cache fo dma_fragment_composite_spi
+ *   objects that can get used/reused
  * Notes:
- * * right now we assume that the master_device_data contains this structure
- *   right at the first address - that is until we get this structure into
- *   spi_master...
+ * * right now we assume that the master_device_data contains this
+ *   structure right at the beginning of the structure - that is until
+ *   we get this structure into spi_master...
  */
 struct spi_dma_fragment_functions {
 	struct dma_fragment_cache* fragment_composite_cache;
@@ -53,18 +53,63 @@ struct spi_dma_fragment_functions {
 struct spi_merged_dma_fragments {
 	struct dma_fragment fragment;
 
+	struct list_head transform_pre_dma_list;
+	struct list_head transform_post_dma_list;
+
 	struct spi_message *message;
 	struct spi_transfer *transfer;
 };
 
 static inline struct dma_fragment *spi_merged_dma_fragments_alloc(
-	struct device *device,gfp_t gfpflags)
+	struct device *device,size_t size,gfp_t gfpflags)
 {
-	return dma_fragment_alloc(device,
-				sizeof(struct spi_merged_dma_fragments),
+	struct spi_merged_dma_fragments *frag = (typeof(frag))
+		dma_fragment_alloc(device,
+				max(size,sizeof(*frag)),
 				gfpflags);
+
+	INIT_LIST_HEAD(&frag->transform_pre_dma_list);
+	INIT_LIST_HEAD(&frag->transform_post_dma_list);
+
+	return &frag->fragment;
 }
 
+static inline void spi_merged_dma_fragments_free(
+	struct spi_merged_dma_fragments *frag)
+{
+	struct dma_fragment_transform *transform;
+	/* remove all the dma_fragment_transforms belonging to us */
+	while( !list_empty(&frag->transform_pre_dma_list)) {
+		transform = list_first_entry(
+			&frag->transform_pre_dma_list,
+			typeof(*transform),
+			transform_list);
+		dma_fragment_transform_free(transform);
+	}
+	/* remove all the dma_fragment_transforms belonging to us */
+	while( !list_empty(&frag->transform_post_dma_list)) {
+		transform = list_first_entry(
+			&frag->transform_post_dma_list,
+			typeof(*transform),
+			transform_list);
+		dma_fragment_transform_free(transform);
+	}
+
+	dma_fragment_free((struct dma_fragment *)frag);
+}
+
+static inline void spi_merged_dma_fragments_add_dma_fragment_transform(
+	struct spi_merged_dma_fragments *frag,
+	struct dma_fragment_transform *transform,
+	int post)
+{
+	if (post)
+		list_add(&transform->transform_list,
+			&frag->transform_post_dma_list);
+	else
+		list_add(&transform->transform_list,
+			&frag->transform_pre_dma_list);
+}
 
 /**
  * spi_message_to_dma_fragment - converts a spi_message to a dma_fragment

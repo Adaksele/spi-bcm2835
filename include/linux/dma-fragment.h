@@ -25,6 +25,7 @@
 
 #include <linux/types.h>
 #include <linux/device.h>
+#include <linux/slab.h>
 #include <linux/dmapool.h>
 
 struct dma_link;
@@ -35,6 +36,8 @@ struct dma_fragment_cache;
  * struct dma_link - the linked list of DMA control blocks
  * @cb:            the pointer to the DMA control-block
  * @cb_dma:        the dma-bus address of the control block
+ * @size:          allocated size of this block
+ * @desc:          description of this block
  * @pool:          from which dma_pool the control-block has been taken
  * @fragment:      the fragment to which we belong
  * @dma_link_list: the list of linked dma_links to which we belong
@@ -45,6 +48,7 @@ struct dma_link {
 	void                *cb;
 	dma_addr_t          cb_dma;
 	size_t              size;
+	const char          *desc;
 	/* the pool from which this has been allocated */
 	struct dma_pool     *pool;
 	/* the membership to a fragment */
@@ -83,6 +87,7 @@ void dma_link_dump(
 	void (*dma_cb_dump)(struct dma_link *, struct device *, int)
 	);
 
+
 /**
  * dma_fragment_transform - an action taken with certain arguments
  * @transform_list: list of transforms to get executed in sequence
@@ -93,11 +98,12 @@ void dma_link_dump(
  */
 struct dma_fragment_transform {
 	struct list_head transform_list;
-	int (*transformer)(struct dma_fragment_transform *,
+	int    (*transformer)(struct dma_fragment_transform *,
 			struct dma_fragment *, void *,gfp_t);
-	void *src;
-	void *dst;
-	void *extra;
+	size_t size;
+	void   *src;
+	void   *dst;
+	void   *extra;
 };
 
 /**
@@ -110,6 +116,7 @@ struct dma_fragment_transform {
  */
 static inline void dma_fragment_transform_init(
 	struct dma_fragment_transform *trans,
+	size_t size,
 	int (*transformer)(struct dma_fragment_transform *,
 			struct dma_fragment *, void *,gfp_t),
 	void *src,
@@ -121,6 +128,7 @@ static inline void dma_fragment_transform_init(
 	trans->src         = src;
 	trans->dst         = dst;
 	trans->extra       = extra;
+	trans->size        = size;
 }
 
 /**
@@ -138,6 +146,18 @@ struct dma_fragment_transform *dma_fragment_transform_alloc(
 	void *src,void *dst,void *extra,
 	size_t size,
 	gfp_t gfpflags);
+
+static inline void dma_fragment_transform_free(
+	struct dma_fragment_transform *transform)
+{
+	list_del(&transform->transform_list);
+	kfree(transform);
+}
+
+void dma_fragment_transform_dump(
+	struct dma_fragment_transform *trans,
+	struct device *dev,
+	int tindent);
 
 static inline int dma_fragment_transform_write_u32(
 	struct dma_fragment_transform * transform,
@@ -161,6 +181,7 @@ static inline int dma_fragment_transform_copy_u32(
  * dma_fragment - a collection of connected dma_links
  * @size: size of this fragment (may be embedded)
  * @cache: the dma_fragment_cache to which this fragment belongs
+ * @desc: description of fragment
  * @cache_list: the list inside the dma_fragment_cache
  * @dma_link_list: the list of dma_links
  * @transform_list: list of transforms that need to get
@@ -169,7 +190,8 @@ static inline int dma_fragment_transform_copy_u32(
  */
 struct dma_fragment {
 	size_t size;
-	void* cache;
+	void *cache;
+	char *desc;
 	struct list_head cache_list;
 	struct list_head dma_link_list;
 
@@ -243,7 +265,8 @@ static inline void dma_fragment_set_default_links(
 static inline void dma_fragment_add_dma_link(struct dma_fragment *fragment,
 				struct dma_link *dmalink)
 {
-	list_add(&dmalink->dma_link_list, &fragment->dma_link_list);
+	list_add_tail(&dmalink->dma_link_list, &fragment->dma_link_list);
+	dmalink->fragment = fragment;
 }
 
 /**

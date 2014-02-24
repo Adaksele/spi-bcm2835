@@ -22,6 +22,7 @@
 #include <linux/module.h>
 #include <linux/spi/spi-dmafragment.h>
 
+#if 0
 /**
  * spi_message_transform_add - add a transformation to the list of
  *   message transforms
@@ -201,6 +202,7 @@ error:
 	return NULL;
 }
 EXPORT_SYMBOL_GPL(spi_message_to_dma_fragment);
+#endif
 
 MODULE_DESCRIPTION("spi specific dma-fragment infrastructure");
 MODULE_AUTHOR("Martin Sperl <kernel@martin.sperl.org>");

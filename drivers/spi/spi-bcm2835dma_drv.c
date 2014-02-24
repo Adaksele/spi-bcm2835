@@ -238,23 +238,23 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 {
 	//struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	int status=-EPERM;
-#if 0
 	struct spi_dma_fragment_composite *compo;
 
 	printk(KERN_ERR "HERE\n");
+#if 0
 	/* fetch DMA fragment */
 	compo = spi_message_to_dma_fragment(message,0,GFP_ATOMIC);
 
 	/* and schedule it */
-	spi_dma_fragment_composite_dump(
-		compo,
-		&bcm2835dma_dump_dma_link,
-		0);
+	if (compo)
+		spi_dma_fragment_composite_dump(
+			compo,
+			&bcm2835dma_dump_dma_link,
+			0);
 	/* and free the composite */
 	/* TODO */
-
-	printk(KERN_ERR "THERE\n");
 #endif
+	printk(KERN_ERR "THERE\n");
 	/* and return */
 	return status;
 }
