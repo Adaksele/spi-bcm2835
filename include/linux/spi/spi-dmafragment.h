@@ -21,7 +21,6 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
- * 4567890123456789012345678901234567890123456789012345678901234567890123456789
  */
 
 #ifndef __SPI_DMAFRAGMENT_H
@@ -29,53 +28,55 @@
 #include <linux/dma-fragment.h>
 #include <linux/spi/spi.h>
 
-
-#define SPI_OPTIMIZE_VARY_TX                   (1<<0)
-#define SPI_OPTIMIZE_VARY_RX                   (1<<1)
-#define SPI_OPTIMIZE_VARY_FRQUENCY             (1<<2)
-#define SPI_OPTIMIZE_VARY_DELAY                (1<<3)
+#define SPI_OPTIMIZE_VARY_TX_BUF               (1<<0)
+#define SPI_OPTIMIZE_VARY_RX_BUF               (1<<1)
+#define SPI_OPTIMIZE_VARY_SPEED_HZ             (1<<2)
+#define SPI_OPTIMIZE_VARY_DELAY_USECS          (1<<3)
 #define SPI_OPTIMIZE_VARY_LENGTH               (1<<4)
 
-/**
- * spi_dma_fragment_functions: structure with functions to call
- *   to fill the dma_composite structure with components
- * @fragment_composite_cache: the cache fo dma_fragment_composite_spi
- *   objects that can get used/reused
- * Notes:
- * * right now we assume that the master_device_data contains this
- *   structure right at the beginning of the structure - that is until
- *   we get this structure into spi_master...
- */
-struct spi_dma_fragment_functions {
-	struct dma_fragment_cache *fragment_merged_cache;
-};
-
-struct spi_merged_dma_fragments {
+struct spi_merged_dma_fragment {
 	struct dma_fragment fragment;
 
 	struct list_head transform_pre_dma_list;
 	struct list_head transform_post_dma_list;
 
+	/* message for which this is prepared */
 	struct spi_message *message;
+	/* transient data used during linking of fragments
+	 * otherwise undefined
+	 */
 	struct spi_transfer *transfer;
+	struct spi_transfer *last_transfer;
 };
 
-static inline struct dma_fragment *spi_merged_dma_fragments_alloc(
+static inline void spi_merged_dma_fragment_init(
+	struct spi_merged_dma_fragment *frag, size_t size)
+{
+	dma_fragment_init(&frag->fragment,size);
+	INIT_LIST_HEAD(&frag->transform_pre_dma_list);
+	INIT_LIST_HEAD(&frag->transform_post_dma_list);
+}
+
+static inline struct dma_fragment *spi_merged_dma_fragment_alloc(
 	struct device *device,size_t size,gfp_t gfpflags)
 {
-	struct spi_merged_dma_fragments *frag = (typeof(frag))
+	struct spi_merged_dma_fragment *frag;
+	if ( size < sizeof(*frag) )
+		size = sizeof(*frag);
+	frag = ( typeof(frag) )
 		dma_fragment_alloc(device,
 				max(size,sizeof(*frag)),
 				gfpflags);
-
-	INIT_LIST_HEAD(&frag->transform_pre_dma_list);
-	INIT_LIST_HEAD(&frag->transform_post_dma_list);
+	if ( frag )
+		spi_merged_dma_fragment_init(
+			frag,
+			size);
 
 	return &frag->fragment;
 }
 
-static inline void spi_merged_dma_fragments_free(
-	struct spi_merged_dma_fragments *frag)
+static inline void spi_merged_dma_fragment_free(
+	struct spi_merged_dma_fragment *frag)
 {
 	struct dma_fragment_transform *transform;
 	/* remove all the dma_fragment_transforms belonging to us */
@@ -98,31 +99,74 @@ static inline void spi_merged_dma_fragments_free(
 	dma_fragment_free((struct dma_fragment *)frag);
 }
 
-static inline void spi_merged_dma_fragments_add_dma_fragment_transform(
-	struct spi_merged_dma_fragments *frag,
+/**
+ * spi_merged_dma_fragment_dump - dump the spi_merged_dma_fragment
+ * into a spi_merged_dma_fragment
+ * @fragment: the fragment cache from which to fetch the fragment
+ * @dev: the devie to use during the dump
+ * @tindent: the number of tab indents to add
+ * @flags: the flags for dumping the fragment
+ * @dma_link_dump: the function which to use to dump the dmablock
+ */
+void spi_merged_dma_fragment_dump(
+	struct spi_merged_dma_fragment *fragment,
+	struct device *dev,
+	int tindent,
+	int flags,
+	void (*dma_cb_dump)(struct dma_link *,
+			struct device *,int)
+	);
+
+static inline void spi_merged_dma_fragment_add_dma_fragment_transform(
+	struct spi_merged_dma_fragment *frag,
 	struct dma_fragment_transform *transform,
 	int post)
 {
 	if (post)
-		list_add(&transform->transform_list,
+		list_add_tail(&transform->transform_list,
 			&frag->transform_post_dma_list);
 	else
-		list_add(&transform->transform_list,
+		list_add_tail(&transform->transform_list,
 			&frag->transform_pre_dma_list);
 }
 
+static inline struct dma_fragment_transform *
+spi_merged_dma_fragment_addnew_transform(
+	struct spi_merged_dma_fragment *merged,
+	int (*function)(struct dma_fragment_transform *, void *,gfp_t),
+	struct dma_fragment *frag,
+	void *src,
+	void *dst,
+	void *extra,
+	int size,
+	int post,
+	gfp_t gfpflags)
+{
+	struct dma_fragment_transform *trans;
+	trans = dma_fragment_transform_alloc(
+			function,
+			frag,
+			src,dst,extra,
+			size,gfpflags
+			);
+	if (trans)
+		spi_merged_dma_fragment_add_dma_fragment_transform(
+			merged,trans,post
+			);
+
+	return trans;
+}
+
 /**
- * spi_message_to_dma_fragment - converts a spi_message to a dma_fragment
- * @msg:  the spi message to convert
- * @flags: some flags
- * @gfpflags: flags for allocation
- * notes:
- * * this is essentially generic and could go into generic spi
- * * we could also create an automatically prepared version
- *     via a spi_message flag (e.g prepare on first use)
+ * spi_merged_dma_fragment_merge_dma_fragment_from_cache - merge a
+ * dma_fragment from a pool
+ * into a spi_merged_dma_fragment
+ * @fragment: the fragment cache from which to fetch the fragment
+ * @merged: the merged fragment
  */
-struct dma_fragment *spi_message_to_dma_fragment(
-	struct spi_message *msg,
+int spi_merged_dma_fragment_merge_fragment_cache(
+	struct dma_fragment_cache *fragmentcache,
+	struct spi_merged_dma_fragment *merged,
 	int flags,
 	gfp_t gfpflags);
 

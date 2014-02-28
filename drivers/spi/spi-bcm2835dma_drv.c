@@ -81,6 +81,150 @@ MODULE_PARM_DESC(delay_1us,
  * is lots of memory access ...
  */
 
+/**
+ * bcm2835dma_spi_message_to_dma_fragment - converts a spi_message to a
+ *  dma_fragment
+ * @msg:  the spi message to convert
+ * @flags: some flags
+ * @gfpflags: flags for allocation
+ * notes:
+ *   with minimal effort this probably could get added to the spi framework
+ */
+struct dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
+	struct spi_message *msg, int flags, gfp_t gfpflags)
+{
+	struct spi_device *spi    = msg->spi;
+	struct spi_master *master = spi->master;
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+
+	struct spi_merged_dma_fragment *merged;
+	struct spi_transfer *xfer;
+	int err=0;
+
+	/* fetch a merged fragment */
+	merged = (typeof(merged))
+		dma_fragment_cache_fetch(
+			&bs->fragment_merged,
+			gfpflags);
+	if (! merged)
+		return NULL;
+
+	/* the fragment dma_link_list should be empty */
+	if (! list_empty(&merged->fragment.dma_link_list) ) {
+		printk(KERN_ERR
+			"bcm2835dma_spi_message_to_dma_fragment:"
+			" the merged fragment %pK from cache does contain"
+			" dma_links already - this should not happen!",
+			merged);
+		return NULL;
+	}
+
+	/* the fragment dma_link_list should be empty */
+	if (! list_empty(&merged->fragment.transform_list) ) {
+		printk(KERN_ERR
+			"bcm2835dma_spi_message_to_dma_fragment:"
+			" the merged fragment %pK from cache does contain"
+			" dma_fragment_transforms already"
+			" - this should not happen!",
+			merged);
+		return NULL;
+	}
+
+	/* initialize some fields */
+	merged->message       = msg;
+	merged->transfer      = NULL;
+	merged->last_transfer = NULL;
+
+	/* now start iterating the transfers */
+	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
+		/* check if we are the last in the list */
+		int is_last = list_is_last(&msg->transfers,
+					&xfer->transfer_list);
+		/* assign the current transfer */
+		merged->transfer = xfer;
+		/* do we need to reconfigure spi
+		   compared to the last transfer */
+		if (merged->last_transfer) {
+			if (merged->last_transfer->speed_hz
+				!= xfer->speed_hz)
+				merged->last_transfer=NULL;
+			else if (merged->last_transfer->tx_nbits
+				!= xfer->tx_nbits)
+				merged->last_transfer=NULL;
+			else if (merged->last_transfer->rx_nbits
+				!= xfer->rx_nbits)
+				merged->last_transfer=NULL;
+			else if (merged->last_transfer->bits_per_word
+				!= xfer->bits_per_word)
+				merged->last_transfer=NULL;
+		}
+		/* if we have no last_transfer,
+		   then we need to setup spi */
+		if (!merged->last_transfer) {
+			err = spi_merged_dma_fragment_merge_fragment_cache(
+				&bs->fragment_setup_spi,
+				merged,
+				flags,gfpflags);
+			if (err)
+				goto error;
+		}
+		/* add transfer if the transfer length is not 0
+		   or if we vary length */
+		if ( (xfer->len)
+			/* || (xfer->vary & SPI_OPTIMIZE_VARY_LENGTH) */) {
+			err = spi_merged_dma_fragment_merge_fragment_cache(
+				&bs->fragment_transfer,
+				merged,
+				flags,gfpflags);
+			if (err)
+				goto error;
+			merged->last_transfer=xfer;
+		}
+		/* add cs_change with optional extra delay
+		   if requested or last in sequence */
+		if ((xfer->cs_change)||(is_last)) {
+			err = spi_merged_dma_fragment_merge_fragment_cache(
+				&bs->fragment_cs_deselect,
+				merged,
+				flags,gfpflags);
+		} else if ( (xfer->delay_usecs)
+			/* || (xfer->vary & SPI_OPTIMIZE_VARY_DELAY) */) {
+			/* or add a delay if requested */
+			err = spi_merged_dma_fragment_merge_fragment_cache(
+				&bs->fragment_delay,
+				merged,
+				flags,gfpflags);
+		}
+		if (err)
+			goto error;
+	}
+	/* and add an interrupt if we got a callback to handle
+	 * if there is no callback, then we do not need to release it
+	 * immediately - even for prepared messages
+	 */
+	if (msg->complete) {
+		err=spi_merged_dma_fragment_merge_fragment_cache(
+			&bs->fragment_trigger_irq,
+			merged,
+			flags,gfpflags);
+		if (err)
+			goto error;
+	}
+
+	/* and return it */
+	return &merged->fragment;
+
+error:
+	printk(KERN_ERR "bcm2835dma_spi_message_to_dma_fragment: err=%i\n",err);
+	dma_fragment_dump(
+		&merged->fragment,
+		&msg->spi->dev,
+		0,0,
+		&bcm2835_dma_link_dump
+		);
+	return NULL;
+}
+
 static void bcm2835dma_release_dmachannel(struct spi_master *master,
 			struct bcm2835_dmachannel *d)
 {
@@ -240,21 +384,22 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 	int status=-EPERM;
 	struct dma_fragment *merged;
 
-	printk(KERN_ERR "HERE\n");
 	/* fetch DMA fragment */
-	merged = spi_message_to_dma_fragment(message,0,GFP_ATOMIC);
+	merged = bcm2835dma_spi_message_to_dma_fragment(
+		message,
+		0,
+		GFP_ATOMIC);
 
 	/* and schedule it */
 	if (merged)
-		dma_fragment_dump(
-			merged,
+		spi_merged_dma_fragment_dump(
+			(struct spi_merged_dma_fragment*) merged,
 			&message->spi->dev,
 			0,0,
 			&bcm2835_dma_link_dump
 			);
 	/* and free the composite */
 	/* TODO */
-	printk(KERN_ERR "THERE\n");
 	/* and return */
 	return status;
 }

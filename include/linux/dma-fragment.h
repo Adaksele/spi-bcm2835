@@ -17,7 +17,6 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
- * 4567890123456789012345678901234567890123456789012345678901234567890123456789
  */
 
 #ifndef __DMAFRAGMENT_H
@@ -30,6 +29,7 @@
 
 struct dma_link;
 struct dma_fragment;
+struct dma_fragment_transform;
 struct dma_fragment_cache;
 
 /**
@@ -42,7 +42,6 @@ struct dma_fragment_cache;
  * @fragment:      the fragment to which we belong
  * @dma_link_list: the list of linked dma_links to which we belong
  */
-struct dma_fragment;
 struct dma_link {
 	/* the control block itself */
 	void                *cb;
@@ -98,9 +97,9 @@ void dma_link_dump(
  */
 struct dma_fragment_transform {
 	struct list_head transform_list;
-	int    (*transformer)(struct dma_fragment_transform *,
-			struct dma_fragment *, void *,gfp_t);
+	int    (*function)(struct dma_fragment_transform *, void *,gfp_t);
 	size_t size;
+	struct dma_fragment *fragment;
 	void   *src;
 	void   *dst;
 	void   *extra;
@@ -108,27 +107,28 @@ struct dma_fragment_transform {
 
 /**
  * dma_fragment_transform_init - initialize an existing transform
- * @trans: the transform to initialize
+ * @transform: the transform to initialize
  * @transformer: the transformation function
  * @src: source pointer for transform
  * @dst: destination pointer for transform
  * @extra: some extra information
  */
 static inline void dma_fragment_transform_init(
-	struct dma_fragment_transform *trans,
+	struct dma_fragment_transform *transform,
 	size_t size,
-	int (*transformer)(struct dma_fragment_transform *,
-			struct dma_fragment *, void *,gfp_t),
+	int (*function)(struct dma_fragment_transform *,void *,gfp_t),
+	struct dma_fragment *fragment,
 	void *src,
 	void *dst,
 	void *extra)
 {
-	INIT_LIST_HEAD(&trans->transform_list);
-	trans->transformer = transformer;
-	trans->src         = src;
-	trans->dst         = dst;
-	trans->extra       = extra;
-	trans->size        = size;
+	INIT_LIST_HEAD(&transform->transform_list);
+	transform->function    = function;
+	transform->fragment    = fragment;
+	transform->src         = src;
+	transform->dst         = dst;
+	transform->extra       = extra;
+	transform->size        = size;
 }
 
 /**
@@ -141,8 +141,8 @@ static inline void dma_fragment_transform_init(
  * @size: size of the structure to allocate
  */
 struct dma_fragment_transform *dma_fragment_transform_alloc(
-	int (*transform)(struct dma_fragment_transform *,
-			struct dma_fragment *, void *,gfp_t),
+	int (*function)(struct dma_fragment_transform *, void *,gfp_t),
+	struct dma_fragment *fragment,
 	void *src,void *dst,void *extra,
 	size_t size,
 	gfp_t gfpflags);
@@ -152,6 +152,26 @@ static inline void dma_fragment_transform_free(
 {
 	list_del(&transform->transform_list);
 	kfree(transform);
+}
+
+/**
+ * dma_fragment_transform_call - calls the transform function
+ * @transform: the transfrom for which we run this
+ * @fragment: the fragment argument to the call
+ * @data: the data to add as extra parameter
+ * @gfpflags: gfpflags to add as extra arguments
+ */
+static inline int dma_fragment_transform_exec(
+	struct dma_fragment_transform *transform,
+	struct dma_fragment *fragment,
+	void *data,
+	gfp_t gfpflags
+	)
+{
+	return transform->function(
+		transform,
+		data,
+		gfpflags);
 }
 
 void dma_fragment_transform_dump(
@@ -190,7 +210,7 @@ static inline int dma_fragment_transform_copy_u32(
  */
 struct dma_fragment {
 	size_t size;
-	void *cache;
+	struct dma_fragment_cache *cache;
 	char *desc;
 	struct list_head cache_list;
 	struct list_head dma_link_list;
@@ -272,9 +292,9 @@ static inline void dma_fragment_add_dma_link(struct dma_fragment *fragment,
 /**
  * dma_fragment_add_dma_transform - add DMA transform to the fragment
  * @fragment: the fragment to which to add
- * @dmalink: the link object of the DMA controlblock to add
+ * @transform: the link object of the DMA controlblock to add
  */
-static inline void dma_fragment_add_dma_fragment_transform(
+static inline void dma_fragment_add_transform(
 	struct dma_fragment *fragment,
 	struct dma_fragment_transform *transform
 	)
@@ -284,8 +304,70 @@ static inline void dma_fragment_add_dma_fragment_transform(
 }
 
 /**
+ * dma_fragment_addnew_transform - allocate and add DMA transform
+ *   to the fragment
+ * @fragment: the fragment to which to add
+ */
+static inline
+struct dma_fragment_transform *dma_fragment_addnew_transform(
+	int (*function)(struct dma_fragment_transform *,void *,gfp_t),
+	struct dma_fragment *fragment,
+	void *src,
+	void *dst,
+	void *extra,
+	size_t size,
+	gfp_t gfpflags)
+{
+	struct dma_fragment_transform *trans =
+		dma_fragment_transform_alloc(
+			function,
+			fragment,
+			src,dst,extra,
+			size,gfpflags);
+
+	if (trans)
+		dma_fragment_add_transform(
+			fragment,trans);
+
+	return trans;
+}
+
+
+/**
+ * dma_fragment_execute_transforms - will execute all the transforms
+ *  of this fragment
+ * @fragment: the fragment to dump
+ * @data: the data to add as extra parameter
+ * @gfpflags: gfpflags to add as extra arguments
+ */
+static inline int dma_fragment_execute_transforms(
+	struct dma_fragment *fragment,
+	void *data,
+	gfp_t gfpflags
+	)
+{
+	struct dma_fragment_transform *transform;
+	int err;
+
+	list_for_each_entry(transform,
+			&fragment->transform_list,
+			transform_list) {
+		err=dma_fragment_transform_exec(
+			transform,
+			fragment,
+			data,
+			gfpflags);
+		if (err)
+			return err;
+	}
+
+	return 0;
+}
+
+/**
  * dma_fragment_dump - dump the given fragment
  * @fragment: the fragment to dump
+ * @dev: the devie to use during the dump
  * @tindent: the number of tab indents to add
  * @flags: the flags for dumping the fragment
  * @dma_link_dump: the function which to use to dump the dmablock
@@ -404,6 +486,10 @@ static inline struct dma_fragment *dma_fragment_cache_fetch(
 			typeof(*frag),
 			cache_list);
 		list_move(&frag->cache_list,&cache->active);
+
+		cache->count_active++;
+		cache->count_idle--;
+
 		is_empty = list_empty(&cache->idle);
 	}
 	cache->count_fetched++;
@@ -413,11 +499,12 @@ static inline struct dma_fragment *dma_fragment_cache_fetch(
 	if (!frag)
 		frag = dma_fragment_cache_add(cache,gfpflags,0);
 
-	/* if not in GFP_KERNEL context, then return immediately */
+	/* if in GFP_KERNEL context, then allocate an additional one */
 	if (gfpflags == GFP_KERNEL) {
 		/* allocate one more to keep something idle in cache */
 		if (is_empty)
-			dma_fragment_cache_add(cache,gfpflags,1);
+			dma_fragment_cache_add(cache,gfpflags,
+					DMA_FRAGMENT_CACHE_TO_IDLE);
 	}
 
 	return frag;
@@ -429,12 +516,22 @@ static inline struct dma_fragment *dma_fragment_cache_fetch(
  * @fragment - the dma_fragment to return
  */
 static inline void dma_fragment_cache_return(
-	struct dma_fragment_cache *cache,struct dma_fragment *fragment)
+	struct dma_fragment *fragment)
 {
 	unsigned long flags;
-	spin_lock_irqsave(&cache->lock,flags);
-	list_move(&fragment->cache_list,&cache->idle);
-	spin_unlock_irqrestore(&cache->lock,flags);
+	struct dma_fragment_cache *cache = fragment->cache;
+	if (cache) {
+		spin_lock_irqsave(&cache->lock,flags);
+		list_move(&fragment->cache_list,&cache->idle);
+		spin_unlock_irqrestore(&cache->lock,flags);
+	} else {
+		printk(KERN_ERR "dma_fragment_cache_return:"
+			" fragment %pK not in a cache,"
+			" so not returning\n",
+			fragment
+			);
+		/* maybe free the fragment instead? */
+	}
 }
 
 #endif /* __DMAFRAGMENT_H */

@@ -162,16 +162,16 @@ void dma_link_dump(
 EXPORT_SYMBOL_GPL(dma_link_dump);
 
 struct dma_fragment_transform *dma_fragment_transform_alloc(
-	int (*transform)(struct dma_fragment_transform *,
-			struct dma_fragment *, void *,gfp_t),
+	int (*function)(struct dma_fragment_transform *, void *,gfp_t),
+	struct dma_fragment *fragment,
 	void *src, void *dst, void *extra,
 	size_t size,
 	gfp_t gfpflags) {
 	struct dma_fragment_transform *trans =
 		kzalloc(max(size,sizeof(*trans)),gfpflags);
 	if (trans)
-		dma_fragment_transform_init(trans,size,transform,
-					src,dst,extra);
+		dma_fragment_transform_init(trans,size,function,
+					fragment,src,dst,extra);
 	return trans;
 }
 EXPORT_SYMBOL_GPL(dma_fragment_transform_alloc);
@@ -186,13 +186,15 @@ void dma_fragment_transform_dump(
 	dev_printk(KERN_INFO,dev, "%saddr:\t%p\n", indent,
 		trans);
 	dev_printk(KERN_INFO,dev, "%sfunc:\t%pf\n", indent,
-		trans->transformer);
-	dev_printk(KERN_INFO,dev, "%ssrc:\t%08lx\n", indent,
-		(long unsigned)trans->src);
-	dev_printk(KERN_INFO,dev, "%sdst:\t%08lx\n", indent,
-		(long unsigned)trans->dst);
-	dev_printk(KERN_INFO,dev, "%sextra:\t%08lx\n", 	indent,
-		(long unsigned)trans->extra);
+		trans->function);
+	dev_printk(KERN_INFO,dev, "%sfrag:\t%pk\n", indent,
+		trans->fragment);
+	dev_printk(KERN_INFO,dev, "%ssrc:\t%pk\n", indent,
+		trans->src);
+	dev_printk(KERN_INFO,dev, "%sdst:\t%pk\n", indent,
+		trans->dst);
+	dev_printk(KERN_INFO,dev, "%sextra:\t%pk\n", indent,
+		trans->extra);
 
 	if (sizeof(*trans) < trans->size)
 		_dump_extra_data(
@@ -509,7 +511,7 @@ struct dma_fragment *dma_fragment_cache_add(
 	if (gfpflags == GFP_KERNEL)
 		cache->count_allocated_kernel ++;
 	/* add to corresponding list */
-	if (flags && DMA_FRAGMENT_CACHE_TO_IDLE) {
+	if (flags & DMA_FRAGMENT_CACHE_TO_IDLE) {
 		list_add(&frag->cache_list, &cache->idle);
 		cache->count_idle++;
 	} else {

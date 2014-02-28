@@ -23,194 +23,179 @@
 #include <linux/spi/spi-dmafragment.h>
 
 /**
- * spi_message_to_dma_fragment - converts a spi_message to a dma_fragment
- * @msg:  the spi message to convert
- * @flags: some flags
- * @gfpflags: flags for allocation
- * notes:
- * * this is essentially generic and could go into generic spi
- * * we could also create an automatically prepared version
- *     via a spi_message flag (e.g prepare on first use)
+ * spi_merged_dma_fragment_release_fragment_to_cache - transform that
+ * release the dma_fragment back to its cache and also return the
+ * dma_links that has been hijacked
  */
-struct dma_fragment *spi_message_to_dma_fragment(
-	struct spi_message *msg, int flags, gfp_t gfpflags)
+int spi_merged_dma_fragment_release_fragment_to_cache(
+	struct dma_fragment_transform *transform,
+	void *data,
+	gfp_t gfpflags)
 {
-	struct spi_device *spi = msg->spi;
-	struct spi_master *master = spi->master;
-	struct spi_dma_fragment_functions *bs =
-		spi_master_get_devdata(master);
+	/*struct dma_fragment *fragment = transform->fragment;*/
+	struct list_head    *head     = transform->src;
+	struct list_head    *tail     = transform->dst;
+	struct dma_fragment *frag     = transform->extra;
 
-	struct spi_merged_dma_fragments *merged;
-	struct spi_transfer *xfer;
-	int err=0;
+	/* restore fragment.dma_link_list
+	   correct would be walking the list, but it is not efficient...
+	   - maybe this should go to lists.h */
+	/* first unlink from origin */
+	head->prev->next = tail->next;
+	tail->next->prev = head->prev;
+	/* link ourself to new list */
+	head->prev = frag->dma_link_list.next;
+	frag->dma_link_list.next = head;
+	tail->next = frag->dma_link_list.prev;
+	frag->dma_link_list.prev = tail;
 
-	/* fetch a merged fragment */
-	merged = (typeof(merged))
-		dma_fragment_cache_fetch(
-			bs->fragment_merged_cache,
-			gfpflags);
-	if (! merged)
-		return NULL;
-
-	merged->message = msg;
-
-	/* now start iterating the transfers */
-	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
-	}
-#if 0
-	compo->last_setup_transfer = NULL;
-	compo->last_transfer = NULL;
-	compo->last_xfer = NULL;
-	/* now start iterating the transfers */
-	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
-		/* check if we are the last in the list */
-		int is_last=list_is_last(&msg->transfers,
-					&xfer->transfer_list);
-		/* do we need to reconfigure spi
-		   compared to the last transfer */
-		if (compo->last_transfer) {
-			if (compo->last_xfer->speed_hz
-				!= xfer->speed_hz)
-				compo->last_transfer=NULL;
-			else if (compo->last_xfer->tx_nbits
-				!= xfer->tx_nbits)
-				compo->last_transfer=NULL;
-			else if (compo->last_xfer->rx_nbits
-				!= xfer->rx_nbits)
-				compo->last_transfer=NULL;
-			else if (compo->last_xfer->bits_per_word
-				!= xfer->bits_per_word)
-				compo->last_transfer=NULL;
-		}
-		/* now decide which transfer to use,
-		   the normal or the reset version */
-		if (compo->last_transfer) {
-			err=bs->add_transfer(
-				msg,xfer,compo,flags,gfpflags);
-		} else {
-			err=bs->add_setup_spi_transfer(
-				msg,xfer,compo,flags,gfpflags);
-		}
-		/* error handling */
-		if (err)
-			goto error;
-		/* add cs_change with optional extra delay
-		   if requested or last in sequence */
-		if ((xfer->cs_change)||(is_last))
-			err=bs->add_cs_deselect(
-				msg,xfer,compo,flags,gfpflags);
-		else if (xfer->delay_usecs)
-			/* or add a delay if requested */
-			err=bs->add_delay(
-				msg,xfer,compo,flags,gfpflags);
-		/* handle errors */
-		if (err)
-			goto error;
-		/* and set the last_transfer */
-		compo->last_xfer=xfer;
-	}
-	/* and add an interrupt if we got a callback to handle
-	 * if there is no callback, then we do not need to release it
-	 * immediately - even for prepared messages
-	 */
-	if (
-		(msg->complete)
-		&& (err = bs->add_delay(msg,xfer,compo,flags,gfpflags))
-		)
-		goto error;
-#endif
-	/* and return it */
-	return &merged->fragment;
-
-error:
-	return NULL;
-}
-EXPORT_SYMBOL_GPL(spi_message_to_dma_fragment);
-
-#if 0
-/**
- * spi_message_transform_add - add a transformation to the list of
- *   message transforms
- * @head: message transform list to which to add
- * @transformation: the transformation function to call
- * @src: 1st argument to transformation function
- * @dst: 2nd argument to transformation function
- * @extra: 3rd argument to transformation function
- * @gfpflags: gfpflags to use during allocation
- */
-int spi_message_transform_add(
-	struct list_head *head,
-	int              (*transformation)(void* src,
-					void* dst,
-					void* extra),
-	void             *src,
-	void             *dst,
-	void             *extra,
-	gfp_t            gfpflags
-	)
-{
-	struct spi_message_transform* trans;
-
-	trans =
-		kmalloc(sizeof(trans),gfpflags);
-	if (!trans)
-		return -ENOMEM;
-
-	list_add_tail(&trans->message_transform_chain,head);
-
-	trans->transformation=transformation;
-	trans->src=src;
-	trans->dst=dst;
-	trans->extra=extra;
+	/* now that we have relinked the dma_links
+	   to the correct location return the fragment back to cache */
+	dma_fragment_cache_return(frag);
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(spi_message_transform_add);
 
 /**
- * spi_message_transform_release_all - release all message transformations
- *   from this list freeing the memory
- * @head: message transform list from which to remove all entries
+ * spi_merged_dma_fragment_merge_fragment_cache - merge a
+ * dma_fragment from a pool
+ * into a spi_merged_dma_fragment
+ * @fragment: the fragment cache from which to fetch the fragment
+ * @merged: the merged fragment
  */
-void spi_message_transform_release_all(
-	struct list_head *head)
+int spi_merged_dma_fragment_merge_fragment_cache(
+	struct dma_fragment_cache *fragmentcache,
+	struct spi_merged_dma_fragment *merged,
+	int flags,
+	gfp_t gfpflags
+	)
 {
-	while( !list_empty(head)) {
-		struct spi_message_transform *trans
-			= list_first_entry(head,
-                                        typeof(*trans),
-					message_transform_chain);
-		list_del(&trans->message_transform_chain);
-		kfree(trans);
-        }
+	struct dma_fragment *frag;
+	int err = 0;
+	struct list_head tmp_copy;
+
+	/* fetch the fragment from dma_fragment_cache */
+	frag = dma_fragment_cache_fetch(fragmentcache,gfpflags);
+	if (!frag)
+		return -ENOMEM;
+
+	/* run the transforms with the merged fragment */
+	err = dma_fragment_execute_transforms(
+		frag,
+		merged,
+		gfpflags
+		);
+	if (err)
+		goto error;
+
+	/* "highjack" the fragment dma_list */
+
+	/* first we need a copy of the list as is */
+	tmp_copy.next = frag->dma_link_list.next;
+	tmp_copy.prev = frag->dma_link_list.prev;
+
+	/* now splice it away */
+	list_splice_tail_init(
+		&frag->dma_link_list,
+		&merged->fragment.dma_link_list
+		);
+
+	/* add a transform that will release the fragment back to cache */
+	if (! dma_fragment_addnew_transform(
+		&spi_merged_dma_fragment_release_fragment_to_cache,
+		&merged->fragment,
+		tmp_copy.next,
+		tmp_copy.prev,
+		frag,
+		0,gfpflags) ) {
+		err = -ENOMEM;
+		/* in the error case we need to do this here */
+		list_splice_tail_init(
+			&frag->dma_link_list,
+			&(merged->fragment.dma_link_list)
+			);
+		goto error;
+	}
+
+	/* now link the fragments */
+	/* TODO */
+
+	return 0;
+error:
+	printk(KERN_ERR "spi_merged_dma_fragment_merge_fragment_cache: %i\n",err);
+
+	/* call the transforms for the merged transfer */
+	dma_fragment_execute_transforms(
+		&merged->fragment,
+		NULL,
+		gfpflags
+		);
+	return err;
 }
-EXPORT_SYMBOL_GPL(spi_message_transform_release_all);
+EXPORT_SYMBOL_GPL(spi_merged_dma_fragment_merge_fragment_cache);
+
+
+static const char *_tab_indent_string = "\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t";
+
+static inline const char *_tab_indent(int indent) {
+	return &_tab_indent_string[16-min(16,indent)];
+}
 
 /**
- * spi_dmafragment_create_composite - create a composite DMA fragment
- *   which will contain several other DMA fragments to create a complete
- *   transfer of an SPI message
- *   this is used for both prepared and unprepared messages
- * @device: for which device is this created
- * @gfpflags: which flags should get used for memory allocation purposes
+ * spi_merged_dma_fragment_dump - dump the spi_merged_dma_fragment
+ * into a spi_merged_dma_fragment
+ * @fragment: the fragment cache from which to fetch the fragment
+ * @dev: the devie to use during the dump
+ * @tindent: the number of tab indents to add
+ * @flags: the flags for dumping the fragment
+ * @dma_link_dump: the function which to use to dump the dmablock
  */
-struct dma_fragment *spi_dmafragment_create_composite(
-	struct device * device,gfp_t gfpflags)
+void spi_merged_dma_fragment_dump(
+	struct spi_merged_dma_fragment *fragment,
+	struct device *dev,
+	int tindent,
+	int flags,
+	void (*dma_cb_dump)(struct dma_link *,
+			struct device *,int)
+	)
 {
-	struct spi_dma_fragment_composite *frag
-		= (typeof(frag))dma_fragment_alloc(
-			device,gfpflags,sizeof(*frag));
+	int i;
+	struct dma_fragment_transform *transform;
 
-	dma_fragment_init((struct dma_fragment_composite *)frag);
-	frag->last_setup_transfer = NULL;
-	frag->last_transfer = NULL;
+	dma_fragment_dump(&fragment->fragment,dev,
+			tindent,flags,dma_cb_dump);
+	tindent++;
 
-	return &(frag->composite.fragment);
+	/* dump the individual dma_fragment_transforms */
+	dev_printk(KERN_INFO,dev,"%spre-DMA-Transforms:\n",
+		_tab_indent(tindent));
+	i=0;
+	list_for_each_entry(transform,
+			&fragment->transform_pre_dma_list,
+			transform_list) {
+		dev_printk(KERN_INFO,dev,
+			"%spre-DMA-Transform %i:\n",
+			_tab_indent(tindent+1),
+			i++);
+		dma_fragment_transform_dump(transform, dev, tindent+2);
+	}
+	/* dump the individual dma_fragment_transforms */
+	dev_printk(KERN_INFO,dev,"%spost-DMA-Transforms:\n",
+		_tab_indent(tindent));
+	i=0;
+	list_for_each_entry(transform,
+			&fragment->transform_post_dma_list,
+			transform_list) {
+		dev_printk(KERN_INFO,dev,
+			"%spost-DMA-Transform %i:\n",
+			_tab_indent(tindent+1),
+			i++);
+		dma_fragment_transform_dump(transform, dev, tindent+2);
+	}
+
 }
-EXPORT_SYMBOL_GPL(spi_dmafragment_create_composite);
+EXPORT_SYMBOL_GPL(spi_merged_dma_fragment_dump);
 
-EXPORT_SYMBOL_GPL(spi_message_to_dma_fragment);
-#endif
 
 MODULE_DESCRIPTION("spi specific dma-fragment infrastructure");
 MODULE_AUTHOR("Martin Sperl <kernel@martin.sperl.org>");

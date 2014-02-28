@@ -69,8 +69,8 @@ struct bcm2835dma_spi_device_data {
 	char       cs_name[20];
 };
 
-struct bcm2835dma_spi_merged_dma_fragments {
-	struct spi_merged_dma_fragments spi_fragments;
+struct bcm2835dma_spi_merged_dma_fragment {
+	struct spi_merged_dma_fragment spi_fragment;
 
 	u32 *txdma_link_to_here;
 	u32 *total_length;
@@ -81,7 +81,6 @@ struct bcm2835dma_spi_merged_dma_fragments {
 };
 
 struct bcm2835dma_spi {
-	struct spi_dma_fragment_functions spi_dma_functions;
 	/* the SPI registers */
 	void __iomem *spi_regs;
 	/* the clock */
@@ -107,6 +106,18 @@ void bcm2835dma_release_dmafragment_components(struct spi_master*);
 
 /* the interrupt-handlers */
 irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id);
+
+/**
+ * bcm2835dma_spi_message_to_dma_fragment - converts a spi_message to a
+ *  dma_fragment
+ * @msg:  the spi message to convert
+ * @flags: some flags
+ * @gfpflags: flags for allocation
+ * notes:
+ *  with minimal effort this probably could get added to the spi framework
+ */
+struct dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
+	struct spi_message *msg, int flags, gfp_t gfpflags);
 
 /**
  * dmalink_to_cb - casts dma_link to a control_block
