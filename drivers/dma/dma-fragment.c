@@ -352,7 +352,6 @@ int dma_fragment_cache_initialize(
 {
 	char *fullname;
 	int i,err;
-
 	memset(cache,0,sizeof(struct dma_fragment_cache));
 
 	spin_lock_init(&cache->lock);
@@ -460,7 +459,9 @@ int dma_fragment_cache_resize(struct dma_fragment_cache* cache,
 
 	/* add up to size */
 	for (i = 0 ; i < resizeby ; i++) {
-		if (! dma_fragment_cache_add(cache,GFP_KERNEL,1) ) {
+		if (! dma_fragment_cache_add(cache,GFP_KERNEL,
+						DMA_FRAGMENT_CACHE_TO_IDLE)
+			) {
 			return -ENOMEM;
 		}
 	}
@@ -493,7 +494,7 @@ EXPORT_SYMBOL_GPL(dma_fragment_cache_resize);
 struct dma_fragment *dma_fragment_cache_add(
 	struct dma_fragment_cache *cache,
 	gfp_t gfpflags,
-	int toidle)
+	int dest)
 {
 	unsigned long flags;
 
@@ -511,7 +512,7 @@ struct dma_fragment *dma_fragment_cache_add(
 	if (gfpflags == GFP_KERNEL)
 		cache->count_allocated_kernel ++;
 	/* add to corresponding list */
-	if (flags & DMA_FRAGMENT_CACHE_TO_IDLE) {
+	if (dest & DMA_FRAGMENT_CACHE_TO_IDLE) {
 		list_add(&frag->cache_list, &cache->idle);
 		cache->count_idle++;
 	} else {
