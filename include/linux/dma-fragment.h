@@ -86,7 +86,6 @@ void dma_link_dump(
 	void (*dma_cb_dump)(struct dma_link *, struct device *, int)
 	);
 
-
 /**
  * dma_fragment_transform - an action taken with certain arguments
  * @transform_list: list of transforms to get executed in sequence
@@ -448,7 +447,8 @@ void dma_fragment_cache_release(struct dma_fragment_cache *cache);
  * @gfpflags: the flags used for allocation
  * @flags: some allocation flags.
  */
-#define DMA_FRAGMENT_CACHE_TO_IDLE (1<<0)
+#define DMA_FRAGMENT_CACHE_TO_IDLE   (1<<0)
+#define DMA_FRAGMENT_CACHE_TO_ACTIVE (0<<0)
 struct dma_fragment *dma_fragment_cache_add(
 	struct dma_fragment_cache *cache,
 	gfp_t gfpflags,
@@ -497,7 +497,8 @@ static inline struct dma_fragment *dma_fragment_cache_fetch(
 
 	/* allocate fragment outside of lock and add to active queue */
 	if (!frag)
-		frag = dma_fragment_cache_add(cache,gfpflags,0);
+		frag = dma_fragment_cache_add(cache,gfpflags,
+			DMA_FRAGMENT_CACHE_TO_ACTIVE);
 
 	/* if in GFP_KERNEL context, then allocate an additional one */
 	if (gfpflags == GFP_KERNEL) {
@@ -523,6 +524,8 @@ static inline void dma_fragment_cache_return(
 	if (cache) {
 		spin_lock_irqsave(&cache->lock,flags);
 		list_move(&fragment->cache_list,&cache->idle);
+		cache->count_idle ++;
+		cache->count_active --;
 		spin_unlock_irqrestore(&cache->lock,flags);
 	} else {
 		printk(KERN_ERR "dma_fragment_cache_return:"
