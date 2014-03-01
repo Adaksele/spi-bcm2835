@@ -1201,7 +1201,7 @@ static struct dma_fragment *bcm2835dma_merged_dma_fragments_alloc(
    note that the below requires that master has already been registered
    otherwise you get an oops...
  */
-#define PREPARE 10 /* prepare the caches with a typical 3 messages */
+#define PREPARE 3 /* prepare the caches with a typical 3 messages */
 int bcm2835dma_register_dmafragment_components(
 	struct spi_master *master)
 {
