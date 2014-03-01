@@ -139,12 +139,22 @@ static inline void dma_fragment_transform_init(
  * @extra: some extra information
  * @size: size of the structure to allocate
  */
-struct dma_fragment_transform *dma_fragment_transform_alloc(
+static inline struct dma_fragment_transform *dma_fragment_transform_alloc(
 	int (*function)(struct dma_fragment_transform *, void *,gfp_t),
 	struct dma_fragment *fragment,
 	void *src,void *dst,void *extra,
 	size_t size,
-	gfp_t gfpflags);
+	gfp_t gfpflags)
+{
+	struct dma_fragment_transform *trans;
+	size = max(size,sizeof(*trans));
+
+	trans = kzalloc(size,gfpflags);
+	if (trans)
+		dma_fragment_transform_init(trans,size,function,
+					fragment,src,dst,extra);
+	return trans;
+}
 
 static inline void dma_fragment_transform_free(
 	struct dma_fragment_transform *transform)
@@ -229,7 +239,9 @@ static inline void dma_fragment_init(struct dma_fragment* fragment,
 				size_t size)
 {
 	size = max( size, sizeof(*fragment) );
+
 	memset(fragment,0,size);
+
 	fragment->size=size;
 
 	INIT_LIST_HEAD(&fragment->cache_list);
@@ -244,9 +256,22 @@ static inline void dma_fragment_init(struct dma_fragment* fragment,
  * @gfpflags: the allocation flags
  * @size: the size to really allocate
  */
-struct dma_fragment* dma_fragment_alloc(
+static inline struct dma_fragment* dma_fragment_alloc(
 	struct device *device,
-	gfp_t gfpflags, size_t size);
+	size_t size, gfp_t gfpflags)
+{
+	struct dma_fragment *frag;
+
+	size = max( size, sizeof(*frag) );
+
+	frag = kmalloc(size,gfpflags);
+	if (! frag)
+		return NULL;
+
+	dma_fragment_init(frag,size);
+
+	return frag;
+}
 
 /**
  * dma_fragment_free - allocate a new dma_fragment and initialize it empty

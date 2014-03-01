@@ -64,8 +64,12 @@ struct dma_link *dma_link_alloc(struct dma_pool *pool,
 				size_t size,
 				gfp_t gfpflags)
 {
-	struct dma_link *dmalink = kzalloc(
-		max(sizeof(*dmalink),size),
+	struct dma_link *dmalink;
+
+	size = max(size,sizeof(*dmalink));
+
+	dmalink = kzalloc(
+		size,
 		gfpflags);
 	if (!dmalink)
 		return NULL;
@@ -161,21 +165,6 @@ void dma_link_dump(
 }
 EXPORT_SYMBOL_GPL(dma_link_dump);
 
-struct dma_fragment_transform *dma_fragment_transform_alloc(
-	int (*function)(struct dma_fragment_transform *, void *,gfp_t),
-	struct dma_fragment *fragment,
-	void *src, void *dst, void *extra,
-	size_t size,
-	gfp_t gfpflags) {
-	struct dma_fragment_transform *trans =
-		kzalloc(max(size,sizeof(*trans)),gfpflags);
-	if (trans)
-		dma_fragment_transform_init(trans,size,function,
-					fragment,src,dst,extra);
-	return trans;
-}
-EXPORT_SYMBOL_GPL(dma_fragment_transform_alloc);
-
 void dma_fragment_transform_dump(
 	struct dma_fragment_transform *trans,
 	struct device *dev,
@@ -203,22 +192,6 @@ void dma_fragment_transform_dump(
 			dev,tindent);
 }
 EXPORT_SYMBOL_GPL(dma_fragment_transform_dump);
-
-struct dma_fragment *dma_fragment_alloc(
-	struct device *device,
-	gfp_t gfpflags,size_t size)
-{
-	struct dma_fragment *frag;
-	size_t s = max( size, sizeof(*frag) );
-	frag=kmalloc(s,gfpflags);
-	if (! frag)
-		return NULL;
-
-	dma_fragment_init(frag,s);
-
-	return frag;
-}
-EXPORT_SYMBOL_GPL(dma_fragment_alloc);
 
 void dma_fragment_free(struct dma_fragment *frag)
 {

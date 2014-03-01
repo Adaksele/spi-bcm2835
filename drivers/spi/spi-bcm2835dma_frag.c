@@ -66,8 +66,9 @@ extern int delay_1us;
 	struct bcm2835_dma_cb *cb;					\
 	struct struct_name *frag =					\
 		(struct struct_name *) dma_fragment_alloc(		\
-			device,gfpflags,				\
-			sizeof(struct struct_name));			\
+			device,						\
+			sizeof(struct struct_name),			\
+			gfpflags);					\
 	if (! frag)							\
 		return NULL;						\
 	((struct dma_fragment *)frag)->desc = #struct_name;
@@ -1200,6 +1201,7 @@ static struct dma_fragment *bcm2835dma_merged_dma_fragments_alloc(
    note that the below requires that master has already been registered
    otherwise you get an oops...
  */
+#define PREPARE 10 /* prepare the caches with a typical 3 messages */
 int bcm2835dma_register_dmafragment_components(
 	struct spi_master *master)
 {
@@ -1211,9 +1213,7 @@ int bcm2835dma_register_dmafragment_components(
                 "DMA-CB-pool",
                 &master->dev,
                 sizeof(struct bcm2835_dma_cb),
-                64,
-                0
-                );
+                64,0);
 	if (!bs->pool) {
 		dev_err(&master->dev,
 			"could not allocate DMA-memory pool\n");
@@ -1226,7 +1226,7 @@ int bcm2835dma_register_dmafragment_components(
 		&master->dev,
 		"fragment_merged",
 		&bcm2835dma_merged_dma_fragments_alloc,
-		3
+		PREPARE*1
 		);
 	if (err)
 		goto error;
@@ -1236,7 +1236,7 @@ int bcm2835dma_register_dmafragment_components(
 		&master->dev,
 		"config_spi",
 		&bcm2835dma_spi_create_fragment_config_spi,
-		6
+		PREPARE*2
 		);
 	if (err)
 		goto error;
@@ -1246,7 +1246,7 @@ int bcm2835dma_register_dmafragment_components(
 		&master->dev,
 		"transfer",
 		&bcm2835dma_spi_create_fragment_transfer,
-		3
+		PREPARE*3
 		);
 	if (err)
 		goto error;
@@ -1256,7 +1256,7 @@ int bcm2835dma_register_dmafragment_components(
 		&master->dev,
 		"fragment_cs_deselect",
 		&bcm2835dma_spi_create_fragment_cs_deselect,
-		3
+		PREPARE*1
 		);
 	if (err)
 		goto error;
@@ -1266,7 +1266,7 @@ int bcm2835dma_register_dmafragment_components(
 		&master->dev,
 		"fragment_delay",
 		&bcm2835dma_spi_create_fragment_delay,
-		1
+		PREPARE/2
 		);
 	if (err)
 		goto error;
@@ -1276,7 +1276,7 @@ int bcm2835dma_register_dmafragment_components(
 		&master->dev,
 		"fragment_trigger_irq",
 		&bcm2835dma_spi_create_fragment_trigger_irq,
-		3
+		PREPARE
 		);
 	if (err)
 		goto error;

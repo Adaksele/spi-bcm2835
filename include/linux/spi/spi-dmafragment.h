@@ -61,10 +61,9 @@ static inline struct dma_fragment *spi_merged_dma_fragment_alloc(
 	struct device *device,size_t size,gfp_t gfpflags)
 {
 	struct spi_merged_dma_fragment *frag;
-	if ( size < sizeof(*frag) )
-		size = sizeof(*frag);
+	size = max( size, sizeof(*frag));
 
-	frag = ( typeof(frag) )
+	frag = (typeof(frag) )
 		dma_fragment_alloc(device,size,gfpflags);
 	if ( frag )
 		spi_merged_dma_fragment_init(
