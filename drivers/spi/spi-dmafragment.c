@@ -26,10 +26,12 @@ int spi_merged_dma_fragment_call_complete(
 	struct dma_fragment_transform *transform,
 	void *vp, gfp_t gfpflags)
 {
+#if 0
 	struct spi_merged_dma_fragment *merged =
 		(typeof(merged)) transform->fragment;
 	struct spi_message *mesg = merged->message;
-	//mesg->complete(mesg->context);
+	mesg->complete(mesg->context);
+#endif
 	return 0;
 }
 EXPORT_SYMBOL_GPL(spi_merged_dma_fragment_call_complete);
@@ -83,17 +85,20 @@ int spi_merged_dma_fragment_merge_fragment_cache(
 		);
 
 	/* now link the fragments for real */
-	if (merged->last_dma_link) {
-		err = merged->link_dma_link(merged->last_dma_link,
+	if (merged->fragment.link_tail) {
+		err = merged->link_dma_link(merged->fragment.link_tail,
 					frag->link_head);
 		if (err)
 			goto error;
+	} else {
+		merged->fragment.link_head = frag->link_head;
 	}
 	/* and remember the tail for the next transform */
-	merged->last_dma_link = frag->link_tail;
+	merged->fragment.link_tail = frag->link_tail;
 
-	/* and set the tail next pointer to 0 */
-	return merged->link_dma_link(merged->last_dma_link,NULL);
+	/* and set the tail next pointer to 0, so that we do not
+	 * accidentally run in a dma loop or other...*/
+	return merged->link_dma_link(merged->fragment.link_tail,NULL);
 
 error:
 	printk(KERN_ERR "spi_merged_dma_fragment_merge_fragment_cache:"
@@ -109,9 +114,7 @@ error:
 }
 EXPORT_SYMBOL_GPL(spi_merged_dma_fragment_merge_fragment_cache);
 
-
 static const char *_tab_indent_string = "\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t";
-
 static inline const char *_tab_indent(int indent) {
 	return &_tab_indent_string[16-min(16,indent)];
 }

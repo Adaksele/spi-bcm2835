@@ -50,7 +50,6 @@ struct spi_merged_dma_fragment {
 
 	/* and the link function*/
 	int (*link_dma_link)(struct dma_link *,struct dma_link *);
-	struct dma_link *last_dma_link;
 };
 
 static inline void spi_merged_dma_fragment_init(

@@ -67,12 +67,14 @@ struct bcm2835dma_spi_device_data {
 	u8         cs_gpio;
 	char       cs_name[20];
 	/* and some generic prepared messages for optimizations */
+#if 0
 #define prepared_single_transfers_count 1
 	struct {
 		spinlock_t lock;
 		struct spi_message *messages[prepared_single_transfers_count];
 		struct spi_transfers *trasnfers[prepared_single_transfers_count];
 	} prepared_single_transfers;
+#endif
 };
 
 struct bcm2835dma_spi_merged_dma_fragment {

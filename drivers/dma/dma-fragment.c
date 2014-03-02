@@ -17,7 +17,6 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
- * 4567890123456789012345678901234567890123456789012345678901234567890123456789
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -307,6 +306,7 @@ void dma_fragment_dump(
 	struct dma_link *link;
 	struct dma_fragment_transform *transform;
 	int i;
+	const char *indent=_tab_indent(tindent+1);
 
 	dev_printk(KERN_INFO,dev,
 		"%sDMA-Fragment:\t%pK\n",
@@ -315,18 +315,25 @@ void dma_fragment_dump(
 	tindent++;
 	dev_printk(KERN_INFO,dev,
 		"%saddr:\t%pK\n",
-		_tab_indent(tindent),
+		indent,
 		fragment);
 	dev_printk(KERN_INFO,dev,
 		"%scache:\t%pK\n",
-		_tab_indent(tindent),
+		indent,
 		fragment->cache);
 	if (fragment->desc)
 		dev_printk(KERN_INFO,dev,
 			"%sdescr:\t%s\n",
-			_tab_indent(tindent),
+			indent,
 			fragment->desc);
-
+	dev_printk(KERN_INFO,dev,
+		"%slink_h:\t%pK\n",
+		indent,
+		fragment->link_head);
+	dev_printk(KERN_INFO,dev,
+		"%slink_t:\t%pK\n",
+		indent,
+		fragment->link_tail);
 	/* dump extra data */
 	if (sizeof(*fragment) < fragment->size)
 		_dump_extra_data(

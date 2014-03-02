@@ -140,7 +140,8 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 	merged->message       = msg;
 	merged->transfer      = NULL;
 	merged->last_transfer = NULL;
-	merged->last_dma_link = NULL;
+	merged->fragment.link_head = NULL;
+	merged->fragment.link_tail = NULL;
 
 	/* now start iterating the transfers */
 	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
@@ -365,7 +366,7 @@ irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 
 	/* write interrupt message to debug */
-	if (unlikely(debug_dma))
+	//if (unlikely(debug_dma))
 		printk(KERN_DEBUG "TX-Interrupt %i triggered\n",irq);
 
 	/* we need to clean the IRQ flag as well
@@ -385,6 +386,51 @@ irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+/* schedule a DMA fragment on a specific DMA channel */
+static int bcm2835dma_schedule_dma_fragment(
+	struct spi_master *master,
+	struct spi_message *msg)
+{
+	unsigned long flags;
+	struct spi_merged_dma_fragment *frag = msg->state;
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+	struct spi_message *last_msg;
+	struct spi_merged_dma_fragment *last_frag;
+
+	spin_lock_irqsave(&master->queue_lock,flags);
+
+	last_msg = (!list_empty(&master->queue) ?
+		list_last_entry(&master->queue, struct spi_message, queue)
+		: NULL);
+
+	/* link it to the last one on a spi_message level
+	 * as well as on a dma level
+	 */
+	list_add_tail(&msg->queue,&master->queue);
+
+	if (last_msg) {
+		last_frag = last_msg->state;
+		bcm2835_link_dma_link(
+			last_frag->fragment.link_tail,
+			frag->fragment.link_head);
+		dsb();
+	}
+	/* now see if DMA is still running */
+	if ( !( readl(bs->dma_rx.base+BCM2835_DMA_CS)
+			& BCM2835_DMA_CS_ACTIVE )) {
+		printk(KERN_INFO "Schedule RXDMA\n");
+		writel(frag->fragment.link_head->cb_dma,
+			bs->dma_rx.base+BCM2835_DMA_ADDR);
+		dsb();
+		writel(BCM2835_DMA_CS_ACTIVE,
+			bs->dma_rx.base+BCM2835_DMA_CS);
+	}
+
+	spin_unlock_irqrestore(&master->queue_lock,flags);
+
+	return 0;
+}
+
 static int bcm2835dma_spi_transfer(struct spi_device *spi,
 				struct spi_message *message)
 {
@@ -397,15 +443,14 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 		message,
 		0,
 		GFP_ATOMIC);
+	message -> state = merged;
 	printk(KERN_INFO "end\n");
-
 	spi_merged_dma_fragment_execute_pre_dma_transforms(
 		merged,NULL,GFP_ATOMIC);
 	printk(KERN_INFO "exec_dma_pre\n");
 	spi_merged_dma_fragment_execute_post_dma_transforms(
 		merged,NULL,GFP_ATOMIC);
 	printk(KERN_INFO "exec_dma_post\n");
-
 
 	/* and schedule it */
 	if (merged)
