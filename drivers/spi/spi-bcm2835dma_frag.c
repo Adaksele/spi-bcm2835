@@ -116,8 +116,7 @@ error:							\
  * @field: the field name
  */
 #define LINKTO(field)					   \
-	((struct bcm2835_dma_cb *)frag->field->cb)->next = \
-		link->cb_dma;
+	bcm2835_link_dma_link(frag->field,link);
 
 /*------------------------------------------------------------------------
  * helpers and macros to to make the basic "setup" of dma_fragments
@@ -1085,36 +1084,6 @@ struct dma_fragment_trigger_irq {
 	struct dma_link     *start_tx_dma;
 };
 
-static int spi_merged_dma_fragment_call_complete(
-	struct dma_fragment_transform *transform,
-	void *vp, gfp_t gfpflags)
-{
-	struct spi_merged_dma_fragment *merged = (typeof(merged)) vp;
-	struct spi_message *mesg = merged->message;
-	mesg->complete(mesg->context);
-	return 0;
-}
-
-static inline int spi_merged_dma_fragment_complete(
-	struct dma_fragment_transform *transform,
-	void *vp, gfp_t gfpflags)
-{
-	/* the merged fragment */
-	struct spi_merged_dma_fragment *merged = (typeof(merged)) vp;
-	/* check for callback in mesg */
-	if ( merged->message->complete)
-		/* schedule post-dma callback */
-		if (! spi_merged_dma_fragment_addnew_transform(
-				vp,
-				&spi_merged_dma_fragment_call_complete,
-				transform->fragment,
-				NULL,NULL,NULL,
-				0,1,gfpflags) )
-			return -ENOMEM;
-		return 0;
-}
-
-
 static struct dma_fragment *bcm2835dma_spi_create_fragment_trigger_irq(
 	struct device *device,gfp_t gfpflags)
 {
@@ -1193,6 +1162,7 @@ static struct dma_fragment *bcm2835dma_merged_dma_fragments_alloc(
 {
 	return spi_merged_dma_fragment_alloc(
 		device,
+		&bcm2835_link_dma_link,
 		sizeof(struct bcm2835dma_spi_merged_dma_fragment),
 		gfpflags);
 }

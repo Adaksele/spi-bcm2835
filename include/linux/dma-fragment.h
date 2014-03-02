@@ -219,15 +219,29 @@ static inline int dma_fragment_transform_copy_u32(
  */
 struct dma_fragment {
 	size_t size;
-	struct dma_fragment_cache *cache;
 	char *desc;
+	/* the object in cache */
+	struct dma_fragment_cache *cache;
 	struct list_head cache_list;
+
+	/* the linked list of dma_links */
 	struct list_head dma_link_list;
 
+	/* the linked list of dma_fragment_transforms */
 	struct list_head transform_list;
 
+	/* the first and the last object in the fragment
+	 * note that this is not necessarily identical
+	 * to dma_linked_list - especially if multiple
+	 * DMA-Channels are needed for processing */
 	struct dma_link *link_head;
 	struct dma_link *link_tail;
+
+	/* if we are getting linked to a "bigger" fragment,
+	 * then we use this transform to revert us back
+	 * this avoids unnecessary memory allocations
+	 */
+	struct dma_fragment_transform *transform_back;
 };
 
 /**
@@ -248,6 +262,8 @@ static inline void dma_fragment_init(struct dma_fragment* fragment,
 	INIT_LIST_HEAD(&fragment->dma_link_list);
 
 	INIT_LIST_HEAD(&fragment->transform_list);
+
+	fragment->transform_back = NULL;
 }
 
 /**
@@ -272,6 +288,18 @@ static inline struct dma_fragment* dma_fragment_alloc(
 
 	return frag;
 }
+
+/**
+ * dma_fragment_add_return_to_cache_transform - allocates and returns
+ *   a dma_fragment_transform that will "restore" the state of the
+ *   dma_fragment in such a way, that it can get reused
+ *   and it will also return the dma_fragment back to its cache
+ * @fragment: the fragment for which we do this
+ * @gfpflags: the gfp flags with which we run the allocation
+ */
+struct dma_fragment_transform *dma_fragment_add_return_to_cache_transform(
+	struct dma_fragment* fragment,
+	gfp_t gfpflags);
 
 /**
  * dma_fragment_free - allocate a new dma_fragment and initialize it empty

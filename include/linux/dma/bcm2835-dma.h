@@ -110,6 +110,14 @@ static inline u32 bcm2835_dma_cb_compose_stride(
 	return *((u32*)&tmp);
 }
 
+static inline int bcm2835_link_dma_link(
+	struct dma_link *from, struct dma_link *to)
+{
+	dma_addr_t next = (to) ? to->cb_dma : 0;
+	((struct bcm2835_dma_cb *)from->cb)->next = next;
+	return 0;
+}
+
 void bcm2835_dma_cb_dump(
 	struct bcm2835_dma_cb *dmablock,
 	dma_addr_t dmablock_dma,

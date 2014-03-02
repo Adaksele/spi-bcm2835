@@ -192,6 +192,55 @@ void dma_fragment_transform_dump(
 			dev,tindent);
 }
 EXPORT_SYMBOL_GPL(dma_fragment_transform_dump);
+int _dma_fragment_transform_restore_return_to_cache(
+	struct dma_fragment_transform * transform,
+	void *vp,
+	gfp_t gfpflags)
+{
+	struct dma_fragment *frag     = transform->fragment;
+	struct list_head    *head     = transform->src;
+	struct list_head    *tail     = transform->dst;
+
+	/* restore fragment.dma_link_list
+	   correct would be walking the list, but it is not efficient...
+	   - maybe this should go to lists.h */
+
+	/* first unlink from origin */
+	head->prev->next = tail->next;
+	tail->next->prev = head->prev;
+
+	/* link ourself to new list */
+	head->prev = frag->dma_link_list.next;
+	frag->dma_link_list.next = head;
+	tail->next = frag->dma_link_list.prev;
+	frag->dma_link_list.prev = tail;
+
+	/* and unlink us from the list */
+	list_del(&frag->transform_back->transform_list);
+
+	/* now that we have relinked the dma_links
+	   to the correct location return the fragment back to cache */
+	dma_fragment_cache_return(frag);
+
+	return 0;
+}
+
+struct dma_fragment_transform *dma_fragment_add_return_to_cache_transform(
+	struct dma_fragment* fragment, gfp_t gfpflags)
+{
+	if (!fragment->transform_back)
+		fragment->transform_back = dma_fragment_transform_alloc(
+			&_dma_fragment_transform_restore_return_to_cache,
+			fragment,
+			fragment->dma_link_list.next,
+			fragment->dma_link_list.prev,
+			NULL,
+			0,
+			gfpflags
+			);
+	return fragment->transform_back;
+}
+EXPORT_SYMBOL_GPL(dma_fragment_add_return_to_cache_transform);
 
 void dma_fragment_free(struct dma_fragment *frag)
 {
@@ -224,6 +273,12 @@ void dma_fragment_free(struct dma_fragment *frag)
 			typeof(*transform),
 			transform_list);
 		dma_fragment_transform_free(transform);
+	}
+
+	/* free the existing transform_back */
+	if (frag->transform_back) {
+		list_del(&frag->transform_back->transform_list);
+		kfree(frag->transform_back);
 	}
 
 	kfree(frag);

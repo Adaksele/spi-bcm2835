@@ -90,7 +90,7 @@ MODULE_PARM_DESC(delay_1us,
  * notes:
  *   with minimal effort this probably could get added to the spi framework
  */
-struct dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
+struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 	struct spi_message *msg, int flags, gfp_t gfpflags)
 {
 	struct spi_device *spi    = msg->spi;
@@ -100,6 +100,12 @@ struct dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 	struct spi_merged_dma_fragment *merged;
 	struct spi_transfer *xfer;
 	int err=0;
+
+	/* some optimizations - it might help if we knew the length... */
+	/* check if we got a frame that is of a single transfer */
+	if ( list_is_singular(&msg->transfers) ) {
+		/* check if we got something in the structure we could use */
+	}
 
 	/* fetch a merged fragment */
 	merged = (typeof(merged))
@@ -134,6 +140,7 @@ struct dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 	merged->message       = msg;
 	merged->transfer      = NULL;
 	merged->last_transfer = NULL;
+	merged->last_dma_link = NULL;
 
 	/* now start iterating the transfers */
 	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
@@ -212,10 +219,11 @@ struct dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 	}
 
 	/* and return it */
-	return &merged->fragment;
+	return merged;
 
 error:
-	printk(KERN_ERR "bcm2835dma_spi_message_to_dma_fragment: err=%i\n",err);
+	printk(KERN_ERR "bcm2835dma_spi_message_to_dma_fragment:"
+		" err=%i\n",err);
 	dma_fragment_dump(
 		&merged->fragment,
 		&msg->spi->dev,
@@ -380,15 +388,24 @@ irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
 static int bcm2835dma_spi_transfer(struct spi_device *spi,
 				struct spi_message *message)
 {
-	//struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	int status=-EPERM;
-	struct dma_fragment *merged;
+	struct spi_merged_dma_fragment *merged;
 
 	/* fetch DMA fragment */
+	printk(KERN_INFO "start\n");
 	merged = bcm2835dma_spi_message_to_dma_fragment(
 		message,
 		0,
 		GFP_ATOMIC);
+	printk(KERN_INFO "end\n");
+
+	spi_merged_dma_fragment_execute_pre_dma_transforms(
+		merged,NULL,GFP_ATOMIC);
+	printk(KERN_INFO "exec_dma_pre\n");
+	spi_merged_dma_fragment_execute_post_dma_transforms(
+		merged,NULL,GFP_ATOMIC);
+	printk(KERN_INFO "exec_dma_post\n");
+
 
 	/* and schedule it */
 	if (merged)

@@ -23,7 +23,6 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
- * 4567890123456789012345678901234567890123456789012345678901234567890123456789
  */
 
 #include <linux/spi/spi-dmafragment.h>
@@ -67,6 +66,13 @@ struct bcm2835dma_spi_device_data {
 	u32        cs_bitfield;
 	u8         cs_gpio;
 	char       cs_name[20];
+	/* and some generic prepared messages for optimizations */
+#define prepared_single_transfers_count 1
+	struct {
+		spinlock_t lock;
+		struct spi_message *messages[prepared_single_transfers_count];
+		struct spi_transfers *trasnfers[prepared_single_transfers_count];
+	} prepared_single_transfers;
 };
 
 struct bcm2835dma_spi_merged_dma_fragment {
@@ -116,7 +122,7 @@ irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id);
  * notes:
  *  with minimal effort this probably could get added to the spi framework
  */
-struct dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
+struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 	struct spi_message *msg, int flags, gfp_t gfpflags);
 
 /**

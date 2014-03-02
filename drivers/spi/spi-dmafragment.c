@@ -22,39 +22,17 @@
 #include <linux/module.h>
 #include <linux/spi/spi-dmafragment.h>
 
-/**
- * spi_merged_dma_fragment_release_fragment_to_cache - transform that
- * release the dma_fragment back to its cache and also return the
- * dma_links that has been hijacked
- */
-int spi_merged_dma_fragment_release_fragment_to_cache(
+int spi_merged_dma_fragment_call_complete(
 	struct dma_fragment_transform *transform,
-	void *data,
-	gfp_t gfpflags)
+	void *vp, gfp_t gfpflags)
 {
-	/*struct dma_fragment *fragment = transform->fragment;*/
-	struct list_head    *head     = transform->src;
-	struct list_head    *tail     = transform->dst;
-	struct dma_fragment *frag     = transform->extra;
-
-	/* restore fragment.dma_link_list
-	   correct would be walking the list, but it is not efficient...
-	   - maybe this should go to lists.h */
-	/* first unlink from origin */
-	head->prev->next = tail->next;
-	tail->next->prev = head->prev;
-	/* link ourself to new list */
-	head->prev = frag->dma_link_list.next;
-	frag->dma_link_list.next = head;
-	tail->next = frag->dma_link_list.prev;
-	frag->dma_link_list.prev = tail;
-
-	/* now that we have relinked the dma_links
-	   to the correct location return the fragment back to cache */
-	dma_fragment_cache_return(frag);
-
+	struct spi_merged_dma_fragment *merged =
+		(typeof(merged)) transform->fragment;
+	struct spi_message *mesg = merged->message;
+	//mesg->complete(mesg->context);
 	return 0;
 }
+EXPORT_SYMBOL_GPL(spi_merged_dma_fragment_call_complete);
 
 /**
  * spi_merged_dma_fragment_merge_fragment_cache - merge a
@@ -71,8 +49,8 @@ int spi_merged_dma_fragment_merge_fragment_cache(
 	)
 {
 	struct dma_fragment *frag;
+	struct dma_fragment_transform *transform;
 	int err = 0;
-	struct list_head tmp_copy;
 
 	/* fetch the fragment from dma_fragment_cache */
 	frag = dma_fragment_cache_fetch(fragmentcache,gfpflags);
@@ -88,11 +66,15 @@ int spi_merged_dma_fragment_merge_fragment_cache(
 	if (err)
 		goto error;
 
-	/* "highjack" the fragment dma_list */
+	/* "hijack" the fragment dma_link_list */
 
-	/* first we need a copy of the list as is */
-	tmp_copy.next = frag->dma_link_list.next;
-	tmp_copy.prev = frag->dma_link_list.prev;
+	/* for that we first create a transform to turn us back to "normal"*/
+	transform = dma_fragment_add_return_to_cache_transform(frag,gfpflags);
+	if (! transform )
+		goto error;
+
+	/* and add it to the merged fragment */
+	dma_fragment_add_transform(&merged->fragment,transform);
 
 	/* now splice it away */
 	list_splice_tail_init(
@@ -100,29 +82,22 @@ int spi_merged_dma_fragment_merge_fragment_cache(
 		&merged->fragment.dma_link_list
 		);
 
-	/* add a transform that will release the fragment back to cache */
-	if (! dma_fragment_addnew_transform(
-		&spi_merged_dma_fragment_release_fragment_to_cache,
-		&merged->fragment,
-		tmp_copy.next,
-		tmp_copy.prev,
-		frag,
-		0,gfpflags) ) {
-		err = -ENOMEM;
-		/* in the error case we need to do this here */
-		list_splice_tail_init(
-			&frag->dma_link_list,
-			&(merged->fragment.dma_link_list)
-			);
-		goto error;
+	/* now link the fragments for real */
+	if (merged->last_dma_link) {
+		err = merged->link_dma_link(merged->last_dma_link,
+					frag->link_head);
+		if (err)
+			goto error;
 	}
+	/* and remember the tail for the next transform */
+	merged->last_dma_link = frag->link_tail;
 
-	/* now link the fragments */
-	/* TODO */
+	/* and set the tail next pointer to 0 */
+	return merged->link_dma_link(merged->last_dma_link,NULL);
 
-	return 0;
 error:
-	printk(KERN_ERR "spi_merged_dma_fragment_merge_fragment_cache: %i\n",err);
+	printk(KERN_ERR "spi_merged_dma_fragment_merge_fragment_cache:"
+		" %i\n",err);
 
 	/* call the transforms for the merged transfer */
 	dma_fragment_execute_transforms(
