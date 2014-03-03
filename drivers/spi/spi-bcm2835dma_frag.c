@@ -411,9 +411,9 @@ static inline int bcm2835dma_fragment_transform_speed_hz(
 	/* and now calculate the delay for a half clock cycle
 	   - for now we assume that it is equal to clk_div */
 	if (cdiv)
-		vp->delay_half_cycle_dma_length  = cdiv;
+		vp->delay_half_cycle_dma_length  = cdiv*2;
 	else
-		vp->delay_half_cycle_dma_length  = 65535;
+		vp->delay_half_cycle_dma_length  = 1<<17;
 
 	return 0;
 }
@@ -1106,11 +1106,14 @@ static inline int bcm2835dma_spi_merged_dma_fragment_complete(
 		(struct bcm2835_dma_cb *)frag->message_finished->cb;
 
 	/* set the pad0/pad1 of message_finished to 0 */
+	printk(KERN_ERR "HERE\n");
 	cb->pad[0]=0;
 	cb->pad[1]=0;
+	printk(KERN_ERR "THERE\n");
 
 	/* and set the pointer so that the interrupt-handler may use it */
 	merged->complete_data = &cb->pad[0];
+	printk(KERN_ERR "WHERE\n");
 
 	/* and do the normal stuff */
 	return spi_merged_dma_fragment_complete(transform,vp,gfpflags);

@@ -162,9 +162,11 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 		/* otherwise we can release the message */
 		list_del(&frag->message->queue);
 
+		/* reset status */
+		msg->status = 0;
 		/* and release the fragment */
 		spi_merged_dma_fragment_execute_post_dma_transforms(
-			frag,NULL,GFP_ATOMIC);
+			frag,frag,GFP_ATOMIC);
 	}
 exit:
 	/* unlock master->queue_lock */
@@ -508,7 +510,6 @@ static void bcm2835_spi_regs_dump(struct spi_master* master,
 static int bcm2835dma_spi_transfer(struct spi_device *spi,
 				struct spi_message *message)
 {
-	int status=-EPERM;
 	struct spi_merged_dma_fragment *merged;
 
 	/* fetch DMA fragment */
@@ -517,58 +518,23 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 		message,
 		0,
 		GFP_ATOMIC);
-	message -> state = merged;
+	message->state = merged;
+	message->status = -EBUSY;
 	set_high();
 
 	spi_merged_dma_fragment_execute_pre_dma_transforms(
-		merged,NULL,GFP_ATOMIC);
+		merged,merged,GFP_ATOMIC);
 	set_low();
 
-	bcm2835dma_schedule_dma_fragment(message);
-	set_high();
-#if 0
-	spi_merged_dma_fragment_execute_post_dma_transforms(
-		merged,NULL,GFP_ATOMIC);
-	printk(KERN_INFO "exec_dma_post\n");
-#endif
 	/* and schedule it */
-	if (merged)
-		spi_merged_dma_fragment_dump(
-			(struct spi_merged_dma_fragment*) merged,
-			&message->spi->dev,
-			0,0,
-			&bcm2835_dma_link_dump
-			);
-#if 0
-	{int i;
-		struct device *dev = &message->spi->dev;
-		struct bcm2835dma_spi *bs = spi_master_get_devdata(
-			message->spi->master);
-		for (i=0;i<20;i++) {
-			udelay(10);
-			dev_printk(KERN_INFO,dev,"=====================\n");
-			dev_printk(KERN_INFO,dev,"SPI_REGS:");
-			bcm2835_spi_regs_dump(message->spi->master,dev,1);
-			dev_printk(KERN_INFO,dev,"DMA_RX\n");
-			bcm2835_dma_reg_dump(bs->dma_rx.base,dev,1);
-			dev_printk(KERN_INFO,dev,"DMA_TX\n");
-			bcm2835_dma_reg_dump(bs->dma_tx.base,dev,1);
-		}
+	if (merged) {
+		bcm2835dma_schedule_dma_fragment(message);
+		set_high();
 	}
-	{
-		struct device *dev = &message->spi->dev;
-		dev_printk(KERN_INFO,dev,"PINMUX_REGS:\n");
-		dev_printk(KERN_INFO,dev,"G0\t%011o\n",gpio[0]);
-		dev_printk(KERN_INFO,dev,"G1\t%011o\n",gpio[1]);
-		dev_printk(KERN_INFO,dev,"G2\t%011o\n",gpio[2]);
-		dev_printk(KERN_INFO,dev,"G3\t%011o\n",gpio[3]);
 
-		dev_printk(KERN_INFO,dev,"P0\t%08x\n",gpio[13]);
-		dev_printk(KERN_INFO,dev,"P1\t%08x\n",gpio[14]);
-	}
-#endif
+
 	/* and return */
-	return status;
+	return 0;
 }
 
 static void bcm2835dma_set_gpio_mode(u8 pin,u32 mode) {

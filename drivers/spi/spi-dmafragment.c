@@ -27,8 +27,10 @@ int spi_merged_dma_fragment_call_complete(
 	void *vp, gfp_t gfpflags)
 {
 	struct spi_merged_dma_fragment *merged =
-		(typeof(merged)) transform->fragment;
+		(typeof(merged)) vp;
 	struct spi_message *mesg = merged->message;
+
+	printk(KERN_ERR "COMPLETE: %pf %pf\n",merged,mesg);
 
 	mesg->complete(mesg->context);
 
