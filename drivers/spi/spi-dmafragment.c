@@ -26,12 +26,12 @@ int spi_merged_dma_fragment_call_complete(
 	struct dma_fragment_transform *transform,
 	void *vp, gfp_t gfpflags)
 {
-#if 0
 	struct spi_merged_dma_fragment *merged =
 		(typeof(merged)) transform->fragment;
 	struct spi_message *mesg = merged->message;
+
 	mesg->complete(mesg->context);
-#endif
+
 	return 0;
 }
 EXPORT_SYMBOL_GPL(spi_merged_dma_fragment_call_complete);
@@ -142,6 +142,10 @@ void spi_merged_dma_fragment_dump(
 
 	dma_fragment_dump(&fragment->fragment,dev,
 			tindent,flags,dma_cb_dump);
+	dev_printk(KERN_INFO,dev,"%scomplete_data_ptr: %pf\n",
+		_tab_indent(tindent),
+		fragment->complete_data
+		);
 	tindent++;
 
 	/* dump the individual dma_fragment_transforms */

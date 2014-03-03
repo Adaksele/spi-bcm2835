@@ -498,7 +498,10 @@ struct dma_fragment *bcm2835dma_spi_create_fragment_config_spi(
 	 */
 	ADD_DMA_LINK_TO_FRAGMENT(config_clock_length);
 	LINKTO(reset_spi_fifo);
-	FIXED(ti,     BCM2835_DMA_TI_WAIT_RESP);
+	FIXED(ti,     ( BCM2835_DMA_TI_WAIT_RESP
+			| BCM2835_DMA_TI_S_INC
+			| BCM2835_DMA_TI_D_INC
+			));
 	FIXED(src,    THIS_BCM2835_DMA_CB_MEMBER_DMA_ADDR(pad[0]));
 	FIXED(dst,    (BCM2835_SPI_BASE_BUS + BCM2835_SPI_CLK));
 	FIXED(length, 8);
@@ -662,20 +665,28 @@ static inline int bcm2835dma_fragment_transform_buffer(
 	 * this is especially important for values that may be 0
 	 */
 	if (xfer->rx_buf) {
-		cb_rx->ti = BCM2835_DMA_TI_WAIT_RESP
+		cb_rx->ti =
+			BCM2835_DMA_TI_PER_MAP(BCM2835_DMA_DREQ_SPI_RX)
+			| BCM2835_DMA_TI_S_DREQ
 			| BCM2835_DMA_TI_NO_WIDE_BURSTS
 			| BCM2835_DMA_TI_D_INC;
 	} else {
-		cb_rx->ti = BCM2835_DMA_TI_WAIT_RESP
+		cb_rx->ti =
+			BCM2835_DMA_TI_PER_MAP(BCM2835_DMA_DREQ_SPI_RX)
+			| BCM2835_DMA_TI_S_DREQ
 			| BCM2835_DMA_TI_NO_WIDE_BURSTS
 			| BCM2835_DMA_TI_D_IGNORE;
 	}
 	if (xfer->tx_buf) {
-		cb_tx->ti = BCM2835_DMA_TI_WAIT_RESP
+		cb_tx->ti =
+			BCM2835_DMA_TI_PER_MAP(BCM2835_DMA_DREQ_SPI_TX)
+			| BCM2835_DMA_TI_D_DREQ
 			| BCM2835_DMA_TI_NO_WIDE_BURSTS
-			| BCM2835_DMA_TI_D_INC;
+			| BCM2835_DMA_TI_S_INC;
 	} else {
-		cb_tx->ti = BCM2835_DMA_TI_WAIT_RESP
+		cb_tx->ti =
+			BCM2835_DMA_TI_PER_MAP(BCM2835_DMA_DREQ_SPI_TX)
+			| BCM2835_DMA_TI_D_DREQ
 			| BCM2835_DMA_TI_NO_WIDE_BURSTS
 			| BCM2835_DMA_TI_S_IGNORE;
 	}
@@ -1084,9 +1095,31 @@ struct dma_fragment_trigger_irq {
 	struct dma_link     *start_tx_dma;
 };
 
+static inline int bcm2835dma_spi_merged_dma_fragment_complete(
+	struct dma_fragment_transform *transform,
+	void *vp, gfp_t gfpflags)
+{
+	struct spi_merged_dma_fragment *merged = (typeof(merged)) vp;
+	struct dma_fragment_trigger_irq *frag =
+		(typeof(frag)) transform->fragment;
+	struct bcm2835_dma_cb *cb =
+		(struct bcm2835_dma_cb *)frag->message_finished->cb;
+
+	/* set the pad0/pad1 of message_finished to 0 */
+	cb->pad[0]=0;
+	cb->pad[1]=0;
+
+	/* and set the pointer so that the interrupt-handler may use it */
+	merged->complete_data = &cb->pad[0];
+
+	/* and do the normal stuff */
+	return spi_merged_dma_fragment_complete(transform,vp,gfpflags);
+}
+
 static struct dma_fragment *bcm2835dma_spi_create_fragment_trigger_irq(
 	struct device *device,gfp_t gfpflags)
 {
+	u32 *link_tx;
 	START_CREATE_FRAGMENT_ALLOCATE(dma_fragment_trigger_irq);
 	/* set up the tx-dma start address - equivalent to:
 	 * writel(dma_address_of_tx_transfer,txdma_base+BCM2835_DMA_ADDR);
@@ -1098,6 +1131,7 @@ static struct dma_fragment *bcm2835dma_spi_create_fragment_trigger_irq(
 	FIXED(length,   4);
 	LATER(pad[0],  /* this is set later, when we know the dma_addr
 			   of the TX-DMA-transfer */);
+	link_tx = &cb->pad[0];
 
 	/* copy the timestamp from the counter to a fixed address */
 	ADD_DMA_LINK_TO_FRAGMENT(message_finished);
@@ -1108,21 +1142,22 @@ static struct dma_fragment *bcm2835dma_spi_create_fragment_trigger_irq(
 	FIXED(src,      BCM2835_REG_COUNTER_64BIT_BUS);
 	FIXED(dst,      THIS_BCM2835_DMA_CB_MEMBER_DMA_ADDR(pad[0]));
 	FIXED(length,   8);
+	*link_tx = link->cb_dma;
 
 	/* start the tx-dma - equivalent to:
 	 * writel(BCM2835_DMA_CS_ACTIVE,txdma_base+BCM2835_DMA_ADDR);
 	 */
 	ADD_DMA_LINK_TO_FRAGMENT(start_tx_dma);
 	LINKTO(set_tx_dma_next);
-	FIXED(ti,BCM2835_DMA_TI_WAIT_RESP);
+	FIXED(ti,       BCM2835_DMA_TI_WAIT_RESP);
 	FIXED(src,      THIS_BCM2835_DMA_CB_MEMBER_DMA_ADDR(pad[0]));
 	TXDMA(dst,      BCM2835_DMA_CS);
 	FIXED(length,   4);
-	FIXED(pad[0],     BCM2835_DMA_CS_ACTIVE);
+	FIXED(pad[0],   BCM2835_DMA_CS_ACTIVE);
 
 	/* schedule link time handling of complete callback */
 	SCHEDULE_LINKTIME_TRANSFORM(
-		spi_merged_dma_fragment_complete,
+		bcm2835dma_spi_merged_dma_fragment_complete,
 		NULL,NULL,NULL);
 
 	END_CREATE_FRAGMENT_ALLOCATE();

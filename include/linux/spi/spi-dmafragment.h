@@ -50,6 +50,8 @@ struct spi_merged_dma_fragment {
 
 	/* and the link function*/
 	int (*link_dma_link)(struct dma_link *,struct dma_link *);
+
+	void *complete_data;
 };
 
 static inline void spi_merged_dma_fragment_init(
@@ -175,7 +177,7 @@ static inline int spi_merged_dma_fragment_complete(
 	/* the merged fragment */
 	struct spi_merged_dma_fragment *merged = (typeof(merged)) vp;
 	/* check for callback in mesg */
-	if ( merged->message->complete)
+	if ( merged->message->complete) {
 		/* schedule post-dma callback */
 		if (! spi_merged_dma_fragment_addnew_transform(
 				vp,
@@ -184,7 +186,8 @@ static inline int spi_merged_dma_fragment_complete(
 				NULL,NULL,NULL,
 				0,1,gfpflags) )
 			return -ENOMEM;
-		return 0;
+	}
+	return 0;
 }
 
 /**

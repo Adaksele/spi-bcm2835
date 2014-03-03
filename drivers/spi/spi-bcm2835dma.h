@@ -91,6 +91,7 @@ struct bcm2835dma_spi_merged_dma_fragment {
 struct bcm2835dma_spi {
 	/* the SPI registers */
 	void __iomem *spi_regs;
+	void __iomem *gpio_regs;
 	/* the clock */
 	struct clk *clk;
 	/* the DMA channels allocated */

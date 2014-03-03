@@ -73,6 +73,39 @@
 #define BCM2835_DMA_NEXT                                0x1C
 #define BCM2835_DMA_DEBUG                               0x20
 
+#define BCM2835_DMA_DREQ_NONE                           0
+#define BCM2835_DMA_DREQ_DSI                            1
+#define BCM2835_DMA_DREQ_PCM_TX                         2
+#define BCM2835_DMA_DREQ_PCM_RX                         3
+#define BCM2835_DMA_DREQ_SMI                            4
+#define BCM2835_DMA_DREQ_PWM                            5
+#define BCM2835_DMA_DREQ_SPI_TX                         6
+#define BCM2835_DMA_DREQ_SPI_RX                         7
+#define BCM2835_DMA_DREQ_BSC_TX                         8
+#define BCM2835_DMA_DREQ_BSC_RX                         9
+#define BCM2835_DMA_DREQ_UNUSED                         10
+#define BCM2835_DMA_DREQ_EMMC                           11
+#define BCM2835_DMA_DREQ_UART_TX                        12
+#define BCM2835_DMA_DREQ_SDHOST                         13
+#define BCM2835_DMA_DREQ_UART_RX                        14
+#define BCM2835_DMA_DREQ_DSI2                           15
+#define BCM2835_DMA_DREQ_SLIM_MCTX                      16
+#define BCM2835_DMA_DREQ_HDMI                           17
+#define BCM2835_DMA_DREQ_SLIM_MCRX                      18
+#define BCM2835_DMA_DREQ_SLIM_DC0                       19
+#define BCM2835_DMA_DREQ_SLIM_DC1                       20
+#define BCM2835_DMA_DREQ_SLIM_DC2                       21
+#define BCM2835_DMA_DREQ_SLIM_DC3                       22
+#define BCM2835_DMA_DREQ_SLIM_DC4                       23
+#define BCM2835_DMA_DREQ_SCALER_FIFO_0_SMI              24
+#define BCM2835_DMA_DREQ_SCALER_FIFO_1_SMI              25
+#define BCM2835_DMA_DREQ_SCALER_FIFO_2_SMI              26
+#define BCM2835_DMA_DREQ_SLIM_DC5                       27
+#define BCM2835_DMA_DREQ_SLIM_DC6                       28
+#define BCM2835_DMA_DREQ_SLIM_DC7                       29
+#define BCM2835_DMA_DREQ_SLIM_DC8                       30
+#define BCM2835_DMA_DREQ_SLIM_DC9                       31
+
 /**
  * struct bcm2835_dma_cb the DMA control block
  * @ti: configuration register
@@ -123,6 +156,12 @@ void bcm2835_dma_cb_dump(
 	dma_addr_t dmablock_dma,
 	struct device *dev,
 	int tindent);
+
+void bcm2835_dma_reg_dump(
+	void* base,
+	struct device *dev,
+	int tindent);
+
 
 static inline void bcm2835_dma_link_dump(
 	struct dma_link *link,
