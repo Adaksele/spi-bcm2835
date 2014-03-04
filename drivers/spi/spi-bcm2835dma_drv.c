@@ -141,13 +141,17 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 	struct spi_message *msg;
 	struct spi_merged_dma_fragment *frag;
 	u32 *complete;
+	unsigned long flags;
+
+	spin_lock_irqsave(&master->queue_lock,flags);
 
 	/* check the message queue */
-	/* lock master->queue_lock */
 	while( (msg = list_first_entry_or_null(
 				&master->queue,typeof(*msg),queue)
 			) ) {
+		printk(KERN_INFO "processing message: %pf\n",msg);
 		frag = msg->state;
+		printk(KERN_INFO "processing frag: %pf\n",frag);
 		/* if we do not have a complete data pointer */
 		if (frag->complete_data) {
 			complete = (u32*)frag->complete_data;
@@ -164,13 +168,50 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 
 		/* reset status */
 		msg->status = 0;
+#if 0
 		/* and release the fragment */
 		spi_merged_dma_fragment_execute_post_dma_transforms(
 			frag,frag,GFP_ATOMIC);
+#endif
+#if 0
+		if (! msg->is_optimized)
+			dma_fragment_execute(frag,NULL,NULL);
+#endif
+
+		/* and call complete on the message */
+		if (msg->complete) {
+			printk(KERN_INFO "Called Complete\n");
+			msg->complete(msg->context);
+		}
 	}
 exit:
-	/* unlock master->queue_lock */
+	spin_unlock_irqrestore(&master->queue_lock,flags);
 	return;
+}
+irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
+{
+	struct spi_master *master = dev_id;
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+
+	/* write interrupt message to debug */
+	//if (unlikely(debug_dma))
+		printk(KERN_ERR "TX-Interrupt %i triggered\n",irq);
+
+	/* we need to clean the IRQ flag as well
+	 * otherwise it will trigger again...
+	 * as we are on the READ DMA queue, we should not have an issue
+	 * setting/clearing WAIT_FOR_OUTSTANDING_WRITES
+	 * and we are not using it for the RX path
+	 */
+	writel(BCM2835_DMA_CS_INT, bs->dma_tx.base+BCM2835_DMA_CS);
+
+	/* release the control block chains until we reach the CB
+	 * this will also call complete
+	 */
+	bcm2835dma_release_cb_chain_complete(master);
+
+	/* and return with the IRQ marked as handled */
+	return IRQ_HANDLED;
 }
 
 /**
@@ -192,6 +233,7 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 	struct spi_merged_dma_fragment *merged;
 	struct spi_transfer *xfer;
 	int err=0;
+		printk(KERN_INFO "processing message: %pf\n",msg);
 
 	/* some optimizations - it might help if we knew the length... */
 	/* check if we got a frame that is of a single transfer */
@@ -239,8 +281,9 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 	/* now start iterating the transfers */
 	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
 		/* check if we are the last in the list */
-		int is_last = list_is_last(&msg->transfers,
-					&xfer->transfer_list);
+		int is_last = list_is_last(&xfer->transfer_list,
+					&msg->transfers);
+		printk(KERN_INFO "LISTISLAST: %i\n",is_last);
 		/* assign the current transfer */
 		merged->transfer = xfer;
 		/* do we need to reconfigure spi
@@ -458,32 +501,6 @@ error:
 	return -ENOMEM;
 }
 
-irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
-{
-	struct spi_master *master = dev_id;
-	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
-
-	/* write interrupt message to debug */
-	//if (unlikely(debug_dma))
-		printk(KERN_ERR "TX-Interrupt %i triggered\n",irq);
-
-	/* we need to clean the IRQ flag as well
-	 * otherwise it will trigger again...
-	 * as we are on the READ DMA queue, we should not have an issue
-	 * setting/clearing WAIT_FOR_OUTSTANDING_WRITES
-	 * and we are not using it for the RX path
-	 */
-	writel(BCM2835_DMA_CS_INT, bs->dma_tx.base+BCM2835_DMA_CS);
-
-	/* release the control block chains until we reach the CB
-	 * this will also call complete
-	 */
-	bcm2835dma_release_cb_chain_complete(master);
-
-	/* and return with the IRQ marked as handled */
-	return IRQ_HANDLED;
-}
-
 static const char *_tab_indent_string = "\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t";
 static inline const char *_tab_indent(int indent) {
 	return &_tab_indent_string[16-min(16,indent)];
@@ -524,7 +541,14 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 
 	spi_merged_dma_fragment_execute_pre_dma_transforms(
 		merged,merged,GFP_ATOMIC);
+	spi_merged_dma_fragment_dump(
+		(struct spi_merged_dma_fragment*) merged,
+		&message->spi->dev,
+		0,0,
+		&bcm2835_dma_link_dump
+		);
 	set_low();
+
 
 	/* and schedule it */
 	if (merged) {
@@ -553,9 +577,9 @@ static void bcm2835dma_set_gpio_mode(u8 pin,u32 mode) {
 	iounmap(gpio);
 }
 
-static int bcm2835dma_spi_init_pinmode(void) {
+static int bcm2835dma_spi_init_pinmode(struct device *dev) {
 	int err;
-	err=gpio_request_one(BCM2835_SPI_GPIO_MISO,GPIOF_IN,
+	err=devm_gpio_request_one(dev,BCM2835_SPI_GPIO_MISO,GPIOF_IN,
 			DRV_NAME":MISO");
 	if (err) {
 		printk(KERN_ERR DRV_NAME": problems requesting SPI:MISO"
@@ -563,7 +587,7 @@ static int bcm2835dma_spi_init_pinmode(void) {
 			err);
 		return err;
 	}
-	err=gpio_request_one(BCM2835_SPI_GPIO_MOSI,GPIOF_OUT_INIT_HIGH,
+	err=devm_gpio_request_one(dev,BCM2835_SPI_GPIO_MOSI,GPIOF_OUT_INIT_HIGH,
 			DRV_NAME":MOSI");
 	if (err) {
 		printk(KERN_ERR DRV_NAME": problems requesting SPI:MOSI"
@@ -571,7 +595,7 @@ static int bcm2835dma_spi_init_pinmode(void) {
 			err);
 		goto error_miso;
 	}
-	err=gpio_request_one(BCM2835_SPI_GPIO_SCK,GPIOF_OUT_INIT_HIGH,
+	err=devm_gpio_request_one(dev,BCM2835_SPI_GPIO_SCK,GPIOF_OUT_INIT_HIGH,
 			DRV_NAME":SCK");
 	if (err) {
 		printk(KERN_ERR DRV_NAME": problems requesting SPI:SCK"
@@ -579,12 +603,11 @@ static int bcm2835dma_spi_init_pinmode(void) {
 			err);
 		goto error_mosi;
 	}
-	/* SET modes to ALT0=4 */
+	/* SET modes to ALT0=4 - unfortunately there is not API for that...
+	* (which I found) */
 	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_MISO,4);
 	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_MOSI,4);
 	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_SCK, 4);
-
-
 
 	bcm2835dma_set_gpio_mode(24, 1);
 
@@ -596,12 +619,12 @@ error_miso:
 	return err;
 }
 
-static void bcm2835dma_spi_restore_pinmodes(void)
+static void bcm2835dma_spi_restore_pinmodes(struct device *dev)
 {
 	/* we assume this will reset the MODE */
-	gpio_free(BCM2835_SPI_GPIO_MISO);
-	gpio_free(BCM2835_SPI_GPIO_MOSI);
-	gpio_free(BCM2835_SPI_GPIO_SCK);
+	devm_gpio_free(dev,BCM2835_SPI_GPIO_MISO);
+	devm_gpio_free(dev,BCM2835_SPI_GPIO_MOSI);
+	devm_gpio_free(dev,BCM2835_SPI_GPIO_SCK);
 }
 
 static void bcm2835dma_cleanup_spi_device_data(
@@ -804,7 +827,7 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 	clk_prepare_enable(bs->clk);
 
 	/* configure pin function for SPI */
-	err = bcm2835dma_spi_init_pinmode();
+	err = bcm2835dma_spi_init_pinmode(&pdev->dev);
 	if (err) {
 		dev_err(&pdev->dev,
 			"could not register pins and set the mode: %d\n",
@@ -840,7 +863,7 @@ out_release_dma:
 /*out_release_dev: not used */
 	spi_unregister_master(master);
 out_release_gpio:
-	bcm2835dma_spi_restore_pinmodes();
+	bcm2835dma_spi_restore_pinmodes(&pdev->dev);
 out_release_clock:
 	clk_disable_unprepare(bs->clk);
 out_master_put:
@@ -878,7 +901,7 @@ static int bcm2835dma_spi_remove(struct platform_device *pdev)
 			| BCM2835_SPI_CS_CLEAR_TX,
 			bs->spi_regs+BCM2835_SPI_CS);
 
-	bcm2835dma_spi_restore_pinmodes();
+	bcm2835dma_spi_restore_pinmodes(&pdev->dev);
 
 	clk_disable_unprepare(bs->clk);
 

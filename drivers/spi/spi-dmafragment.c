@@ -71,14 +71,15 @@ int spi_merged_dma_fragment_merge_fragment_cache(
 		goto error;
 
 	/* "hijack" the fragment dma_link_list */
-
+	printk(KERN_INFO"Merging: %s\n",fragmentcache->dev_attr.attr.name);
 	/* for that we first create a transform to turn us back to "normal"*/
+#if 0
 	transform = dma_fragment_add_return_to_cache_transform(frag,gfpflags);
 	if (! transform )
 		goto error;
-
 	/* and add it to the merged fragment */
 	dma_fragment_add_transform(&merged->fragment,transform);
+#endif
 
 	/* now splice it away */
 	list_splice_tail_init(
@@ -144,10 +145,6 @@ void spi_merged_dma_fragment_dump(
 
 	dma_fragment_dump(&fragment->fragment,dev,
 			tindent,flags,dma_cb_dump);
-	dev_printk(KERN_INFO,dev,"%scomplete_data_ptr: %pf\n",
-		_tab_indent(tindent),
-		fragment->complete_data
-		);
 	tindent++;
 
 	/* dump the individual dma_fragment_transforms */
@@ -176,6 +173,10 @@ void spi_merged_dma_fragment_dump(
 			i++);
 		dma_fragment_transform_dump(transform, dev, tindent+2);
 	}
+	dev_printk(KERN_INFO,dev,"%s\tcomplete_data_ptr: %pf\n",
+		_tab_indent(tindent-1),
+		fragment->complete_data
+		);
 
 }
 EXPORT_SYMBOL_GPL(spi_merged_dma_fragment_dump);
