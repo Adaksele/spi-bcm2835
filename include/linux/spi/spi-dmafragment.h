@@ -170,7 +170,7 @@ int spi_merged_dma_fragment_call_complete(
 	struct dma_fragment_transform *transform,
 	void *vp, gfp_t gfpflags);
 
-static inline int spi_merged_dma_fragment_complete(
+static inline int spi_merged_dma_fragment_prepare_for_schedule(
 	struct dma_fragment_transform *transform,
 	void *vp, gfp_t gfpflags)
 {

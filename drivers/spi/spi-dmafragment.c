@@ -29,9 +29,13 @@ int spi_merged_dma_fragment_call_complete(
 	struct spi_merged_dma_fragment *merged =
 		(typeof(merged)) vp;
 	struct spi_message *mesg = merged->message;
+	mesg->status=0;
 
 	printk(KERN_ERR "COMPLETE: %pf %pf\n",merged,mesg);
-
+	printk(KERN_ERR "complete_call: %pf %pf\n",
+		mesg->complete,mesg->context);
+	printk(KERN_ERR "msg data: %i %i\n",
+		mesg->status,mesg->actual_length);
 	mesg->complete(mesg->context);
 
 	return 0;
@@ -73,7 +77,7 @@ int spi_merged_dma_fragment_merge_fragment_cache(
 	/* "hijack" the fragment dma_link_list */
 	printk(KERN_INFO"Merging: %s\n",fragmentcache->dev_attr.attr.name);
 	/* for that we first create a transform to turn us back to "normal"*/
-#if 0
+#if 1
 	transform = dma_fragment_add_return_to_cache_transform(frag,gfpflags);
 	if (! transform )
 		goto error;

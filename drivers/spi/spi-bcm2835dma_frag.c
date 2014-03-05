@@ -37,8 +37,6 @@ extern int delay_1us;
  * the function creating dma_fragments - mostly used by dma_fragment_cache
  ************************************************************************/
 
-#define TODO(...)
-
 /*------------------------------------------------------------------------
  * Helpers - some of these could be inlined functions
  *----------------------------------------------------------------------*/
@@ -723,6 +721,9 @@ static inline int bcm2835dma_fragment_transform_dmamap(
 			xfer->len,
 			DMA_TO_DEVICE,
 			NULL);
+		printk(KERN_ERR "dma_map: tx: %pf %pf %08x %i\n",
+			&mesg->spi->master->dev,
+			xfer->tx_buf,xfer->tx_dma,xfer->len);
 	} else {
 		xfer->tx_dma = 0;
 	}
@@ -734,6 +735,9 @@ static inline int bcm2835dma_fragment_transform_dmamap(
 			xfer->len,
 			DMA_FROM_DEVICE,
 			NULL);
+		printk(KERN_ERR "dma_map: rx: %pf %pf %08x %i\n",
+			&mesg->spi->master->dev,
+			xfer->rx_buf,xfer->rx_dma,xfer->len);
 	} else {
 		xfer->rx_dma = 0;
 	}
@@ -783,7 +787,9 @@ static inline int bcm2835dma_fragment_transform_dmaunmap(
 
 	/* and get the device */
 	struct device *dev = transform->src;
-
+	printk(KERN_ERR "unmap %pf %08x %08x %i\n",
+		dev,rx_dma,tx_dma,length);
+	return 0;
 	/* now do the conditional unmap if it is not 0 */
 	if (tx_dma)
                 dma_unmap_single_attrs(
@@ -792,7 +798,7 @@ static inline int bcm2835dma_fragment_transform_dmaunmap(
                         length,
                         DMA_TO_DEVICE,
                         NULL);
-
+	printk(KERN_ERR "unmap 2\n");
 	if (rx_dma)
                 dma_unmap_single_attrs(
                         dev,
@@ -800,6 +806,7 @@ static inline int bcm2835dma_fragment_transform_dmaunmap(
                         length,
                         DMA_FROM_DEVICE,
                         NULL);
+	printk(KERN_ERR "unmap end\n");
 	return 0;
 }
 
@@ -1095,7 +1102,7 @@ struct dma_fragment_trigger_irq {
 	struct dma_link     *start_tx_dma;
 };
 
-static inline int bcm2835dma_spi_merged_dma_fragment_complete(
+static inline int bcm2835dma_transforms_prepare_for_schedule(
 	struct dma_fragment_transform *transform,
 	void *vp, gfp_t gfpflags)
 {
@@ -1112,8 +1119,9 @@ static inline int bcm2835dma_spi_merged_dma_fragment_complete(
 	/* and set the pointer so that the interrupt-handler may use it */
 	merged->complete_data = &cb->pad[0];
 
-	/* and do the normal stuff */
-	return spi_merged_dma_fragment_call_complete(
+	/* and the other stuff that we should do prior to scheduling
+	   the transfer */
+	return spi_merged_dma_fragment_prepare_for_schedule(
 		transform,vp,gfpflags);
 }
 
@@ -1156,10 +1164,9 @@ static struct dma_fragment *bcm2835dma_spi_create_fragment_trigger_irq(
 	FIXED(length,   4);
 	FIXED(pad[0],   BCM2835_DMA_CS_ACTIVE);
 
-	/* schedule link time handling of complete callback */
-	SCHEDULE_LINKTIME_TRANSFORM(
-		bcm2835dma_spi_merged_dma_fragment_complete,
-		NULL,NULL,NULL);
+	/* schedule link time scheduling of complete callback */
+	SCHEDULE_LINKTIME_VARY_TRANSFORM(
+		bcm2835dma_transforms_prepare_for_schedule,NULL);
 
 	END_CREATE_FRAGMENT_ALLOCATE();
 }
