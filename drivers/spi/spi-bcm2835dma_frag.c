@@ -721,9 +721,6 @@ static inline int bcm2835dma_fragment_transform_dmamap(
 			xfer->len,
 			DMA_TO_DEVICE,
 			NULL);
-		printk(KERN_ERR "dma_map: tx: %pf %pf %08x %i\n",
-			&mesg->spi->master->dev,
-			xfer->tx_buf,xfer->tx_dma,xfer->len);
 	} else {
 		xfer->tx_dma = 0;
 	}
@@ -735,9 +732,6 @@ static inline int bcm2835dma_fragment_transform_dmamap(
 			xfer->len,
 			DMA_FROM_DEVICE,
 			NULL);
-		printk(KERN_ERR "dma_map: rx: %pf %pf %08x %i\n",
-			&mesg->spi->master->dev,
-			xfer->rx_buf,xfer->rx_dma,xfer->len);
 	} else {
 		xfer->rx_dma = 0;
 	}
@@ -786,10 +780,9 @@ static inline int bcm2835dma_fragment_transform_dmaunmap(
 	dma_addr_t    rx_dma = cb_rx->dst;
 
 	/* and get the device */
-	struct device *dev = transform->src;
-	printk(KERN_ERR "unmap %pf %08x %08x %i\n",
-		dev,rx_dma,tx_dma,length);
-	return 0;
+	struct spi_message *msg = transform->src;
+	struct device *dev = &msg->spi->master->dev;
+
 	/* now do the conditional unmap if it is not 0 */
 	if (tx_dma)
                 dma_unmap_single_attrs(
@@ -798,7 +791,6 @@ static inline int bcm2835dma_fragment_transform_dmaunmap(
                         length,
                         DMA_TO_DEVICE,
                         NULL);
-	printk(KERN_ERR "unmap 2\n");
 	if (rx_dma)
                 dma_unmap_single_attrs(
                         dev,
@@ -806,7 +798,6 @@ static inline int bcm2835dma_fragment_transform_dmaunmap(
                         length,
                         DMA_FROM_DEVICE,
                         NULL);
-	printk(KERN_ERR "unmap end\n");
 	return 0;
 }
 

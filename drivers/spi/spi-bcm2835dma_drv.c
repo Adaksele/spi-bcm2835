@@ -420,7 +420,7 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 	spi_merged_dma_fragment_execute_pre_dma_transforms(
 		merged,merged,GFP_ATOMIC);
 
-#if 1
+#if 0
 	spi_merged_dma_fragment_dump(
 		(struct spi_merged_dma_fragment*) merged,
 		&message->spi->dev,
