@@ -174,4 +174,7 @@ static inline void bcm2835_dma_link_dump(
 		dev,tindent);
 }
 
+#define BCM2835_DMA_CB_MEMBER_DMA_ADDR(link,member)	\
+	( link->cb_dma + offsetof(struct bcm2835_dma_cb,member))
+
 #endif /* __BCM2835_DMA_H */

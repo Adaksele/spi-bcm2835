@@ -34,8 +34,22 @@
 #define SPI_OPTIMIZE_VARY_DELAY_USECS          (1<<3)
 #define SPI_OPTIMIZE_VARY_LENGTH               (1<<4)
 
+/**
+ * spi_merged_dma_fragment - structure of several
+ * @merged_fragments: the list of dma_fragments that got merged into this
+ * @transform_pre_dma_list: the list of transforms to execute prior to
+ *    executing the DMA
+ * @transform_post_dma_list: the list of transforms to execute after the
+ *    the DMA has finished
+ * @message: the spi message for which this fragment has been "composed"
+ * @transfer: the current transfer during link phase - NULL otherwise
+ * @last_transfer: the last transfer processed - mostly used to compare
+ *    state changes...
+ * @link_dma_link: dma control-block linking function pointer.
+ * @complete_data: TODO
+ */
 struct spi_merged_dma_fragment {
-	struct dma_fragment fragment;
+	struct dma_fragment dma_fragment;
 
 	struct list_head transform_pre_dma_list;
 	struct list_head transform_post_dma_list;
@@ -57,55 +71,55 @@ struct spi_merged_dma_fragment {
 static inline void spi_merged_dma_fragment_init(
 	struct spi_merged_dma_fragment *frag,
 	int (*link_dma_link)(struct dma_link *,struct dma_link *),
-	size_t size)
+	size_t size
+	)
 {
-	dma_fragment_init(&frag->fragment,size);
+	dma_fragment_init(&frag->dma_fragment,size,0);
 	INIT_LIST_HEAD(&frag->transform_pre_dma_list);
 	INIT_LIST_HEAD(&frag->transform_post_dma_list);
 	frag->link_dma_link = link_dma_link;
 }
 
-static inline struct dma_fragment *spi_merged_dma_fragment_alloc(
-	struct device *device,
+static inline
+struct spi_merged_dma_fragment *spi_merged_dma_fragment_alloc(
 	int (*link_dma_link)(struct dma_link *,struct dma_link *),
-	size_t size,gfp_t gfpflags)
+	size_t size, gfp_t gfpflags)
 {
 	struct spi_merged_dma_fragment *frag;
 	size = max( size, sizeof(*frag));
 
-	frag = (typeof(frag) )
-		dma_fragment_alloc(device,size,gfpflags);
+	frag = kzalloc(size,gfpflags);
 	if ( frag )
 		spi_merged_dma_fragment_init(
 			frag,
 			link_dma_link,
 			size);
 
-	return &frag->fragment;
+	return frag;
 }
 
 static inline void spi_merged_dma_fragment_free(
-	struct spi_merged_dma_fragment *frag)
+	struct spi_merged_dma_fragment *merged)
 {
 	struct dma_fragment_transform *transform;
 	/* remove all the dma_fragment_transforms belonging to us */
-	while( !list_empty(&frag->transform_pre_dma_list)) {
+	while( !list_empty(&merged->transform_pre_dma_list)) {
 		transform = list_first_entry(
-			&frag->transform_pre_dma_list,
+			&merged->transform_pre_dma_list,
 			typeof(*transform),
 			transform_list);
 		dma_fragment_transform_free(transform);
 	}
 	/* remove all the dma_fragment_transforms belonging to us */
-	while( !list_empty(&frag->transform_post_dma_list)) {
+	while( !list_empty(&merged->transform_post_dma_list)) {
 		transform = list_first_entry(
-			&frag->transform_post_dma_list,
+			&merged->transform_post_dma_list,
 			typeof(*transform),
 			transform_list);
 		dma_fragment_transform_free(transform);
 	}
 
-	dma_fragment_free((struct dma_fragment *)frag);
+	dma_fragment_free(&merged->dma_fragment);
 }
 
 /**
@@ -141,23 +155,22 @@ static inline void spi_merged_dma_fragment_add_dma_fragment_transform(
 
 static inline struct dma_fragment_transform *
 spi_merged_dma_fragment_addnew_transform(
+	int size,
 	struct spi_merged_dma_fragment *merged,
 	int (*function)(struct dma_fragment_transform *, void *,gfp_t),
 	struct dma_fragment *frag,
-	void *src,
-	void *dst,
-	void *extra,
-	int size,
+	void *data,
 	int post,
 	gfp_t gfpflags)
 {
 	struct dma_fragment_transform *trans;
 	trans = dma_fragment_transform_alloc(
-			function,
-			frag,
-			src,dst,extra,
-			size,gfpflags
-			);
+		function,
+		frag,
+		data,
+		size,
+		gfpflags
+		);
 	if (trans)
 		spi_merged_dma_fragment_add_dma_fragment_transform(
 			merged,trans,post
@@ -180,11 +193,12 @@ static inline int spi_merged_dma_fragment_prepare_for_schedule(
 	if ( merged->message->complete) {
 		/* schedule post-dma callback */
 		if (! spi_merged_dma_fragment_addnew_transform(
+				0,
 				vp,
 				&spi_merged_dma_fragment_call_complete,
 				transform->fragment,
-				NULL,NULL,NULL,
-				0,1,gfpflags) )
+				NULL,
+				1,gfpflags) )
 			return -ENOMEM;
 	}
 	return 0;
@@ -200,7 +214,7 @@ static inline int spi_merged_dma_fragment_prepare_for_schedule(
 int spi_merged_dma_fragment_merge_fragment_cache(
 	struct dma_fragment_cache *fragmentcache,
 	struct spi_merged_dma_fragment *merged,
-	int flags,
+//	int (*link_dma_link)(struct dma_link *,struct dma_link *),
 	gfp_t gfpflags);
 
 /**
@@ -216,7 +230,6 @@ static inline int spi_merged_dma_fragment_execute_pre_dma_transforms(
                         transform_list) {
                 err=dma_fragment_transform_exec(
                         transform,
-                        &merged->fragment,
                         data,
                         gfpflags);
                 if (err)
@@ -237,7 +250,6 @@ static inline int spi_merged_dma_fragment_execute_post_dma_transforms(
                         transform_list) {
                 err=dma_fragment_transform_exec(
                         transform,
-                        &merged->fragment,
                         data,
                         gfpflags);
                 if (err)

@@ -52,12 +52,11 @@ EXPORT_SYMBOL_GPL(spi_merged_dma_fragment_call_complete);
 int spi_merged_dma_fragment_merge_fragment_cache(
 	struct dma_fragment_cache *fragmentcache,
 	struct spi_merged_dma_fragment *merged,
-	int flags,
+//	int (*link_dma_link)(struct dma_link *,struct dma_link *),
 	gfp_t gfpflags
 	)
 {
 	struct dma_fragment *frag;
-	struct dma_fragment_transform *transform;
 	int err = 0;
 
 	/* fetch the fragment from dma_fragment_cache */
@@ -66,57 +65,18 @@ int spi_merged_dma_fragment_merge_fragment_cache(
 		return -ENOMEM;
 
 	/* run the transforms with the merged fragment */
-	err = dma_fragment_execute_transforms(
-		frag,
-		merged,
+	err = dma_fragment_add_subfragment(
+		frag,&merged->dma_fragment,
+		merged->link_dma_link,
 		gfpflags
 		);
 	if (err)
 		goto error;
-
-	/* "hijack" the fragment dma_link_list */
-	printk(KERN_INFO"Merging: %s\n",fragmentcache->dev_attr.attr.name);
-	/* for that we first create a transform to turn us back to "normal"*/
-#if 1
-	transform = dma_fragment_add_return_to_cache_transform(frag,gfpflags);
-	if (! transform )
-		goto error;
-	/* and add it to the merged fragment */
-	dma_fragment_add_transform(&merged->fragment,transform);
-#endif
-
-	/* now splice it away */
-	list_splice_tail_init(
-		&frag->dma_link_list,
-		&merged->fragment.dma_link_list
-		);
-
-	/* now link the fragments for real */
-	if (merged->fragment.link_tail) {
-		err = merged->link_dma_link(merged->fragment.link_tail,
-					frag->link_head);
-		if (err)
-			goto error;
-	} else {
-		merged->fragment.link_head = frag->link_head;
-	}
-	/* and remember the tail for the next transform */
-	merged->fragment.link_tail = frag->link_tail;
-
-	/* and set the tail next pointer to 0, so that we do not
-	 * accidentally run in a dma loop or other...*/
-	return merged->link_dma_link(merged->fragment.link_tail,NULL);
+	return err;
 
 error:
 	printk(KERN_ERR "spi_merged_dma_fragment_merge_fragment_cache:"
 		" %i\n",err);
-
-	/* call the transforms for the merged transfer */
-	dma_fragment_execute_transforms(
-		&merged->fragment,
-		NULL,
-		gfpflags
-		);
 	return err;
 }
 EXPORT_SYMBOL_GPL(spi_merged_dma_fragment_merge_fragment_cache);
@@ -147,7 +107,7 @@ void spi_merged_dma_fragment_dump(
 	int i;
 	struct dma_fragment_transform *transform;
 
-	dma_fragment_dump(&fragment->fragment,dev,
+	dma_fragment_dump(&fragment->dma_fragment,dev,
 			tindent,flags,dma_cb_dump);
 	tindent++;
 

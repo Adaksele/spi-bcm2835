@@ -92,6 +92,18 @@ static inline void set_high(void) {
 	gpio[0x1C/4]=1<<24;
 }
 
+static inline void dump_dma_regs(char* str,void __iomem *base) {
+	printk(KERN_ERR "%s: %08x %08x %08x %08x %08x %08x\n",
+		str,
+		readl(base+BCM2835_DMA_CS),
+		readl(base+BCM2835_DMA_ADDR),
+		readl(base+BCM2835_DMA_TI),
+		readl(base+BCM2835_DMA_S_ADDR),
+		readl(base+BCM2835_DMA_D_ADDR),
+		readl(base+BCM2835_DMA_LEN)
+		);
+}
+
 /* schedule a DMA fragment on a specific DMA channel */
 static int bcm2835dma_schedule_dma_fragment(
 	struct spi_message *msg)
@@ -119,22 +131,23 @@ static int bcm2835dma_schedule_dma_fragment(
 	if (last_msg) {
 		last_frag = last_msg->state;
 		bcm2835_link_dma_link(
-			last_frag->fragment.link_tail,
-			frag->fragment.link_head);
+			last_frag->dma_fragment.link_tail,
+			frag->dma_fragment.link_head);
 		dsb();
 	}
 	/* now see if DMA is still running */
 	if ( !( readl(bs->dma_rx.base+BCM2835_DMA_CS)
 			& BCM2835_DMA_CS_ACTIVE )) {
-		printk(KERN_ERR "PRE-DMA: %08x %08x\n",
-			readl(bs->dma_rx.base+BCM2835_DMA_CS),
-			readl(bs->dma_rx.base+BCM2835_DMA_ADDR));
-		writel(frag->fragment.link_head->cb_dma,
+		dump_dma_regs("PRE-DMA-rx",bs->dma_rx.base);
+		dump_dma_regs("PRE-DMA-tx",bs->dma_tx.base);
+
+		writel(frag->dma_fragment.link_head->cb_dma,
 			bs->dma_rx.base+BCM2835_DMA_ADDR);
 		dsb();
-		printk(KERN_ERR "PRE-DMA2: %08x %08x\n",
-			readl(bs->dma_rx.base+BCM2835_DMA_CS),
-			readl(bs->dma_rx.base+BCM2835_DMA_ADDR));
+
+		dump_dma_regs("PRE2-DMA-rx",bs->dma_rx.base);
+		dump_dma_regs("PRE2-DMA-tx",bs->dma_tx.base);
+
 		writel(BCM2835_DMA_CS_ACTIVE,
 			bs->dma_rx.base+BCM2835_DMA_CS);
 		printk(KERN_INFO "SCHEDULE-DMA starting_dma\n");
@@ -142,18 +155,10 @@ static int bcm2835dma_schedule_dma_fragment(
 	spin_unlock_irqrestore(&master->queue_lock,flags);
 
 	/* see if the DMA Runs */
-	printk(KERN_ERR "DMA1: %08x %08x\n",
-		readl(bs->dma_rx.base+BCM2835_DMA_CS),
-		readl(bs->dma_rx.base+BCM2835_DMA_ADDR));
-	printk(KERN_ERR "DMA2: %08x %08x\n",
-		readl(bs->dma_rx.base+BCM2835_DMA_CS),
-		readl(bs->dma_rx.base+BCM2835_DMA_ADDR));
-	printk(KERN_ERR "DMA3: %08x %08x\n",
-		readl(bs->dma_rx.base+BCM2835_DMA_CS),
-		readl(bs->dma_rx.base+BCM2835_DMA_ADDR));
-	printk(KERN_ERR "DMA4: %08x %08x\n",
-		readl(bs->dma_rx.base+BCM2835_DMA_CS),
-		readl(bs->dma_rx.base+BCM2835_DMA_ADDR));
+	for (flags=0;flags<5;flags++) {
+		dump_dma_regs("DMA-rx",bs->dma_rx.base);
+		dump_dma_regs("DMA-tx",bs->dma_tx.base);
+	}
 
 
 	return 0;
@@ -276,33 +281,12 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 	if (! merged)
 		return NULL;
 
-	/* the fragment dma_link_list should be empty */
-	if (! list_empty(&merged->fragment.dma_link_list) ) {
-		printk(KERN_ERR
-			"bcm2835dma_spi_message_to_dma_fragment:"
-			" the merged fragment %pK from cache does contain"
-			" dma_links already - this should not happen!",
-			merged);
-		return NULL;
-	}
-
-	/* the fragment dma_link_list should be empty */
-	if (! list_empty(&merged->fragment.transform_list) ) {
-		printk(KERN_ERR
-			"bcm2835dma_spi_message_to_dma_fragment:"
-			" the merged fragment %pK from cache does contain"
-			" dma_fragment_transforms already"
-			" - this should not happen!",
-			merged);
-		return NULL;
-	}
-
 	/* initialize some fields */
 	merged->message       = msg;
 	merged->transfer      = NULL;
 	merged->last_transfer = NULL;
-	merged->fragment.link_head = NULL;
-	merged->fragment.link_tail = NULL;
+	merged->dma_fragment.link_head = NULL;
+	merged->dma_fragment.link_tail = NULL;
 	merged->complete_data = NULL;
 
 	/* now start iterating the transfers */
@@ -335,7 +319,7 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 			err = spi_merged_dma_fragment_merge_fragment_cache(
 				&bs->fragment_setup_spi,
 				merged,
-				flags,gfpflags);
+				gfpflags);
 			if (err)
 				goto error;
 		}
@@ -346,7 +330,7 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 			err = spi_merged_dma_fragment_merge_fragment_cache(
 				&bs->fragment_transfer,
 				merged,
-				flags,gfpflags);
+				gfpflags);
 			if (err)
 				goto error;
 			merged->last_transfer=xfer;
@@ -357,14 +341,14 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 			err = spi_merged_dma_fragment_merge_fragment_cache(
 				&bs->fragment_cs_deselect,
 				merged,
-				flags,gfpflags);
+				gfpflags);
 		} else if ( (xfer->delay_usecs)
 			/* || (xfer->vary & SPI_OPTIMIZE_VARY_DELAY) */) {
 			/* or add a delay if requested */
 			err = spi_merged_dma_fragment_merge_fragment_cache(
 				&bs->fragment_delay,
 				merged,
-				flags,gfpflags);
+				gfpflags);
 		}
 		if (err)
 			goto error;
@@ -377,7 +361,7 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 		err=spi_merged_dma_fragment_merge_fragment_cache(
 			&bs->fragment_trigger_irq,
 			merged,
-			flags,gfpflags);
+			gfpflags);
 		if (err)
 			goto error;
 	}
@@ -393,8 +377,8 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 error:
 	printk(KERN_ERR "bcm2835dma_spi_message_to_dma_fragment:"
 		" err=%i\n",err);
-	dma_fragment_dump(
-		&merged->fragment,
+	spi_merged_dma_fragment_dump(
+		merged,
 		&msg->spi->dev,
 		0,0,
 		&bcm2835_dma_link_dump
@@ -420,7 +404,7 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 	spi_merged_dma_fragment_execute_pre_dma_transforms(
 		merged,merged,GFP_ATOMIC);
 
-#if 0
+#if 1
 	spi_merged_dma_fragment_dump(
 		(struct spi_merged_dma_fragment*) merged,
 		&message->spi->dev,
@@ -431,6 +415,8 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 	set_low();
 
 	printk(KERN_ERR "Message-state-set: %pf\n",message->state);
+
+	return -EPERM;
 
 	/* and schedule it */
 	if (merged) {

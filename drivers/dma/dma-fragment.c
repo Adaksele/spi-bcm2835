@@ -38,7 +38,7 @@ static inline const char *_tab_indent(int indent) {
 static inline void _dump_extra_data(char* data, int size,
 				struct device *dev,int tindent)
 {
-	char   buffer[50];
+	char buffer[50];
 	int offset=0;
 	int bytes_per_line = 16;
 	while (size>0) {
@@ -49,62 +49,15 @@ static inline void _dump_extra_data(char* data, int size,
 			0
 			);
 		dev_printk(KERN_INFO,dev,
-			"%sdata %02x: %s\n",
+			"%sdata %pf - %02x: %s\n",
 			_tab_indent(tindent),
-			offset,buffer
+			data,offset,buffer
 			);
 		data   += bytes_per_line;
 		size   -= bytes_per_line;
 		offset += bytes_per_line;
 	}
 }
-
-struct dma_link *dma_link_alloc(struct dma_pool *pool,
-				size_t size,
-				gfp_t gfpflags)
-{
-	struct dma_link *dmalink;
-
-	size = max(size,sizeof(*dmalink));
-
-	dmalink = kzalloc(
-		size,
-		gfpflags);
-	if (!dmalink)
-		return NULL;
-
-	INIT_LIST_HEAD(&dmalink->dma_link_list);
-
-	dmalink->pool = pool;
-
-	dmalink->cb = dma_pool_alloc(
-		dmalink->pool,
-		gfpflags,
-		&dmalink->cb_dma);
-	if (!dmalink->cb) {
-		kfree(dmalink);
-		return NULL;
-	}
-
-	return dmalink;
-}
-EXPORT_SYMBOL_GPL(dma_link_alloc);
-
-void dma_link_free(struct dma_link *dmalink)
-{
-	if (!dmalink->cb)
-		return;
-
-	list_del(&dmalink->dma_link_list);
-
-	dma_pool_free(dmalink->pool,
-		dmalink->cb,
-		dmalink->cb_dma);
-
-	kfree(dmalink);
-}
-
-EXPORT_SYMBOL_GPL(dma_link_free);
 
 /**
  * dma_link_cb_dump_generic - generic dma control block dumper
@@ -177,12 +130,8 @@ void dma_fragment_transform_dump(
 		trans->function);
 	dev_printk(KERN_INFO,dev, "%sfrag:\t%pk\n", indent,
 		trans->fragment);
-	dev_printk(KERN_INFO,dev, "%ssrc:\t%pk\n", indent,
-		trans->src);
-	dev_printk(KERN_INFO,dev, "%sdst:\t%pk\n", indent,
-		trans->dst);
-	dev_printk(KERN_INFO,dev, "%sextra:\t%pk\n", indent,
-		trans->extra);
+	dev_printk(KERN_INFO,dev, "%sdata:\t%pk\n", indent,
+		trans->data);
 
 	if (sizeof(*trans) < trans->size)
 		_dump_extra_data(
@@ -191,60 +140,36 @@ void dma_fragment_transform_dump(
 			dev,tindent);
 }
 EXPORT_SYMBOL_GPL(dma_fragment_transform_dump);
-int _dma_fragment_transform_restore_return_to_cache(
-	struct dma_fragment_transform * transform,
-	void *vp,
-	gfp_t gfpflags)
+
+void dma_fragment_release_subfragments(struct dma_fragment *frag)
 {
-	struct dma_fragment *frag     = transform->fragment;
-	struct list_head    *head     = transform->src;
-	struct list_head    *tail     = transform->dst;
-
-	/* restore fragment.dma_link_list
-	   correct would be walking the list, but it is not efficient...
-	   - maybe this should go to lists.h */
-
-	/* first unlink from origin */
-	head->prev->next = tail->next;
-	tail->next->prev = head->prev;
-
-	/* link ourself to new list */
-	head->prev = frag->dma_link_list.next;
-	frag->dma_link_list.next = head;
-	tail->next = frag->dma_link_list.prev;
-	frag->dma_link_list.prev = tail;
-
-	/* and unlink us from the list */
-	list_del(&frag->transform_back->transform_list);
-
-	/* now that we have relinked the dma_links
-	   to the correct location return the fragment back to cache */
-	dma_fragment_cache_return(frag);
-
-	return 0;
+	struct dma_fragment *sub;
+	while( !list_empty(&frag->sub_fragment_head)) {
+		sub = list_first_entry(
+			&frag->sub_fragment_head,
+			typeof(*sub),
+			sub_fragment_list);
+		list_del_init(&sub->sub_fragment_list);
+	}
 }
+EXPORT_SYMBOL_GPL(dma_fragment_release_subfragments);
 
-struct dma_fragment_transform *dma_fragment_add_return_to_cache_transform(
-	struct dma_fragment* fragment, gfp_t gfpflags)
+void dma_fragment_free_link_transforms(struct dma_fragment *frag)
 {
-	if (!fragment->transform_back)
-		fragment->transform_back = dma_fragment_transform_alloc(
-			&_dma_fragment_transform_restore_return_to_cache,
-			fragment,
-			fragment->dma_link_list.next,
-			fragment->dma_link_list.prev,
-			NULL,
-			0,
-			gfpflags
-			);
-	return fragment->transform_back;
+	struct dma_fragment_transform *transform;
+	while( !list_empty(&frag->link_transform_list)) {
+		transform = list_first_entry(
+			&frag->link_transform_list,
+			typeof(*transform),
+			transform_list);
+		dma_fragment_transform_free(transform);
+	}
 }
-EXPORT_SYMBOL_GPL(dma_fragment_add_return_to_cache_transform);
+EXPORT_SYMBOL_GPL(dma_fragment_free_link_transforms);
 
 void dma_fragment_free(struct dma_fragment *frag)
 {
 	struct dma_link *link;
-	struct dma_fragment_transform *transform;
 
 	/* note: we do not remove from fragment cache,
 	   as it would require a lock */
@@ -262,25 +187,15 @@ void dma_fragment_free(struct dma_fragment *frag)
 			&frag->dma_link_list,
 			typeof(*link),
 			dma_link_list);
+		list_del_init(&link->dma_link_list);
 		dma_link_free(link);
 	}
-
 	/* remove all the dma_fragment_transforms belonging to us */
-	while( !list_empty(&frag->transform_list)) {
-		transform = list_first_entry(
-			&frag->transform_list,
-			typeof(*transform),
-			transform_list);
-		dma_fragment_transform_free(transform);
-	}
+	dma_fragment_free_link_transforms(frag);
 
-	/* free the existing transform_back */
-	if (frag->transform_back) {
-		list_del(&frag->transform_back->transform_list);
-		kfree(frag->transform_back);
-	}
-
-	kfree(frag);
+	/* release if allocated */
+	if (!frag->embedded)
+		kfree(frag);
 }
 EXPORT_SYMBOL_GPL(dma_fragment_free);
 
@@ -304,6 +219,7 @@ void dma_fragment_dump(
 			struct device *,int)
 	) {
 	struct dma_link *link;
+	struct dma_fragment *sfrag;
 	struct dma_fragment_transform *transform;
 	int i;
 	const char *indent=_tab_indent(tindent+1);
@@ -355,18 +271,34 @@ void dma_fragment_dump(
 		dma_link_dump(link, dev, tindent+2, dma_cb_dump);
 	}
 
-	/* dump the individual dma_fragment_transforms */
-	dev_printk(KERN_INFO,dev,"%sDMA-Transforms:\n",
-		_tab_indent(tindent));
-	i=0;
-	list_for_each_entry(transform,
-			&fragment->transform_list,
-			transform_list) {
+	/* dump the sub fragments */
+	if (!list_empty(&fragment->sub_fragment_head)) {
 		dev_printk(KERN_INFO,dev,
-			"%sDMA-Transform %i:\n",
-			_tab_indent(tindent+1),
-			i++);
-		dma_fragment_transform_dump(transform, dev, tindent+2);
+			"%sSub-DMA-Fragments:\n",
+			_tab_indent(tindent)
+			);
+		list_for_each_entry(sfrag,
+				&fragment->sub_fragment_head,
+				sub_fragment_list) {
+			dma_fragment_dump(sfrag, dev, tindent+1,
+					flags,dma_cb_dump);
+		}
+	}
+
+	/* dump the individual dma_fragment_transforms */
+	if (!list_empty(&fragment->link_transform_list)) {
+		dev_printk(KERN_INFO,dev,"%sDMA-Transforms:\n",
+			_tab_indent(tindent));
+		i=0;
+		list_for_each_entry(transform,
+				&fragment->link_transform_list,
+				transform_list) {
+			dev_printk(KERN_INFO,dev,
+				"%sDMA-Transform %i:\n",
+				_tab_indent(tindent+1),
+				i++);
+			dma_fragment_transform_dump(transform, dev, tindent+2);
+		}
 	}
 }
 EXPORT_SYMBOL_GPL(dma_fragment_dump);
@@ -391,7 +323,6 @@ int dma_fragment_cache_initialize(
 
 	spin_lock_init(&cache->lock);
 
-	INIT_LIST_HEAD(&cache->active);
 	INIT_LIST_HEAD(&cache->idle);
 
 	/* create name */
@@ -546,13 +477,10 @@ struct dma_fragment *dma_fragment_cache_add(
 	cache->count_allocated ++;
 	if (gfpflags == GFP_KERNEL)
 		cache->count_allocated_kernel ++;
-	/* add to corresponding list */
+	/* add to idle list */
 	if (dest & DMA_FRAGMENT_CACHE_TO_IDLE) {
 		list_add(&frag->cache_list, &cache->idle);
 		cache->count_idle++;
-	} else {
-		list_add(&frag->cache_list, &cache->active);
-		cache->count_active++;
 	}
 
 	spin_unlock_irqrestore(&cache->lock, flags);
@@ -567,6 +495,8 @@ void dma_fragment_cache_release(struct dma_fragment_cache* cache)
 	unsigned long flags;
 	struct dma_fragment *frag;
 
+	printk(KERN_ERR "dma_fragment_cache_release: %s\n",cache->dev_attr.attr.name);
+
 	spin_lock_irqsave(&cache->lock, flags);
 
 	while( !list_empty(&cache->idle)) {
@@ -574,11 +504,13 @@ void dma_fragment_cache_release(struct dma_fragment_cache* cache)
 					struct dma_fragment,
 					cache_list);
 		list_del_init(&frag->cache_list);
+		printk(KERN_ERR "dma_fragment_cache_release: %pf\n",frag);
+
 		dma_fragment_free(frag);
 	}
 	cache->count_idle = 0;
 
-	if (! list_empty(&cache->active))
+	if (cache->count_active)
 		dev_printk(KERN_ERR,cache->device,
 			"the dma_fragment_cache %s is not totally idle"
 			" it contains %u entries\n",
