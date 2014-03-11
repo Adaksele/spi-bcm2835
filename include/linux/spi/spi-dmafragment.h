@@ -1,5 +1,5 @@
 /*
- * Driver for Broadcom BCM2835 SPI Controllers
+ * DA-Fragment framework for SPI Controllers
  *
  * Copyright (C) 2014 Martin Sperl
  *
@@ -153,32 +153,9 @@ static inline void spi_merged_dma_fragment_add_dma_fragment_transform(
 			&frag->transform_pre_dma_list);
 }
 
-static inline struct dma_fragment_transform *
-spi_merged_dma_fragment_addnew_transform(
-	int size,
-	struct spi_merged_dma_fragment *merged,
-	int (*function)(struct dma_fragment_transform *, void *,gfp_t),
-	struct dma_fragment *frag,
-	void *data,
-	int post,
-	gfp_t gfpflags)
-{
-	struct dma_fragment_transform *trans;
-	trans = dma_fragment_transform_alloc(
-		function,
-		frag,
-		data,
-		size,
-		gfpflags
-		);
-	if (trans)
-		spi_merged_dma_fragment_add_dma_fragment_transform(
-			merged,trans,post
-			);
 
-	return trans;
-}
 
+#if 0
 int spi_merged_dma_fragment_call_complete(
 	struct dma_fragment_transform *transform,
 	void *vp, gfp_t gfpflags);
@@ -203,6 +180,7 @@ static inline int spi_merged_dma_fragment_prepare_for_schedule(
 	}
 	return 0;
 }
+#endif
 
 /**
  * spi_merged_dma_fragment_merge_dma_fragment_from_cache - merge a
@@ -214,10 +192,62 @@ static inline int spi_merged_dma_fragment_prepare_for_schedule(
 int spi_merged_dma_fragment_merge_fragment_cache(
 	struct dma_fragment_cache *fragmentcache,
 	struct spi_merged_dma_fragment *merged,
-//	int (*link_dma_link)(struct dma_link *,struct dma_link *),
 	gfp_t gfpflags);
 
 /**
+ * spi_merged_dma_fragment_add_predma_transform - add a pre-DMA
+ *   transform to the fragment
+ * @fragment: the fragment to which to add
+ * @transform: the link object of the DMA controlblock to add
+ */
+static inline void spi_merged_dma_fragment_add_predma_transform(
+        struct spi_merged_dma_fragment *fragment,
+        struct dma_fragment_transform *transform
+        )
+{
+        list_add_tail(&transform->transform_list,
+		&fragment->transform_pre_dma_list);
+}
+
+/**
+ * spi_merged_dma_fragment_addnew_predma_transform - add a new pre-dma
+ *   transform
+ * @addto: the spi_merged_dma_fragment to which we should add this
+ * @frag: the dma_fragment for which we are doing this
+ * @size: the size to allocate
+ * @function: the function to call
+ * @data: some extra data to pass to the function
+ * @gpfflags: the flags used during allocation of memory
+ */
+static inline struct dma_fragment_transform *
+spi_merged_dma_fragment_addnew_predma_transform(
+	struct spi_merged_dma_fragment *addto,
+	struct dma_fragment *frag,
+        ssize_t size,
+        int (*function)(struct dma_fragment_transform *,void *,gfp_t),
+        void *data,
+        gfp_t gfpflags)
+{
+        struct dma_fragment_transform *trans =
+                dma_fragment_transform_alloc(
+                        function,
+                        frag,
+                        data,
+                        size,
+                        gfpflags);
+        if (trans)
+                spi_merged_dma_fragment_add_predma_transform(
+                        addto,trans);
+
+	return trans;
+}
+
+/**
+ * spi_merged_dma_fragment_execute_pre_dma_transforms - execute all the
+ *   pre_dma transforms scheduled  for execution
+ * @merged: the spi_merged_dma_fragment
+ * @data: extra data to pass to the function
+ * @gpfflags: the flags used during allocation of memory
  */
 static inline int spi_merged_dma_fragment_execute_pre_dma_transforms(
 	struct spi_merged_dma_fragment *merged, void* data, gfp_t gfpflags)
@@ -239,6 +269,61 @@ static inline int spi_merged_dma_fragment_execute_pre_dma_transforms(
 	return 0;
 }
 
+/**
+ * spi_merged_dma_fragment_add_postdma_transform - add a post-DMA
+ *   transform to the fragment
+ * @fragment: the fragment to which to add
+ * @transform: the link object of the DMA controlblock to add
+ */
+static inline void spi_merged_dma_fragment_add_postdma_transform(
+        struct spi_merged_dma_fragment *fragment,
+        struct dma_fragment_transform *transform
+        )
+{
+        list_add_tail(&transform->transform_list,
+		&fragment->transform_post_dma_list);
+}
+
+/**
+ * spi_merged_dma_fragment_addnew_postdma_transform - add a new post-dma
+ *   transform
+ * @addto: the spi_merged_dma_fragment to which we should add this
+ * @frag: the dma_fragment for which we are doing this
+ * @size: the size to allocate
+ * @function: the function to call
+ * @data: some extra data to pass to the function
+ * @gpfflags: the flags used during allocation of memory
+ */
+static inline struct dma_fragment_transform *
+spi_merged_dma_fragment_addnew_postdma_transform(
+	struct spi_merged_dma_fragment *addto,
+	struct dma_fragment *frag,
+        ssize_t size,
+        int (*function)(struct dma_fragment_transform *,void *,gfp_t),
+        void *data,
+        gfp_t gfpflags)
+{
+        struct dma_fragment_transform *trans =
+                dma_fragment_transform_alloc(
+                        function,
+                        frag,
+                        data,
+                        size,
+                        gfpflags);
+        if (trans)
+                spi_merged_dma_fragment_add_postdma_transform(
+                        addto,trans);
+
+	return trans;
+}
+
+/**
+ * spi_merged_dma_fragment_execute_post_dma_transforms - execute all the
+ *   post_dma transforms scheduled  for execution
+ * @merged: the spi_merged_dma_fragment
+ * @data: extra data to pass to the function
+ * @gpfflags: the flags used during allocation of memory
+ */
 static inline int spi_merged_dma_fragment_execute_post_dma_transforms(
 	struct spi_merged_dma_fragment *merged, void* data, gfp_t gfpflags)
 {
@@ -258,5 +343,4 @@ static inline int spi_merged_dma_fragment_execute_post_dma_transforms(
 
 	return 0;
 }
-
 #endif /* __SPI_DMAFRAGMENT_H */

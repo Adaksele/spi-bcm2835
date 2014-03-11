@@ -313,7 +313,6 @@ static inline void dma_fragment_init(
  * @size: the size to really allocate
  */
 static inline struct dma_fragment* dma_fragment_alloc(
-	struct device *device,
 	size_t size, gfp_t gfpflags)
 {
 	struct dma_fragment *frag;

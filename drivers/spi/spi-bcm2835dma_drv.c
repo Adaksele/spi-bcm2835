@@ -397,26 +397,28 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 		message,
 		0,
 		GFP_ATOMIC);
+	set_high();
+	if (!merged)
+		return -ENOMEM;
+	/* assign some values */
 	message->state = merged;
 	message->actual_length = 0;
-	set_high();
 
-	spi_merged_dma_fragment_execute_pre_dma_transforms(
+	if(0)	spi_merged_dma_fragment_execute_pre_dma_transforms(
 		merged,merged,GFP_ATOMIC);
-
 #if 1
-	spi_merged_dma_fragment_dump(
-		(struct spi_merged_dma_fragment*) merged,
-		&message->spi->dev,
-		0,0,
-		&bcm2835_dma_link_dump
+	printk(KERN_INFO "XXXX: %pf\n",merged);
+	spi_merged_dma_fragment_dump(merged,
+				&message->spi->dev,
+				0,0,
+				&bcm2835_dma_link_dump
 		);
 #endif
 	set_low();
 
 	printk(KERN_ERR "Message-state-set: %pf\n",message->state);
 
-	return -EPERM;
+	goto error;
 
 	/* and schedule it */
 	if (merged) {
@@ -427,6 +429,9 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 
 	/* and return */
 	return 0;
+error:
+//	dma_merged
+	return -EPERM;
 }
 
 static void bcm2835dma_release_dmachannel(struct spi_master *master,

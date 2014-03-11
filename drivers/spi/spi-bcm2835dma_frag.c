@@ -40,7 +40,7 @@ extern int delay_1us;
 /*------------------------------------------------------------------------
  * Helpers - some of these could be inlined functions
  *----------------------------------------------------------------------*/
-#define GET_VARY_FROM_XFER(xfer)  0*xfer->len /*xfer->vary*/
+#define GET_VARY_FROM_XFER(xfer)  0+0*xfer->len /*xfer->vary*/
 
 /**
  * THIS_CB_MEMBER_DMA_ADDR - dma_addr_t of a DMA_CB.member
@@ -64,8 +64,8 @@ extern int delay_1us;
 	struct dma_link *link;						\
 	struct bcm2835_dma_cb *cb;					\
 	struct struct_name *frag =					\
-		(struct struct_name *) dma_fragment_alloc(		\
-			device,						\
+		(struct struct_name *) spi_merged_dma_fragment_alloc(	\
+			&bcm2835_link_dma_link,				\
 			sizeof(struct struct_name),			\
 			gfpflags);					\
 	if (! frag)							\
@@ -171,8 +171,15 @@ error:							\
 		int vary = GET_VARY_FROM_XFER(merged->transfer);	\
 		/* depending on vary and varymask make the decission */	\
 		if (vary & varymask) {					\
-			/* TODO: put into PRE-DMA phase */		\
-			return -EPERM;					\
+			if (!spi_merged_dma_fragment_addnew_predma_transform( \
+					merged,				\
+					frag,0,				\
+					&function##suffix##_wrap,	\
+					transform->data,		\
+					gfpflags))			\
+				return -ENOMEM;				\
+			else						\
+				return 0;				\
 		} else {						\
 			return function(				\
 				(void*)frag,				\
@@ -189,97 +196,6 @@ error:							\
 			gfpflags))				 \
 		goto error;
 
-
-
-#if 0
-
-/**
- * SCHEDULE_LINKTIME_TRANSFORM - schedules a transform during link time
- * @function: function to schedule
- * @src: values to set in transform
- * @dst: values to set in transform
- * @extra: values to set in transform
- */
-#define SCHEDULE_LINKTIME_TRANSFORM(function,data)		 \
-	if (! dma_fragment_addnew_transform(			 \
-			&function,				 \
-			&frag->fragment,			 \
-			data,					 \
-			0,gfpflags))				 \
-		goto error;
-
-/**
- * SCHEDULE_LINKTIME_VARY_TRANSFORM - schedules a transform during link
- * time which may further defer to pre-dma time if VARY is given.
- * @function: function to schedule - needs to get created via the
- *   VARY_LINK_TRANSFORM_HELPER macro.
- * @extra: values to set in transform
- * Note:
- * the function called have the assumption that src,dst contain
- * spi_message and spi_transfer respectively.
- */
-#define SCHEDULE_LINKTIME_VARY_TRANSFORM(function,extra)	 \
-	SCHEDULE_LINKTIME_TRANSFORM(function,NULL,NULL,extra);	 \
-
-/**
- * VARY_LINK_TRANSFORM_HELPER - macro that depending on the vary bitflags
- * either schedules the transfer to get done on DMA scheduling
- * or getting executed immediately during link time (possibly inlined)
- * @varyflags: the flags on which we need to vary
- * @functionname: the function to call either now or later
- *   this function is actually of a different type than the one used
- *   with dma_fragment_transform so that we see a warning about a
- *   changed interface requirement (see below the notes on src and dst)
- * @suffix: the suffix for the created function
- * Note:
- * this helper requres that it is called ONLY in link context
- * it also assumes that transform->src contains the spi_message
- * and transform->dst contains the spi_transfer to process
- * this is needed to map the functions during link time as well...
- */
-#define VARY_LINK_TRANSFORM_HELPER(varyflags,functionname,suffix)	\
-	static int _ ## functionname ## suffix (			\
-		struct dma_fragment_transform *transform,		\
-		void *vp,						\
-		gfp_t gfpflags)						\
-	{								\
-	return functionname(						\
-		transform->fragment,					\
-		transform->src,						\
-		transform->dst,						\
-		transform->extra,					\
-		(struct bcm2835dma_spi_merged_dma_fragment *)vp,	\
-		gfpflags						\
-		);							\
-	}								\
-	static inline int functionname ## suffix (			\
-		struct dma_fragment_transform *transform,		\
-		void *vp,						\
-		gfp_t gfpflags)						\
-	{								\
-		struct dma_fragment *frag  = transform->fragment;	\
-		struct spi_merged_dma_fragment *merged =		\
-			(typeof(merged))vp;				\
-		struct spi_message  *mesg  = merged->message;		\
-		struct spi_transfer *xfer  = merged->transfer;		\
-		void                *extra = transform->extra;		\
-		int                  vary  = 0; /*xfer->vary*/		\
-		if ( 1 ||(!varyflags) || (vary & varyflags) ) {		\
-			if (! spi_merged_dma_fragment_addnew_transform(	\
-					merged,				\
-					& _ ## functionname ## suffix,	\
-					frag, mesg, xfer, extra,	\
-					0, 0, gfpflags) )		\
-				return -EPERM;				\
-			return 0;					\
-		} else {						\
-			/* call the function directly			\
-			 * - hopefully it is inlined... */		\
-			return functionname(				\
-				frag, mesg, xfer, extra,vp, gfpflags);	\
-		}							\
-	}
-#endif
 /**
  * FIXED - macro that defines the field as one that can get assigned with
  * a static value when creating the fragment.
@@ -565,7 +481,6 @@ LINK_TRANSFORM_WRAPPER(bcm2835dma_fragment_transform_link_config_spi,
 struct dma_fragment *bcm2835dma_spi_create_fragment_config_spi(
 	struct device *device,gfp_t gfpflags)
 {
-	START_CREATE_FRAGMENT_USE_TRANS();
 	START_CREATE_FRAGMENT_ALLOCATE(dma_fragment_config_spi);
 
 	/* before we do any of this we need to
@@ -670,9 +585,11 @@ struct dma_fragment *bcm2835dma_spi_create_fragment_config_spi(
  */
 
 struct dma_fragment_transfer {
-	struct dma_fragment dma_fragment;
-	struct dma_link     xfer_rx;
-	struct dma_link     xfer_tx;
+	struct dma_fragment           dma_fragment;
+	struct dma_link               xfer_rx;
+	struct dma_link               xfer_tx;
+	struct dma_fragment_transform trans_dmaunmap;
+	struct spi_transfer           *transfer;
 };
 
 /**
@@ -695,12 +612,10 @@ static inline int bcm2835dma_fragment_transform_length(
 	/* cast to correct type */
 	struct dma_fragment_transfer *frag =
 		container_of(dma_frag,typeof(*frag),dma_fragment);
-	/* the spi-device for which we run this */
-	struct bcm2835dma_spi_device_data *spi_data =
-		dev_get_drvdata(&spi_merged->message->spi->dev);
-	/* the transfer for which we run this */
-	struct spi_master *master = spi_merged->message->spi->master;
-	struct spi_transfer *xfer = spi_merged->transfer;
+	/* the xfer can not get taken from spi_merged, as this
+	 * happens potentially during scheduling,
+	 * where transfer invalid at this time*/
+	struct spi_transfer *xfer = frag->transfer;
 
 	/* set length of transfers */
 	dma_link_to_cb(&frag->xfer_tx)->length = xfer->len;
@@ -716,8 +631,101 @@ static inline int bcm2835dma_fragment_transform_length(
 	/* and return */
 	return 0;
 }
-VARY_TRANSFORM_WRAPPER(bcm2835dma_fragment_transform_length,
-		_vary);
+VARY_TRANSFORM_WRAPPER(bcm2835dma_fragment_transform_length,_vary);
+
+/**
+ * bcm2835dma_fragment_transform_map_data - transform that
+ *   will dma map data if necessary and set up the DMA flags
+ * @dma_frag: the dma fragment to which we apply this transform
+ * @spi_merge: the spi_merge fragment, to which this gets added
+ * @data: extra data
+ * @gfpflags: gfp flags used to allocate memory
+ */
+static inline int bcm2835dma_fragment_transform_mapset_data(
+	struct dma_fragment *dma_frag,
+	struct spi_merged_dma_fragment *spi_merged,
+	void *data,
+	gfp_t gfpflags)
+{
+	/* cast to correct type */
+	struct bcm2835dma_spi_merged_dma_fragment *merged =
+		container_of(spi_merged,typeof(*merged),spi_fragment);
+	/* cast to correct type */
+	struct dma_fragment_transfer *frag =
+		container_of(dma_frag,typeof(*frag),dma_fragment);
+
+	/* the xfer can not get taken from spi_merged, as this
+	 * happens potentially during scheduling,
+	 * where transfer invalid at this time*/
+	struct spi_transfer *xfer = frag->transfer;
+	/* the device which we map */
+	struct device *dev = &spi_merged->message->spi->dev;
+
+	dma_addr_t tx_dma = 0;
+	dma_addr_t rx_dma = 0;
+	/* we may need to map the data */
+	if (spi_merged->message->is_dma_mapped)  {
+		tx_dma = xfer->tx_dma;
+		rx_dma = xfer->rx_dma;
+	} else {
+		if (xfer->tx_buf) {
+			tx_dma = dma_map_single_attrs(
+				dev,
+				(void *)xfer->tx_buf,
+				xfer->len,
+				DMA_TO_DEVICE,
+				NULL);
+		}
+		if (xfer->rx_buf) {
+			rx_dma = dma_map_single_attrs(
+				dev,
+				(void *)xfer->rx_buf,
+				xfer->len,
+				DMA_FROM_DEVICE,
+				NULL);
+		}
+	}
+
+	/* set the rx/tx dma addresses */
+	dma_link_to_cb(&frag->xfer_tx)->src = tx_dma;
+	dma_link_to_cb(&frag->xfer_rx)->dst = rx_dma;
+
+	/* set dma flags depending on if we got data or NULL */
+	dma_link_to_cb(&frag->xfer_tx)->ti =
+		BCM2835_DMA_TI_PER_MAP(BCM2835_DMA_DREQ_SPI_TX)
+		| BCM2835_DMA_TI_D_DREQ
+		| BCM2835_DMA_TI_NO_WIDE_BURSTS
+		| ( (xfer->tx_buf) ?
+			BCM2835_DMA_TI_S_INC : BCM2835_DMA_TI_S_IGNORE);
+	dma_link_to_cb(&frag->xfer_rx)->ti =
+		BCM2835_DMA_TI_PER_MAP(BCM2835_DMA_DREQ_SPI_TX)
+		| BCM2835_DMA_TI_D_DREQ
+		| BCM2835_DMA_TI_NO_WIDE_BURSTS
+		| ( (xfer->rx_buf) ?
+			BCM2835_DMA_TI_D_INC : BCM2835_DMA_TI_D_IGNORE);
+
+	/* and return */
+	return 0;
+}
+VARY_TRANSFORM_WRAPPER(bcm2835dma_fragment_transform_mapset_data,_vary);
+
+/**
+ * bcm2835dma_fragment_transform_unmap_data - transform that
+ *   will release mapped memory regions
+ * @dma_frag: the dma fragment to which we apply this transform
+ * @spi_merge: the spi_merge fragment, to which this gets added
+ * @data: extra data
+ * @gfpflags: gfp flags used to allocate memory
+ */
+static inline int bcm2835dma_fragment_transform_unmap_data(
+	struct dma_fragment *dma_frag,
+	struct spi_merged_dma_fragment *spi_merged,
+	void *data,
+	gfp_t gfpflags)
+{
+	return 0;
+}
+VARY_TRANSFORM_WRAPPER(bcm2835dma_fragment_transform_unmap_data,_postdma);
 
 /**
  * bcm2835dma_fragment_transform_link_transfer - handle all the vary
@@ -731,8 +739,6 @@ static int bcm2835dma_fragment_transform_transfer(
 	gfp_t gfpflags)
 {
 	int err;
-	/* a new transform for predma */
-	struct dma_fragment_transform *predma;
 	/* cast to correct type */
 	struct bcm2835dma_spi_merged_dma_fragment *merged =
 		container_of(spi_merged,typeof(*merged),spi_fragment);
@@ -755,22 +761,24 @@ static int bcm2835dma_fragment_transform_transfer(
 	merged->txdma_link_to_here =
 		&dma_link_to_cb(&frag->xfer_tx)->next;
 
+	/* set the transfer in the fragment - needed for callbacks */
+	frag->transfer = spi_merged->transfer;
+
 	/* and based on vary we act differently */
 	if (vary & SPI_OPTIMIZE_VARY_LENGTH) {
 		/* need to link length at pre-dma time */
-#if 0
-		predma=spi_dma_fragment_addnew_predma_transform(
-			merged,0,
-			&bcm2835dma_fragment_transform_length_vary,
-			(void*)*merged->total_length,
-			gfpflags);
-		if (!predma)
+		if (! spi_merged_dma_fragment_addnew_predma_transform(
+				spi_merged,
+				dma_frag,0,
+				&bcm2835dma_fragment_transform_length_vary,
+				(void*)*merged->total_length,
+				gfpflags) )
 			return -ENOMEM;
-#endif
 		/* and mark txdma_link_to_here as NULL
 		 * as we have to schedule a new spi config
 		 * to reset dma fifos
 		 * note: with some "extra" VARY_LENGTH_X4
+		 * to signify that len will be a multiple of 4
 		 * we could avoid this
 		 */
 		merged->txdma_link_to_here = NULL;
@@ -780,208 +788,28 @@ static int bcm2835dma_fragment_transform_transfer(
 		err=bcm2835dma_fragment_transform_length(
 			dma_frag,spi_merged,NULL,gfpflags);
 		if (err)
-			return err;
+			goto error;
 	}
 
-	/* see if we need to mmap the data or not */
-	if (message->is_dma_mapped) {
-	} else  {
+	/* map the addresses */
+	SCHEDULE_LINKTIME_TRANSFORM(
+		bcm2835dma_fragment_transform_mapset_data_vary,
+		NULL);
+
+	/* and if we are not dma-mapped, the schedule an unmap */
+	if (!message->is_dma_mapped) {
+		/* and schedule a unmap with a prelinked object */
+		spi_merged_dma_fragment_add_postdma_transform(
+			spi_merged, &frag->trans_dmaunmap);
 	}
 
 	return 0;
+error:
+	return err;
 }
 LINK_TRANSFORM_WRAPPER(bcm2835dma_fragment_transform_transfer,_link);
 
 #if 0
-/**
- * bcm2835dma_fragment_transform_length - transform which sets
- *   length correctly
- * @transform: the transform that contains all additional parameters
- *  @src: spi_message to handle - primarily needed during vary calls
- *  @dst: spi_transfer to handle - primarily needed during vary calls
- * @vp: the fragment into which this fragment is getting merged
- * @gfpflags: the GFP flags used for allocation (if needed)
- */
-static inline int bcm2835dma_fragment_transform_length(
-	struct dma_fragment *fragment,
-	struct spi_message  *mesg,
-	struct spi_transfer *xfer,
-	void                *extra,
-	struct bcm2835dma_spi_merged_dma_fragment *merged,
-	gfp_t gfpflags)
-{
-	/* the fragments real type */
-	struct dma_fragment_transfer *frag = (typeof(frag)) fragment;
-	/* the transfer links */
-	struct dma_link *link_tx = frag->xfer_tx;
-	struct dma_link *link_rx = frag->xfer_rx;
-	/* and the controlblocks */
-	struct bcm2835_dma_cb *cb_tx =
-		(struct bcm2835_dma_cb *)link_tx->cb;
-	struct bcm2835_dma_cb *cb_rx =
-		(struct bcm2835_dma_cb *)link_rx->cb;
-
-	/* add set length of dma transfers */
-	cb_tx->length = xfer->len;
-	cb_rx->length = xfer->len;
-	/* and add to total */
-	*merged->total_length += xfer->len;
-
-	printk("XXX-transform_length: %i - %i - %pf - %i\n",
-		cb_rx->length,
-		cb_tx->length,
-		merged->total_length,
-		*merged->total_length
-		);
-
-	/* if it is not a multiple of 4,
-	 * then we need to schedule new setup_spi */
-	if (xfer->len & 3)
-		merged->spi_fragment.last_transfer = NULL;
-
-	/* we should also check for possible length */
-	if (*merged->total_length > 65535)
-		return -EINVAL;
-
-	return 0;
-}
-/*VARY_LINK_TRANSFORM_HELPER(SPI_OPTIMIZE_VARY_LENGTH,
-		bcm2835dma_fragment_transform_length,
-		_vary);*/
-
-/**
- * bcm2835dma_fragment_transform_length - transform which sets
- *   length correctly
- * @transform: the transform that contains all additional parameters
- *  @src: spi_message to handle - primarily needed during vary calls
- *  @dst: spi_transfer to handle - primarily needed during vary calls
- * @vp: the fragment into which this fragment is getting merged
- * @gfpflags: the GFP flags used for allocation (if needed)
- */
-static inline int bcm2835dma_fragment_transform_buffer(
-	struct dma_fragment *fragment,
-	struct spi_message  *mesg,
-	struct spi_transfer *xfer,
-	void                *extra,
-	struct bcm2835dma_spi_merged_dma_fragment *merged,
-	gfp_t gfpflags)
-{
-	/* the fragments real type */
-	struct dma_fragment_transfer *frag = (typeof(frag)) fragment;
-
-	/* the transfer links */
-	struct dma_link *link_tx = frag->xfer_tx;
-	struct dma_link *link_rx = frag->xfer_rx;
-
-	/* and the controlblocks */
-	struct bcm2835_dma_cb *cb_tx =
-		(struct bcm2835_dma_cb *)link_tx->cb;
-	struct bcm2835_dma_cb *cb_rx =
-		(struct bcm2835_dma_cb *)link_rx->cb;
-
-	/* copy rx/tx_dma */
-	cb_rx->dst = xfer->rx_dma;
-	cb_tx->src = xfer->tx_dma;
-
-	/* and also keep rx/tx_buf as a copy for debugging */
-	cb_rx->pad[0]=(u32)xfer->rx_buf;
-	cb_tx->pad[0]=(u32)xfer->tx_buf;
-
-	/* and set the corresponding values for dma sources
-	 * this is especially important for values that may be 0
-	 */
-	if (xfer->rx_buf) {
-		cb_rx->ti =
-			BCM2835_DMA_TI_PER_MAP(BCM2835_DMA_DREQ_SPI_RX)
-			| BCM2835_DMA_TI_S_DREQ
-			| BCM2835_DMA_TI_NO_WIDE_BURSTS
-			| BCM2835_DMA_TI_D_INC;
-	} else {
-		cb_rx->ti =
-			BCM2835_DMA_TI_PER_MAP(BCM2835_DMA_DREQ_SPI_RX)
-			| BCM2835_DMA_TI_S_DREQ
-			| BCM2835_DMA_TI_NO_WIDE_BURSTS
-			| BCM2835_DMA_TI_D_IGNORE;
-	}
-	if (xfer->tx_buf) {
-		cb_tx->ti =
-			BCM2835_DMA_TI_PER_MAP(BCM2835_DMA_DREQ_SPI_TX)
-			| BCM2835_DMA_TI_D_DREQ
-			| BCM2835_DMA_TI_NO_WIDE_BURSTS
-			| BCM2835_DMA_TI_S_INC;
-	} else {
-		cb_tx->ti =
-			BCM2835_DMA_TI_PER_MAP(BCM2835_DMA_DREQ_SPI_TX)
-			| BCM2835_DMA_TI_D_DREQ
-			| BCM2835_DMA_TI_NO_WIDE_BURSTS
-			| BCM2835_DMA_TI_S_IGNORE;
-	}
-
-	return 0;
-}
-/*VARY_LINK_TRANSFORM_HELPER(
-	(SPI_OPTIMIZE_VARY_RX_BUF|SPI_OPTIMIZE_VARY_TX_BUF),
-	bcm2835dma_fragment_transform_buffer,
-	_vary);*/
-
-/**
- * bcm2835dma_fragment_transform_dmamap - transform which sets
- *   the dma_mapping
- * @transform: the transform that contains all additional parameters
- *  @src: spi_message to handle - primarily needed during vary calls
- *  @dst: spi_transfer to handle - primarily needed during vary calls
- * @vp: the fragment into which this fragment is getting merged
- * @gfpflags: the GFP flags used for allocation (if needed)
- */
-static inline int bcm2835dma_fragment_transform_dmamap(
-	struct dma_fragment *fragment,
-	struct spi_message  *mesg,
-	struct spi_transfer *xfer,
-	void                *extra,
-	struct bcm2835dma_spi_merged_dma_fragment *merged,
-	gfp_t gfpflags)
-{
-	if (xfer->tx_buf) {
-		xfer->tx_dma = dma_map_single_attrs(
-			&mesg->spi->master->dev,
-			(void *)xfer->tx_buf,
-			xfer->len,
-			DMA_TO_DEVICE,
-			NULL);
-	} else {
-		xfer->tx_dma = 0;
-	}
-
-	if (xfer->rx_buf) {
-		xfer->rx_dma = dma_map_single_attrs(
-			&mesg->spi->master->dev,
-			(void *)xfer->rx_buf,
-			xfer->len,
-			DMA_FROM_DEVICE,
-			NULL);
-	} else {
-		xfer->rx_dma = 0;
-	}
-
-	/* and always call the buffer_set functions */
-	return bcm2835dma_fragment_transform_buffer(
-		fragment,mesg,xfer,extra,merged,gfpflags);
-}
-/*VARY_LINK_TRANSFORM_HELPER(
-	(SPI_OPTIMIZE_VARY_RX_BUF|SPI_OPTIMIZE_VARY_TX_BUF),
-	bcm2835dma_fragment_transform_dmamap,
-	_vary);*/
-
-/**
- * bcm2835dma_fragment_transform_dmaunmap - transform which sets
- *   the dma_mapping
- * @transform: the transform that contains all additional parameters
- *  @src: spi_message to handle - primarily needed during vary calls
- *  @dst: spi_transfer to handle - primarily needed during vary calls
- *  @extra: device used during dmamap
- * @vp: the fragment into which this fragment is getting merged
- * @gfpflags: the GFP flags used for allocation (if needed)
- */
 static inline int bcm2835dma_fragment_transform_dmaunmap(
 	struct dma_fragment_transform * transform,
 	void *vp,
@@ -1027,74 +855,8 @@ static inline int bcm2835dma_fragment_transform_dmaunmap(
                         NULL);
 	return 0;
 }
-
-/**
- * bcm2835dma_fragment_transform_linktx - dma_fragment_transform which
- *  links the current transfer to the previous one
- * @transform: the transform that contains all additional parameters
- * @vp: the fragment into which this fragment is getting merged
- * @gfpflags: the GFP flags used for allocation (if needed)
- */
-static int bcm2835dma_fragment_transform_linktx(
-	struct dma_fragment_transform * transform,
-	void *vp,
-	gfp_t gfpflags)
-{
-	/* the merged fragment */
-	struct bcm2835dma_spi_merged_dma_fragment *merged_frag =
-		(typeof(merged_frag)) vp;
-
-	/* the dma_fragment_transfer to chain */
-	struct dma_fragment_transfer *frag =
-		(typeof(frag)) transform->fragment;
-	/* the tx-transfer link itself */
-	struct dma_link *link_tx = frag->xfer_tx;
-	/* and the controlblock */
-	struct bcm2835_dma_cb *cb_tx =
-		(struct bcm2835_dma_cb *)link_tx->cb;
-
-	/* now link the tx dma */
-	*merged_frag->txdma_link_to_here = link_tx->cb_dma;
-	merged_frag->txdma_link_to_here = &cb_tx->next;
-	cb_tx->next=0;
-
-	/* for the below we need the transfer in src,
-	   as this information is not available during vary time */
-	transform->src = merged_frag->spi_fragment.message;
-	transform->dst = merged_frag->spi_fragment.transfer;
-
-	/* and process length - possibly varied */
-	if (bcm2835dma_fragment_transform_length_vary(
-			transform,vp,gfpflags))
-		return 1;
-	/* do we need to DMA-map? */
-	if (!merged_frag->spi_fragment.message->is_dma_mapped) {
-		/* in principle this means varying the whole thing
-		 * so we need to schedule it really for PRE/POST
-		 * immediately
-		 */
-		if (bcm2835dma_fragment_transform_dmamap_vary(
-				transform,vp,gfpflags))
-			return -ENOMEM;
-		/* and schedule unmap as a post-dma step */
-		if (! spi_merged_dma_fragment_addnew_transform(
-				(struct spi_merged_dma_fragment *) vp,
-				&bcm2835dma_fragment_transform_dmaunmap,
-				transform->fragment,
-				merged_frag->spi_fragment.message,
-				merged_frag->spi_fragment.transfer,
-				NULL,0,1,gfpflags) )
-			return -ENOMEM;
- 	} else {
-		if (bcm2835dma_fragment_transform_buffer_vary(
-				transform,vp,gfpflags))
-			return -ENOMEM;
-	}
-
-	/* and return without any issues */
-	return 0;
-}
 #endif
+
 /**
  * bcm2835dma_spi_create_fragment_transfer - allocate and setup the
  *  dma_fragment to configure the DMA transfer
@@ -1131,6 +893,16 @@ static struct dma_fragment *bcm2835dma_spi_create_fragment_transfer(
 	VARY (length, bcm2835dma_fragment_transform_copyadd_length,
 		xfer.length);
 
+	/* create the prepared dmaunmap transform,
+	 * as there are very few dma_mapped spi_messages */
+	dma_fragment_transform_init(
+		&frag->trans_dmaunmap,
+		sizeof(frag->trans_dmaunmap),
+		1, /* is embedded */
+		bcm2835dma_fragment_transform_unmap_data_postdma,
+		&frag->dma_fragment,
+		0);
+
 	/* we also need to link the tx_channel to the previous, but as
 	   this only happens during dma-fragment linking, we need to
 	   schedule it...
@@ -1138,6 +910,7 @@ static struct dma_fragment *bcm2835dma_spi_create_fragment_transfer(
 	SCHEDULE_LINKTIME_TRANSFORM(
 			bcm2835dma_fragment_transform_transfer_link,
 			NULL);
+
 
 	END_CREATE_FRAGMENT_ALLOCATE();
 }
@@ -1329,11 +1102,13 @@ static inline int bcm2835dma_transforms_prepare_for_schedule(
 
 	/* and set the pointer so that the interrupt-handler may use it */
 	merged->complete_data = &cb->pad[0];
-
+#if 0
 	/* and the other stuff that we should do prior to scheduling
 	   the transfer */
 	return spi_merged_dma_fragment_prepare_for_schedule(
 		transform,vp,gfpflags);
+#endif
+	return 0;
 }
 
 static struct dma_fragment *bcm2835dma_spi_create_fragment_trigger_irq(
