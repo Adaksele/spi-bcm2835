@@ -68,6 +68,9 @@ struct spi_merged_dma_fragment {
 	void *complete_data;
 };
 
+void spi_merged_dma_fragment_release(
+	struct dma_fragment *frag, int releasetocache);
+
 static inline void spi_merged_dma_fragment_init(
 	struct spi_merged_dma_fragment *frag,
 	int (*link_dma_link)(struct dma_link *,struct dma_link *),
@@ -78,6 +81,8 @@ static inline void spi_merged_dma_fragment_init(
 	INIT_LIST_HEAD(&frag->transform_pre_dma_list);
 	INIT_LIST_HEAD(&frag->transform_post_dma_list);
 	frag->link_dma_link = link_dma_link;
+	frag->dma_fragment.release_fragment =
+		&spi_merged_dma_fragment_release;
 }
 
 static inline
@@ -96,30 +101,6 @@ struct spi_merged_dma_fragment *spi_merged_dma_fragment_alloc(
 			size);
 
 	return frag;
-}
-
-static inline void spi_merged_dma_fragment_free(
-	struct spi_merged_dma_fragment *merged)
-{
-	struct dma_fragment_transform *transform;
-	/* remove all the dma_fragment_transforms belonging to us */
-	while( !list_empty(&merged->transform_pre_dma_list)) {
-		transform = list_first_entry(
-			&merged->transform_pre_dma_list,
-			typeof(*transform),
-			transform_list);
-		dma_fragment_transform_free(transform);
-	}
-	/* remove all the dma_fragment_transforms belonging to us */
-	while( !list_empty(&merged->transform_post_dma_list)) {
-		transform = list_first_entry(
-			&merged->transform_post_dma_list,
-			typeof(*transform),
-			transform_list);
-		dma_fragment_transform_free(transform);
-	}
-
-	dma_fragment_free(&merged->dma_fragment);
 }
 
 /**

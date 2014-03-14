@@ -138,28 +138,15 @@ static int bcm2835dma_schedule_dma_fragment(
 	/* now see if DMA is still running */
 	if ( !( readl(bs->dma_rx.base+BCM2835_DMA_CS)
 			& BCM2835_DMA_CS_ACTIVE )) {
-		dump_dma_regs("PRE-DMA-rx",bs->dma_rx.base);
-		dump_dma_regs("PRE-DMA-tx",bs->dma_tx.base);
-
 		writel(frag->dma_fragment.link_head->cb_dma,
 			bs->dma_rx.base+BCM2835_DMA_ADDR);
 		dsb();
-
-		dump_dma_regs("PRE2-DMA-rx",bs->dma_rx.base);
-		dump_dma_regs("PRE2-DMA-tx",bs->dma_tx.base);
 
 		writel(BCM2835_DMA_CS_ACTIVE,
 			bs->dma_rx.base+BCM2835_DMA_CS);
 		printk(KERN_INFO "SCHEDULE-DMA starting_dma\n");
 	}
 	spin_unlock_irqrestore(&master->queue_lock,flags);
-
-	/* see if the DMA Runs */
-	for (flags=0;flags<5;flags++) {
-		dump_dma_regs("DMA-rx",bs->dma_rx.base);
-		dump_dma_regs("DMA-tx",bs->dma_tx.base);
-	}
-
 
 	return 0;
 }
@@ -203,7 +190,7 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 
 		/* otherwise we can release the message */
 		spin_lock_irqsave(&master->queue_lock,flags);
-		list_del(&frag->message->queue);
+		list_del_init(&frag->message->queue);
 		spin_unlock_irqrestore(&master->queue_lock,flags);
 
 		/* reset status */
@@ -213,11 +200,21 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 		spi_merged_dma_fragment_execute_post_dma_transforms(
 			frag,frag,GFP_ATOMIC);
 
-#if 0
-		if (! msg->is_optimized)
-			dma_fragment_execute(frag,NULL,NULL);
+		/* and release fragment - if not optimized */
+		if (
+#ifdef HAVE_SPI_OPTIMIZE
+			! msg->is_optimized
+#else
+			(1)
 #endif
+			)
+			dma_fragment_release(&frag->dma_fragment);
 
+		/* call the callback
+		 * - this could get actually get done also via
+		 * a scheduled post_dma */
+		if (msg->complete)
+			msg->complete(msg->context);
 	}
 }
 irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
@@ -226,7 +223,7 @@ irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 
 	/* write interrupt message to debug */
-	//if (unlikely(debug_dma))
+	if (unlikely(debug_dma))
 		printk(KERN_ERR "TX-Interrupt %i triggered\n",irq);
 
 	/* we need to clean the IRQ flag as well
@@ -294,7 +291,6 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 		/* check if we are the last in the list */
 		int is_last = list_is_last(&xfer->transfer_list,
 					&msg->transfers);
-		printk(KERN_INFO "LISTISLAST: %i\n",is_last);
 		/* assign the current transfer */
 		merged->transfer = xfer;
 		/* do we need to reconfigure spi
@@ -389,6 +385,7 @@ error:
 static int bcm2835dma_spi_transfer(struct spi_device *spi,
 				struct spi_message *message)
 {
+	int err=0;
 	struct spi_merged_dma_fragment *merged;
 	printk(KERN_INFO "Starting transfer: %pf %pf %pf\n",spi,message,message->spi);
 	/* fetch DMA fragment */
@@ -404,33 +401,31 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 	message->state = merged;
 	message->actual_length = 0;
 
-	if(0)	spi_merged_dma_fragment_execute_pre_dma_transforms(
+	/* and execute the pre-transforms */
+	err = spi_merged_dma_fragment_execute_pre_dma_transforms(
 		merged,merged,GFP_ATOMIC);
-#if 1
-	printk(KERN_INFO "XXXX: %pf\n",merged);
-	spi_merged_dma_fragment_dump(merged,
-				&message->spi->dev,
-				0,0,
-				&bcm2835_dma_link_dump
-		);
-#endif
+	if (err)
+		goto error;
+
+	if (unlikely(debug_dma))
+		spi_merged_dma_fragment_dump(merged,
+					&message->spi->dev,
+					0,0,
+					&bcm2835_dma_link_dump
+			);
 	set_low();
-
-	printk(KERN_ERR "Message-state-set: %pf\n",message->state);
-
-	goto error;
 
 	/* and schedule it */
 	if (merged) {
 		bcm2835dma_schedule_dma_fragment(message);
 		set_high();
 	}
-	printk(KERN_ERR "Message-state-set: %pf\n",message->state);
 
 	/* and return */
 	return 0;
 error:
-//	dma_merged
+	dev_printk(KERN_ERR,&spi->dev,"spi_transfer_failed: %i",err);
+	dma_fragment_release(&merged->dma_fragment);
 	return -EPERM;
 }
 
@@ -642,11 +637,11 @@ static void bcm2835dma_spi_cleanup(struct spi_device *spi)
 	/* note that surprisingly this does not necessarily
 	   get called on driver unload */
 	struct bcm2835dma_spi_device_data *data
-		= dev_get_drvdata(&spi->dev);
+		= spi_get_ctldata(spi);
 	/* release the memory and GPIO allocated for the SPI device */
 	if (data) {
 		bcm2835dma_cleanup_spi_device_data(data);
-		dev_set_drvdata(&spi->dev,NULL);
+		spi_set_ctldata(spi,NULL);
 	}
 }
 
@@ -657,20 +652,16 @@ static int bcm2835dma_spi_setup(struct spi_device *spi) {
 	u32 tmp;
 	int err;
 
-	/* initialize the queue - it does not get set up when using transfer*/
-	INIT_LIST_HEAD(&master->queue);
-
 	/* allocate data - if not allocated yet */
-	data=dev_get_drvdata(&spi->dev);
+	data=spi_get_ctldata(spi);
 	if (!data) {
 		data=kzalloc(sizeof(*data),GFP_KERNEL);
 		if (!data)
 			return -ENOMEM;
-		dev_set_drvdata(&spi->dev,data);
+		spi_set_ctldata(spi,data);
 		list_add(&data->spi_device_data_chain,
 			&bs->spi_device_data_chain);
 	}
-
 	/* calculate the real GPIO to use */
 	if (spi->master->cs_gpios) {
 		data->cs_gpio = spi->cs_gpio;
@@ -796,6 +787,9 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 
 	bs = spi_master_get_devdata(master);
 
+	/* initialize the queue - it does not get set up when using transfer*/
+	INIT_LIST_HEAD(&master->queue);
+	/* and the list of per device data - needed for cleanup */
 	INIT_LIST_HEAD(&bs->spi_device_data_chain);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);

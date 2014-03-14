@@ -52,7 +52,6 @@ EXPORT_SYMBOL_GPL(spi_merged_dma_fragment_call_complete);
 int spi_merged_dma_fragment_merge_fragment_cache(
 	struct dma_fragment_cache *fragmentcache,
 	struct spi_merged_dma_fragment *merged,
-//	int (*link_dma_link)(struct dma_link *,struct dma_link *),
 	gfp_t gfpflags
 	)
 {
@@ -75,7 +74,7 @@ int spi_merged_dma_fragment_merge_fragment_cache(
 	return err;
 
 error:
-	printk(KERN_ERR "spi_merged_dma_fragment_merge_fragment_cache:"
+	printk(KERN_ERR "ERROR: spi_merged_dma_fragment_merge_fragment_cache:"
 		" %i\n",err);
 	return err;
 }
@@ -145,6 +144,36 @@ void spi_merged_dma_fragment_dump(
 }
 EXPORT_SYMBOL_GPL(spi_merged_dma_fragment_dump);
 
+void spi_merged_dma_fragment_release(
+	struct dma_fragment *frag, int releasetocache)
+{
+	struct spi_merged_dma_fragment *merged=(typeof(merged))frag;
+	struct dma_fragment_transform *transform;
+
+	/* remove all the dma_fragment_transforms belonging to us */
+	while( !list_empty(&merged->transform_pre_dma_list)) {
+		transform = list_first_entry(
+			&merged->transform_pre_dma_list,
+			typeof(*transform),
+			transform_list);
+		list_del_init(&transform->transform_list);
+		dma_fragment_transform_free(transform);
+	}
+	/* remove all the dma_fragment_transforms belonging to us */
+	while( !list_empty(&merged->transform_post_dma_list)) {
+		transform = list_first_entry(
+			&merged->transform_post_dma_list,
+			typeof(*transform),
+			transform_list);
+		list_del_init(&transform->transform_list);
+		dma_fragment_transform_free(transform);
+	}
+	/* if we are not released to cache, then free us */
+	if (!releasetocache) {
+		kfree(frag);
+	}
+}
+EXPORT_SYMBOL_GPL(spi_merged_dma_fragment_release);
 
 MODULE_DESCRIPTION("spi specific dma-fragment infrastructure");
 MODULE_AUTHOR("Martin Sperl <kernel@martin.sperl.org>");

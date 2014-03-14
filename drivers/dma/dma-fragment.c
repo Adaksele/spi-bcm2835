@@ -150,6 +150,7 @@ void dma_fragment_release_subfragments(struct dma_fragment *frag)
 			typeof(*sub),
 			sub_fragment_list);
 		list_del_init(&sub->sub_fragment_list);
+		dma_fragment_release(sub);
 	}
 }
 EXPORT_SYMBOL_GPL(dma_fragment_release_subfragments);
@@ -167,37 +168,41 @@ void dma_fragment_free_link_transforms(struct dma_fragment *frag)
 }
 EXPORT_SYMBOL_GPL(dma_fragment_free_link_transforms);
 
-void dma_fragment_free(struct dma_fragment *frag)
+void dma_fragment_release(struct dma_fragment *frag)
 {
 	struct dma_link *link;
 
-	/* note: we do not remove from fragment cache,
-	   as it would require a lock */
-	if (!list_empty(&frag->cache_list)) {
-		printk(KERN_ERR "dma_fragment_free: %pK "
-			"is still a member of a dma_cache\n",
-			frag
-			);
-		return;
-	}
+	/* release sub-fragments */
+	dma_fragment_release_subfragments(frag);
+	/* release other stuff */
+	/* return to fragment cache if we are member of one */
+	if (frag->cache) {
+		if (frag->release_fragment)
+			frag->release_fragment(frag,1);
+		dma_fragment_cache_return(frag);
+	} else {
+		/* remove all the dma_links belonging to us */
+		while( !list_empty(&frag->dma_link_list)) {
+			link = list_first_entry(
+				&frag->dma_link_list,
+				typeof(*link),
+				dma_link_list);
+			list_del_init(&link->dma_link_list);
+			dma_link_free(link);
+		}
+		/* remove all the dma_fragment_transforms belonging to us */
+		dma_fragment_free_link_transforms(frag);
 
-	/* remove all the dma_links belonging to us */
-	while( !list_empty(&frag->dma_link_list)) {
-		link = list_first_entry(
-			&frag->dma_link_list,
-			typeof(*link),
-			dma_link_list);
-		list_del_init(&link->dma_link_list);
-		dma_link_free(link);
+		/* release if allocated ourselves*/
+		if (frag->release_fragment)
+			frag->release_fragment(frag,0);
+		else {
+			if (!frag->embedded)
+				kfree(frag);
+		}
 	}
-	/* remove all the dma_fragment_transforms belonging to us */
-	dma_fragment_free_link_transforms(frag);
-
-	/* release if allocated */
-	if (!frag->embedded)
-		kfree(frag);
 }
-EXPORT_SYMBOL_GPL(dma_fragment_free);
+EXPORT_SYMBOL_GPL(dma_fragment_release);
 
 void dma_fragment_dump_generic(
 	struct dma_fragment *fragment,
@@ -250,6 +255,10 @@ void dma_fragment_dump(
 		"%slink_t:\t%pK\n",
 		indent,
 		fragment->link_tail);
+	dev_printk(KERN_INFO,dev,
+		"%srelease:\t%pK\n",
+		indent,
+		fragment->release_fragment);
 	/* dump extra data */
 	if (sizeof(*fragment) < fragment->size)
 		_dump_extra_data(
@@ -451,7 +460,8 @@ int dma_fragment_cache_resize(struct dma_fragment_cache* cache,
 
 		spin_unlock_irqrestore(&cache->lock,flags);
 		/* and free it */
-		dma_fragment_free(frag);
+		frag->cache = NULL;
+		dma_fragment_release(frag);
 	}
 	return 0;
 }
@@ -495,8 +505,6 @@ void dma_fragment_cache_release(struct dma_fragment_cache* cache)
 	unsigned long flags;
 	struct dma_fragment *frag;
 
-	printk(KERN_ERR "dma_fragment_cache_release: %s\n",cache->dev_attr.attr.name);
-
 	spin_lock_irqsave(&cache->lock, flags);
 
 	while( !list_empty(&cache->idle)) {
@@ -504,9 +512,8 @@ void dma_fragment_cache_release(struct dma_fragment_cache* cache)
 					struct dma_fragment,
 					cache_list);
 		list_del_init(&frag->cache_list);
-		printk(KERN_ERR "dma_fragment_cache_release: %pf\n",frag);
-
-		dma_fragment_free(frag);
+		frag->cache = NULL;
+		dma_fragment_release(frag);
 	}
 	cache->count_idle = 0;
 

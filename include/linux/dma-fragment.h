@@ -282,6 +282,11 @@ struct dma_fragment {
 	 * DMA-Channels are needed for processing */
 	struct dma_link *link_head;
 	struct dma_link *link_tail;
+	/* reset fragment function
+	 * - called prior to returning it to cache or freeing it
+	 * if flag is set then we are freeing this
+	 */
+	void (*release_fragment)(struct dma_fragment *,int);
 };
 
 /**
@@ -331,12 +336,13 @@ static inline struct dma_fragment* dma_fragment_alloc(
 void dma_fragment_release_subfragments(struct dma_fragment *fragment);
 
 /**
- * dma_fragment_free - allocate a new dma_fragment and initialize it empty
+ * dma_fragment_release - release a dma_fragment
+ *   either from memory or return to cache
  * @fragment: the fragment to free
  * note:
  *   this call does NOT disconnect from fragment_cache
  */
-void dma_fragment_free(struct dma_fragment *fragment);
+void dma_fragment_release(struct dma_fragment *fragment);
 
 /**
  * dma_fragment_dump - dump the given fragment
@@ -640,8 +646,9 @@ static inline struct dma_fragment *dma_fragment_cache_fetch(
 static inline void dma_fragment_cache_return(
 	struct dma_fragment *fragment)
 {
-	unsigned long flags;
 	struct dma_fragment_cache *cache = fragment->cache;
+	unsigned long flags;
+	/* now return to cache */
 	if (cache) {
 		spin_lock_irqsave(&cache->lock,flags);
 		list_add(&fragment->cache_list,&cache->idle);
@@ -649,12 +656,7 @@ static inline void dma_fragment_cache_return(
 		cache->count_active --;
 		spin_unlock_irqrestore(&cache->lock,flags);
 	} else {
-		printk(KERN_ERR "dma_fragment_cache_return:"
-			" fragment %pK not in a cache,"
-			" so not returning\n",
-			fragment
-			);
-		/* maybe free the fragment instead? */
+		dma_fragment_release(fragment);
 	}
 }
 

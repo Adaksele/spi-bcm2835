@@ -20,6 +20,7 @@
  */
 #include <linux/dma/bcm2835-dma.h>
 #include <linux/printk.h>
+#include <linux/module.h>
 #include <asm/io.h>
 
 static const char *_tab_indent_string = "\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t";
@@ -109,3 +110,6 @@ void bcm2835_dma_reg_dump(
 }
 EXPORT_SYMBOL_GPL(bcm2835_dma_reg_dump);
 
+MODULE_DESCRIPTION("bcm2835 dma tools");
+MODULE_AUTHOR("Martin Sperl <kernel@martin.sperl.org>");
+MODULE_LICENSE("GPL v2");
