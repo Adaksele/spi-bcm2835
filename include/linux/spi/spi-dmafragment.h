@@ -45,6 +45,8 @@
  * @transfer: the current transfer during link phase - NULL otherwise
  * @last_transfer: the last transfer processed - mostly used to compare
  *    state changes...
+ * @need_spi_setup: marks that we need to schedule an spi_setup prior
+ *    to a new transfer
  * @link_dma_link: dma control-block linking function pointer.
  * @complete_data: TODO
  */
@@ -61,6 +63,8 @@ struct spi_merged_dma_fragment {
 	 */
 	struct spi_transfer *transfer;
 	struct spi_transfer *last_transfer;
+
+	bool needs_spi_setup;
 
 	/* and the link function*/
 	int (*link_dma_link)(struct dma_link *,struct dma_link *);

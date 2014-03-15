@@ -285,6 +285,7 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 	merged->dma_fragment.link_head = NULL;
 	merged->dma_fragment.link_tail = NULL;
 	merged->complete_data = NULL;
+	merged->needs_spi_setup = 1;
 
 	/* now start iterating the transfers */
 	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
@@ -295,40 +296,43 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 		merged->transfer = xfer;
 		/* do we need to reconfigure spi
 		   compared to the last transfer */
-		if (merged->last_transfer) {
+		if (! merged->needs_spi_setup) {
 			if (merged->last_transfer->speed_hz
 				!= xfer->speed_hz)
-				merged->last_transfer=NULL;
+				merged->needs_spi_setup = 1;
 			else if (merged->last_transfer->tx_nbits
 				!= xfer->tx_nbits)
-				merged->last_transfer=NULL;
+				merged->needs_spi_setup = 1;
 			else if (merged->last_transfer->rx_nbits
 				!= xfer->rx_nbits)
-				merged->last_transfer=NULL;
+				merged->needs_spi_setup = 1;
 			else if (merged->last_transfer->bits_per_word
 				!= xfer->bits_per_word)
-				merged->last_transfer=NULL;
+				merged->needs_spi_setup = 1;
 		}
 		/* if we have no last_transfer,
 		   then we need to setup spi */
-		if (!merged->last_transfer) {
+		if (merged->needs_spi_setup) {
 			err = spi_merged_dma_fragment_merge_fragment_cache(
 				&bs->fragment_setup_spi,
 				merged,
 				gfpflags);
 			if (err)
 				goto error;
+			merged->needs_spi_setup = 0;
 		}
 		/* add transfer if the transfer length is not 0
 		   or if we vary length */
 		if ( (xfer->len)
 			/* || (xfer->vary & SPI_OPTIMIZE_VARY_LENGTH) */) {
+			/* schedule transfer */
 			err = spi_merged_dma_fragment_merge_fragment_cache(
 				&bs->fragment_transfer,
 				merged,
 				gfpflags);
 			if (err)
 				goto error;
+			/* set last transfer */
 			merged->last_transfer=xfer;
 		}
 		/* add cs_change with optional extra delay
