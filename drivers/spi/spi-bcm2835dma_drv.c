@@ -90,14 +90,11 @@ static int bcm2835dma_schedule_dma_fragment(
 	struct spi_message *last_msg;
 	struct spi_merged_dma_fragment *last_frag;
 
-	printk(KERN_INFO "SCHEDULE-DMA fragment %pf %pf\n",msg,frag);
-
 	spin_lock_irqsave(&master->queue_lock,flags);
 
 	last_msg = (!list_empty(&master->queue) ?
 		list_last_entry(&master->queue, struct spi_message, queue)
 		: NULL);
-	printk(KERN_INFO "SCHEDULE-DMA last: %pf\n",last_msg);
 	/* link it to the last one on a spi_message level
 	 * as well as on a dma level
 	 */
@@ -119,7 +116,6 @@ static int bcm2835dma_schedule_dma_fragment(
 
 		writel(BCM2835_DMA_CS_ACTIVE,
 			bs->dma_rx.base+BCM2835_DMA_CS);
-		printk(KERN_INFO "SCHEDULE-DMA starting_dma\n");
 	}
 	spin_unlock_irqrestore(&master->queue_lock,flags);
 
@@ -148,9 +144,7 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 			return;
 		}
 
-		printk(KERN_INFO "processing message: %pf\n",msg);
 		frag = msg->state;
-		printk(KERN_INFO "processing frag: %pf\n",frag);
 
 		/* if we do not have a complete data pointer */
 		if (frag->complete_data) {
@@ -237,7 +231,6 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 	struct spi_merged_dma_fragment *merged;
 	struct spi_transfer *xfer;
 	int err=0;
-		printk(KERN_INFO "processing message: %pf\n",msg);
 
 	/* some optimizations - it might help if we knew the length... */
 	/* check if we got a frame that is of a single transfer */
@@ -350,8 +343,9 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 	return merged;
 
 error:
-	printk(KERN_ERR "bcm2835dma_spi_message_to_dma_fragment:"
-		" err=%i\n",err);
+	dev_printk(KERN_ERR,&spi->dev,
+		"bcm2835dma_spi_message_to_dma_fragment: err=%i\n",
+		err);
 	spi_merged_dma_fragment_dump(
 		merged,
 		&msg->spi->dev,
@@ -366,7 +360,6 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 {
 	int err=0;
 	struct spi_merged_dma_fragment *merged;
-	printk(KERN_INFO "Starting transfer: %pf %pf %pf\n",spi,message,message->spi);
 	/* fetch DMA fragment */
 	set_low();
 	merged = bcm2835dma_spi_message_to_dma_fragment(

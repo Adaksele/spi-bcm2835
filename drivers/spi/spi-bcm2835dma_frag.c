@@ -1236,98 +1236,6 @@ static struct dma_fragment *bcm2835dma_merged_dma_fragments_alloc(
 		gfpflags)->dma_fragment;
 }
 
-#if 0
-void runDelay(struct bcm2835dma_spi *bs,dma_addr_t start)
-{
-	/* configure + start dma */
-	writel(start,
-		bs->dma_rx.base+BCM2835_DMA_ADDR);
-	dsb();
-
-	writel(BCM2835_DMA_CS_ACTIVE,
-		bs->dma_rx.base+BCM2835_DMA_CS);
-	/* wait for DMA to deactivate */
-	while(
-		readl(bs->dma_rx.base+BCM2835_DMA_CS)
-		& BCM2835_DMA_CS_ACTIVE
-		) {
-		msleep(10);
-	}
-}
-
-void testDelay(struct bcm2835dma_spi *bs)
-{
-	u32 i;
-	u32 *gpio = ioremap(0x20200000, SZ_16K);
-
-	struct dma_link clear;
-	struct dma_link delay;
-	struct dma_link set;
-
-	u8 pin=24;
-	u32 mode=1;
-	/* this is a bit of a hack, as there seems to be no official
-	   way of doing this... */
-
-	/* map pin */
-	u32 *reg = &gpio[pin/10];
-	u8 shift = ((pin)%10)*3;
-	u32 v = *reg;
-	v &= ~( ((u32)(7)) << shift );
-	v |= (mode & 7) << shift;
-	*reg= v;
-	iounmap(gpio);
-	gpio[0x1C/4]=1<<24;
-
-	dma_link_init(&clear,bs->pool,0,1,GFP_ATOMIC);
-	dma_link_init(&delay,bs->pool,0,1,GFP_ATOMIC);
-	dma_link_init(&set,bs->pool,0,1,GFP_ATOMIC);
-
-	dma_link_to_cb(&clear)->ti     = 8;
-	dma_link_to_cb(&clear)->src
-		= BCM2835_DMA_CB_MEMBER_DMA_ADDR((&clear),pad[0]);
-	dma_link_to_cb(&clear)->dst    = 0x7e200028;
-	dma_link_to_cb(&clear)->length = 4;
-	dma_link_to_cb(&clear)->next   = delay.cb_dma;
-	dma_link_to_cb(&clear)->pad[0] = 1<<24;
-
-	dma_link_to_cb(&delay)->ti= (
-		BCM2835_DMA_TI_WAIT_RESP
-		| BCM2835_DMA_TI_WAITS(0x1f)
-		| BCM2835_DMA_TI_NO_WIDE_BURSTS
-		| BCM2835_DMA_TI_S_IGNORE
-		| BCM2835_DMA_TI_D_IGNORE
-		);
-	dma_link_to_cb(&delay)->src
-		= BCM2835_DMA_CB_MEMBER_DMA_ADDR((&delay),pad[0]);
-	dma_link_to_cb(&delay)->dst    = 0;
-	dma_link_to_cb(&delay)->length = 0;
-	dma_link_to_cb(&delay)->next   = set.cb_dma;
-	dma_link_to_cb(&delay)->pad[0] = 0x0;
-
-	dma_link_to_cb(&set)->ti=8;
-	dma_link_to_cb(&set)->src
-		= BCM2835_DMA_CB_MEMBER_DMA_ADDR((&set),pad[0]);
-	dma_link_to_cb(&set)->dst    = 0x7e20001C;
-	dma_link_to_cb(&set)->length = 4;
-	dma_link_to_cb(&set)->next   = 0;
-	dma_link_to_cb(&set)->pad[0] = 1<<24;
-	printk(KERN_ERR "XXX: %08x\n",clear.cb_dma);
-
-	for (i=0;i<=32;i++) {
-		dma_link_to_cb(&delay)->length=i;
-		printk(KERN_INFO "Run delay %u %u\n",i,i);
-		runDelay(bs,clear.cb_dma);
-		}
-	for (i=20;i<31;i++) {
-		printk(KERN_INFO "Run delay %u %u\n",i,(1<<i)-1);
-		dma_link_to_cb(&delay)->length=(1<<i) - 1 ;
-		runDelay(bs,clear.cb_dma);
-		}
-
-	msleep(1000);
-}
-#endif
 /* register all the stuff needed to control dmafragments
    note that the below requires that master has already been registered
    otherwise you get an oops...
@@ -1413,9 +1321,6 @@ int bcm2835dma_register_dmafragment_components(
 	if (err)
 		goto error;
 
-#if 0
-	testDelay(bs);
-#endif
 	return 0;
 error:
 	bcm2835dma_release_dmafragment_components(master);
