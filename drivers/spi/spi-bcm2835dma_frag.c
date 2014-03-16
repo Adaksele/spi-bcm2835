@@ -28,10 +28,7 @@
 #include "spi-bcm2835dma.h"
 #include <linux/spi/spi-dmafragment.h>
 #include <linux/dma-mapping.h>
-
-extern bool debug_msg;
-extern bool debug_dma;
-extern int delay_1us;
+#include <linux/delay.h>
 
 /*************************************************************************
  * the function creating dma_fragments - mostly used by dma_fragment_cache
@@ -391,8 +388,8 @@ static inline int bcm2835dma_fragment_transform_link_speed(
 	/* get the speed values */
 	u32 spi_hz = xfer->speed_hz;
 	u32 clk_hz = clk_get_rate(bs->clk);
-	/* now calc the clock divider */
 	u32 cdiv;
+	s32 delay;
 	/* now calculate the clock divider and other delay cycles */
         if (spi_hz >= clk_hz / 2) {
                 cdiv = 2; /* clk_hz/2 is the fastest we can go */
@@ -413,12 +410,37 @@ static inline int bcm2835dma_fragment_transform_link_speed(
 	merged->speed_cdiv = cdiv;
 	dma_link_to_cb(&frag->config_clock_length)->pad[0] = cdiv;
 
-	/* and now calculate the delay for a half clock cycle */
-	merged->delay_half_cycle_dma_length =
-		250000000 /* AXI bus speed = ram speed */
-		/ (2*spi_hz) /* divided by 2x speed in hz - half cycle */
-		/ 16 /* scaling factor for DMA overhead */
-		;
+	/* and now calculate the delay for a half clock cycle
+	 * needs better forumula than those empirical values
+	 * the main problem here is that the effective delay has several
+	 * components:
+	 * * prefetch of DMA Block - if the previous DMA is a DREQ transfer
+	 *   then the prefetch of the control-block is hidden in the previous
+	 *   DMA transfer
+	 * * the delay of the loop itself (which is probably constant)
+	 * this means that for the "DELAY" after a SPI-receive-DMA we do
+	 * not expect any overhead of scheduling the dma, but if it is a
+	 * POKE DMA without a DREQ then there is some delay for scheduling,
+	 * so an offset needs to get subtracted
+	 */
+	delay = BCM2835_DMA_UDELAY_SLOPE * 1000000 / 2 / spi_hz;
+	if ( delay <0 )
+		delay = 0;
+	if (delay >= (1<<30))
+		delay = (1<<30)-1;
+
+	/* intercept is typically negative */
+	if ( delay < -BCM2835_DMA_UDELAY_INTERCEPT)
+		merged->delay_half_cycle_cs_deselect_dma_length = 0;
+	else
+		merged->delay_half_cycle_cs_deselect_dma_length = delay
+			+ BCM2835_DMA_UDELAY_INTERCEPT;
+
+	/* for post_rx we need to factor in some other delays */
+	merged->delay_half_cycle_post_rx_dma_length = delay;
+	if (spi_hz<1000000)
+		merged->delay_half_cycle_post_rx_dma_length +=
+			delay/2;
 
 	return 0;
 }
@@ -945,20 +967,22 @@ static inline int bcm2835dma_fragment_transform_set_cs_delay(
 	 * where transfer invalid at this time*/
 	struct spi_transfer *xfer = spi_merged->transfer;
 
-	/* and the half cycle loop length */
-	u32 delay = merged -> delay_half_cycle_dma_length;
-
-	/* first the pre delay */
+	/* set delays accordingly */
 	dma_link_to_cb(&frag->delay_pre)->length =
-		delay + xfer->delay_usecs * delay_1us;
+		merged -> delay_half_cycle_post_rx_dma_length
+		+ xfer->delay_usecs * BCM2835_DMA_UDELAY_SLOPE
+		;
+
 	dma_link_to_cb(&frag->delay_post)->length =
-		delay;
+		merged -> delay_half_cycle_cs_deselect_dma_length;
 
 	return 0;
 }
 LINKVARY_TRANSFORM_WRAPPER(
 	(SPI_OPTIMIZE_VARY_DELAY_USECS | SPI_OPTIMIZE_VARY_SPEED_HZ),
 	bcm2835dma_fragment_transform_set_cs_delay,_vary,
+	/* mark the transfer as requireing a new spi-setup
+	   - actually this needs to happen during link time... */
 	merged->needs_spi_setup = 1;
 	);
 
@@ -976,6 +1000,7 @@ static struct dma_fragment *bcm2835dma_spi_create_fragment_cs_deselect(
 	FIXED(ti,     ( BCM2835_DMA_TI_WAIT_RESP
 			| BCM2835_DMA_TI_WAITS(0x1f)
 			| BCM2835_DMA_TI_NO_WIDE_BURSTS
+			| BCM2835_DMA_TI_S_IGNORE
 			| BCM2835_DMA_TI_D_IGNORE));
 	FIXED(src,    link->cb_dma);
 	FIXED(dst,    0);
@@ -1002,6 +1027,7 @@ static struct dma_fragment *bcm2835dma_spi_create_fragment_cs_deselect(
 	FIXED(ti,     ( BCM2835_DMA_TI_WAIT_RESP
 			| BCM2835_DMA_TI_WAITS(0x1f)
 			| BCM2835_DMA_TI_NO_WIDE_BURSTS
+			| BCM2835_DMA_TI_S_IGNORE
 			| BCM2835_DMA_TI_D_IGNORE));
 	FIXED(src,    link->cb_dma);
 	FIXED(dst,    0);
@@ -1041,16 +1067,24 @@ static inline int bcm2835dma_fragment_transform_set_delay(
 	 * where transfer invalid at this time*/
 	struct spi_transfer *xfer = spi_merged->transfer;
 
-	/* first the pre delay */
-	dma_link_to_cb(&frag->delay)->length =
-		xfer->delay_usecs * delay_1us;
+	/* calc the delay */
+	s32 delay = xfer->delay_usecs * BCM2835_DMA_UDELAY_SLOPE
+		+ BCM2835_DMA_UDELAY_INTERCEPT;
+	if (delay < 0)
+		delay = 0;
+	if (delay >= (1<<30))
+		delay = (1<<30)-1;
+
+	dma_link_to_cb(&frag->delay)->length = delay;
 
 	return 0;
 }
 LINKVARY_TRANSFORM_WRAPPER(
 	SPI_OPTIMIZE_VARY_DELAY_USECS,
 	bcm2835dma_fragment_transform_set_delay,_vary,
-	merged->needs_spi_setup=1;
+	/* mark the transfer as requireing a new spi-setup
+	   - actually this needs to happen during link time... */
+	merged->needs_spi_setup = 1;
 	);
 
 static struct dma_fragment *bcm2835dma_spi_create_fragment_delay(
@@ -1202,10 +1236,103 @@ static struct dma_fragment *bcm2835dma_merged_dma_fragments_alloc(
 		gfpflags)->dma_fragment;
 }
 
+#if 0
+void runDelay(struct bcm2835dma_spi *bs,dma_addr_t start)
+{
+	/* configure + start dma */
+	writel(start,
+		bs->dma_rx.base+BCM2835_DMA_ADDR);
+	dsb();
+
+	writel(BCM2835_DMA_CS_ACTIVE,
+		bs->dma_rx.base+BCM2835_DMA_CS);
+	/* wait for DMA to deactivate */
+	while(
+		readl(bs->dma_rx.base+BCM2835_DMA_CS)
+		& BCM2835_DMA_CS_ACTIVE
+		) {
+		msleep(10);
+	}
+}
+
+void testDelay(struct bcm2835dma_spi *bs)
+{
+	u32 i;
+	u32 *gpio = ioremap(0x20200000, SZ_16K);
+
+	struct dma_link clear;
+	struct dma_link delay;
+	struct dma_link set;
+
+	u8 pin=24;
+	u32 mode=1;
+	/* this is a bit of a hack, as there seems to be no official
+	   way of doing this... */
+
+	/* map pin */
+	u32 *reg = &gpio[pin/10];
+	u8 shift = ((pin)%10)*3;
+	u32 v = *reg;
+	v &= ~( ((u32)(7)) << shift );
+	v |= (mode & 7) << shift;
+	*reg= v;
+	iounmap(gpio);
+	gpio[0x1C/4]=1<<24;
+
+	dma_link_init(&clear,bs->pool,0,1,GFP_ATOMIC);
+	dma_link_init(&delay,bs->pool,0,1,GFP_ATOMIC);
+	dma_link_init(&set,bs->pool,0,1,GFP_ATOMIC);
+
+	dma_link_to_cb(&clear)->ti     = 8;
+	dma_link_to_cb(&clear)->src
+		= BCM2835_DMA_CB_MEMBER_DMA_ADDR((&clear),pad[0]);
+	dma_link_to_cb(&clear)->dst    = 0x7e200028;
+	dma_link_to_cb(&clear)->length = 4;
+	dma_link_to_cb(&clear)->next   = delay.cb_dma;
+	dma_link_to_cb(&clear)->pad[0] = 1<<24;
+
+	dma_link_to_cb(&delay)->ti= (
+		BCM2835_DMA_TI_WAIT_RESP
+		| BCM2835_DMA_TI_WAITS(0x1f)
+		| BCM2835_DMA_TI_NO_WIDE_BURSTS
+		| BCM2835_DMA_TI_S_IGNORE
+		| BCM2835_DMA_TI_D_IGNORE
+		);
+	dma_link_to_cb(&delay)->src
+		= BCM2835_DMA_CB_MEMBER_DMA_ADDR((&delay),pad[0]);
+	dma_link_to_cb(&delay)->dst    = 0;
+	dma_link_to_cb(&delay)->length = 0;
+	dma_link_to_cb(&delay)->next   = set.cb_dma;
+	dma_link_to_cb(&delay)->pad[0] = 0x0;
+
+	dma_link_to_cb(&set)->ti=8;
+	dma_link_to_cb(&set)->src
+		= BCM2835_DMA_CB_MEMBER_DMA_ADDR((&set),pad[0]);
+	dma_link_to_cb(&set)->dst    = 0x7e20001C;
+	dma_link_to_cb(&set)->length = 4;
+	dma_link_to_cb(&set)->next   = 0;
+	dma_link_to_cb(&set)->pad[0] = 1<<24;
+	printk(KERN_ERR "XXX: %08x\n",clear.cb_dma);
+
+	for (i=0;i<=32;i++) {
+		dma_link_to_cb(&delay)->length=i;
+		printk(KERN_INFO "Run delay %u %u\n",i,i);
+		runDelay(bs,clear.cb_dma);
+		}
+	for (i=20;i<31;i++) {
+		printk(KERN_INFO "Run delay %u %u\n",i,(1<<i)-1);
+		dma_link_to_cb(&delay)->length=(1<<i) - 1 ;
+		runDelay(bs,clear.cb_dma);
+		}
+
+	msleep(1000);
+}
+#endif
 /* register all the stuff needed to control dmafragments
    note that the below requires that master has already been registered
    otherwise you get an oops...
  */
+
 #define PREPARE 3 /* prepare the caches with a typical 3 messages */
 int bcm2835dma_register_dmafragment_components(
 	struct spi_master *master)
@@ -1286,6 +1413,9 @@ int bcm2835dma_register_dmafragment_components(
 	if (err)
 		goto error;
 
+#if 0
+	testDelay(bs);
+#endif
 	return 0;
 error:
 	bcm2835dma_release_dmafragment_components(master);

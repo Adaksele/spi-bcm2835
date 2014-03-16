@@ -177,4 +177,119 @@ static inline void bcm2835_dma_link_dump(
 #define BCM2835_DMA_CB_MEMBER_DMA_ADDR(link,member)	\
 	( link->cb_dma + offsetof(struct bcm2835_dma_cb,member))
 
+/* delay function definitions to get a certain delay via DMA only */
+/* empirical measurements of 3 DMAs (set GPIO, delay_length,clear GPIO)
+ * testing with the following TI flags:
+ *   BCM2835_DMA_TI_WAIT_RESP
+ *		| BCM2835_DMA_TI_WAITS(0x1f)
+ *		| BCM2835_DMA_TI_NO_WIDE_BURSTS
+ *		| BCM2835_DMA_TI_D_IGNORE
+ * * a transfer from a Source to "nirvana" (FLAGS)
+ * * a transfer from "nirvana" to "nirvana" (FLAGS| BCM2835_DMA_TI_S_IGNORE)
+ * and with the following "polling" policy to see if DMA has finished:
+ * * delay each loop by 10ms with msleep(10) and low CPU utilization
+ *   while(readl(DMA)& BCM2835_DMA_CS_ACTIVE) { msleep(10); }
+ * * no delay with high CPU utilization
+ *   while(readl(DMA)& BCM2835_DMA_CS_ACTIVE) { ; }
+ * shows the following timings on a logic analyzer:
+   Length	SRC-10ms	SRC-nodelay	NOSRC-10ms	NOSRC-nodelay
+   0	        0.000000250	0.000000250	0.000000188	0.000000188
+   1	        0.000000438	0.000000188	0.000000438	0.000000188
+   2	        0.000000437	0.000000250	0.000000375	0.000000188
+   3	        0.000000625	0.000000250	0.000000438	0.000000188
+   4	        0.000000313	0.000000250	0.000000500	0.000000187
+   5	        0.000000625	0.000000438	0.000000375	0.000000187
+   6	        0.000000500	0.000000375	0.000000375	0.000000187
+   7	        0.000000500	0.000000438	0.000000437	0.000000250
+   8	        0.000000688	0.000000375	0.000000437	0.000000187
+   9	        0.000000875	0.000000563	0.000000437	0.000000250
+   10	        0.000000750	0.000000562	0.000000375	0.000000187
+   11	        0.000000750	0.000000563	0.000000375	0.000000187
+   12	        0.000000750	0.000000562	0.000000312	0.000000188
+   13	        0.000001000	0.000000687	0.000000375	0.000000188
+   14	        0.000001125	0.000000750	0.000000375	0.000000187
+   15	        0.000000875	0.000000750	0.000000375	0.000000187
+   16	        0.000001000	0.000000688	0.000000438	0.000000187
+   17	        0.000001063	0.000000938	0.000000375	0.000000250
+   18	        0.000001000	0.000000938	0.000000375	0.000000187
+   19	        0.000001125	0.000000938	0.000000312	0.000000250
+   20	        0.000001000	0.000000938	0.000000375	0.000000250
+   21	        0.000001312	0.000001063	0.000000438	0.000000250
+   22	        0.000001250	0.000001063	0.000000375	0.000000187
+   23	        0.000001250	0.000001063	0.000000375	0.000000250
+   24	        0.000001187	0.000001063	0.000000438	0.000000250
+   25	        0.000001438	0.000001188	0.000000375	0.000000250
+   26	        0.000001438	0.000001250	0.000000375	0.000000188
+   27	        0.000001563	0.000001250	0.000000375	0.000000187
+   28	        0.000001687	0.000001250	0.000000312	0.000000250
+   29	        0.000001688	0.000001375	0.000000312	0.000000188
+   30	        0.000001625	0.000001437	0.000000312	0.000000250
+   31	        0.000001687	0.000001375	0.000000438	0.000000250
+   32	        0.000001813	0.000001375	0.000000375	0.000000250
+   64	        0.000003125	0.000002688	0.000000563	0.000000312
+   128	        0.000006000	0.000005438	0.000000625	0.000000375
+   256	        0.000011812	0.000010813	0.000000688	0.000000500
+   512	        0.000023438	0.000022375	0.000001063	0.000000813
+   1024	        0.000044750	0.000043875	0.000001500	0.000001313
+   2048	        0.000087312	0.000087125	0.000002813	0.000002500
+   4096	        0.000173375	0.000174250	0.000005062	0.000004812
+   8192	        0.000350250	0.000348938	0.000009625	0.000009438
+   16384	0.000697875	0.000696688	0.000018875	0.000018625
+   32768	0.001394563	0.001438938	0.000037250	0.000037063
+   65536	0.002754500	0.002766188	0.000074187	0.000073938
+   131072	0.005567312	0.005633750	0.000147813	0.000147688
+   262144	0.011178000	0.011187688	0.000295313	0.000295125
+   524288	0.022306375	0.022280125	0.000590250	0.000590063
+   1048576	0.044503750	0.044527250	0.001180188	0.001179875
+   2097152	0.089495188	0.089014125	0.002359750	0.002359563
+   4194304	0.178094625	0.178543438	0.004719062	0.004719063
+   8388608	0.356348063	0.355784250	0.009437937	0.009437938
+   16777216	0.712111250	0.712517813	0.018875438	0.018875375
+   33554432	1.424605875	1.424350938	0.037750438	0.037750438
+   67108864	2.851138563	2.848466875	0.075500500	0.075500563
+   134217728	5.699399438	5.698408188	0.151000688	0.151000688
+   268435456	11.402305875	11.394397625	0.302000938	0.302000938
+   536870912	22.794277813	22.792029750	0.604001500	0.604001500
+Note that the DMA-Ranges are in the 0x5eXXXXXX range, so in L2 Cache coherent
+range.
+
+So depending on the maximum length to get achived different
+policies are needed - obviously this also depends on other bus activity,
+which is especially true for the copy from source case, which incurs more
+of memory-bandwifth than the "S_IGNORE+D_IGNORE" case...
+
+So this is the preferrred solution, but it comes at some cost
+- we are limited to about a max delay of 1.2s
+
+As the delay_usecs is defined as u16, this means a max delay of 65ms.
+so the "option of not using memory-transfers" is preferred.
+
+The function to get a certain delay is as follows:
+F(usec)=888.86*usec-218
+
+Note that this obviously also depends on the Memory clock speed
+(which may vary with overclocking and also on how much other DMA traffic
+happens.
+
+*/
+#define BCM2835_DMA_UDELAY_INTERCEPT -218
+#define BCM2835_DMA_UDELAY_SLOPE     889
+
+static inline void dump_dma_regs(
+	struct device* dev,
+	const char* str,
+	void __iomem *base)
+{
+	dev_printk(KERN_INFO,dev,
+		"%s:%08x %08x %08x %08x %08x %08x\n",
+		str,
+		readl(base+BCM2835_DMA_CS),
+		readl(base+BCM2835_DMA_ADDR),
+		readl(base+BCM2835_DMA_TI),
+		readl(base+BCM2835_DMA_S_ADDR),
+		readl(base+BCM2835_DMA_D_ADDR),
+		readl(base+BCM2835_DMA_LEN)
+		);
+}
+
 #endif /* __BCM2835_DMA_H */

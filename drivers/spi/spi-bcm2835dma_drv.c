@@ -59,27 +59,14 @@
 
 #define DRV_NAME	"spi-bcm2835dma"
 
-/* some module-parameters for debugging and corresponding */
-bool debug_msg = 0;
-module_param(debug_msg, bool, 0);
-MODULE_PARM_DESC(debug_msg,
-		"Run the driver with message debugging enabled");
-
+/* module parameter to dump the dma transforms */
 bool debug_dma = 0;
 module_param(debug_dma, bool, 0);
 MODULE_PARM_DESC(debug_dma,
 		"Run the driver with dma debugging enabled");
 
-int delay_1us = 889;
-module_param(delay_1us, int, 0);
-MODULE_PARM_DESC(delay_1us,
-		"the value we need to use for a 1 us delay"
-		" via dma transfers");
-/* note that this value has some variation - based on other
- * activities happening on the bus...
- * this also adds memory overhead slowing down the whole system when there
- * is lots of memory access ...
- */
+
+/* some functions to measure delays on a logic analyzer */
 static u32* gpio=0;
 static inline void set_low(void) {
 	if (!gpio)
@@ -90,18 +77,6 @@ static inline void set_high(void) {
 	if (!gpio)
 		gpio = ioremap(0x20200000, SZ_16K);
 	gpio[0x1C/4]=1<<24;
-}
-
-static inline void dump_dma_regs(char* str,void __iomem *base) {
-	printk(KERN_ERR "%s: %08x %08x %08x %08x %08x %08x\n",
-		str,
-		readl(base+BCM2835_DMA_CS),
-		readl(base+BCM2835_DMA_ADDR),
-		readl(base+BCM2835_DMA_TI),
-		readl(base+BCM2835_DMA_S_ADDR),
-		readl(base+BCM2835_DMA_D_ADDR),
-		readl(base+BCM2835_DMA_LEN)
-		);
 }
 
 /* schedule a DMA fragment on a specific DMA channel */

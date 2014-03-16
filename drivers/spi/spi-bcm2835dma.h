@@ -66,15 +66,6 @@ struct bcm2835dma_spi_device_data {
 	u32        cs_bitfield;
 	u8         cs_gpio;
 	char       cs_name[20];
-	/* and some generic prepared messages for optimizations */
-#if 0
-#define prepared_single_transfers_count 1
-	struct {
-		spinlock_t lock;
-		struct spi_message *messages[prepared_single_transfers_count];
-		struct spi_transfers *trasnfers[prepared_single_transfers_count];
-	} prepared_single_transfers;
-#endif
 };
 
 struct bcm2835dma_spi_merged_dma_fragment {
@@ -85,7 +76,8 @@ struct bcm2835dma_spi_merged_dma_fragment {
 
 	u32 speed_hz;
 	u32 speed_cdiv;
-	u32 delay_half_cycle_dma_length;
+	u32 delay_half_cycle_cs_deselect_dma_length;
+	u32 delay_half_cycle_post_rx_dma_length;
 };
 
 struct bcm2835dma_spi {
