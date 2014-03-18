@@ -28,11 +28,13 @@
 #include <linux/dma-fragment.h>
 #include <linux/spi/spi.h>
 
+#ifndef SPI_OPTIMIZE_VARY_TX_BUF
 #define SPI_OPTIMIZE_VARY_TX_BUF               (1<<0)
 #define SPI_OPTIMIZE_VARY_RX_BUF               (1<<1)
 #define SPI_OPTIMIZE_VARY_SPEED_HZ             (1<<2)
 #define SPI_OPTIMIZE_VARY_DELAY_USECS          (1<<3)
 #define SPI_OPTIMIZE_VARY_LENGTH               (1<<4)
+#endif
 
 /**
  * spi_merged_dma_fragment - structure of several

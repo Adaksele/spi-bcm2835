@@ -66,17 +66,35 @@ MODULE_PARM_DESC(debug_dma,
 		"Run the driver with dma debugging enabled");
 
 
-/* some functions to measure delays on a logic analyzer */
+/* some functions to measure delays on a logic analyzer
+ * note: needs to get run first from non-atomic context!!! */
+static int debugpin = 0;
+module_param(debugpin,int,0);
+MODULE_PARM_DESC(debugpin,"the pin that we should toggle");
 static u32* gpio=0;
-static inline void set_low(void) {
+static void set_low(void) {
 	if (!gpio)
 		gpio = ioremap(0x20200000, SZ_16K);
-	gpio[0x28/4]=1<<24;
+	gpio[0x28/4]=debugpin;
 }
-static inline void set_high(void) {
+static void set_high(void) {
 	if (!gpio)
 		gpio = ioremap(0x20200000, SZ_16K);
-	gpio[0x1C/4]=1<<24;
+	gpio[0x1C/4]=debugpin;
+}
+
+static int debugpin2 = 0;
+module_param(debugpin2,int,0);
+MODULE_PARM_DESC(debugpin2,"the pin that we should toggle");
+static void set_low2(void) {
+	if (!gpio)
+		gpio = ioremap(0x20200000, SZ_16K);
+	gpio[0x28/4]=debugpin2;
+}
+static void set_high2(void) {
+	if (!gpio)
+		gpio = ioremap(0x20200000, SZ_16K);
+	gpio[0x1C/4]=debugpin2;
 }
 
 /* schedule a DMA fragment on a specific DMA channel */
@@ -129,7 +147,6 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 	struct spi_merged_dma_fragment *frag;
 	u32 *complete;
 	unsigned long flags;
-
 
 	/* check the message queue */
 	while( 1 ) {
@@ -231,6 +248,9 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 	struct spi_merged_dma_fragment *merged;
 	struct spi_transfer *xfer;
 	int err=0;
+	int is_last;
+
+	set_low2();
 
 	/* some optimizations - it might help if we knew the length... */
 	/* check if we got a frame that is of a single transfer */
@@ -254,11 +274,10 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 	merged->dma_fragment.link_tail = NULL;
 	merged->complete_data = NULL;
 	merged->needs_spi_setup = 1;
-
 	/* now start iterating the transfers */
 	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
 		/* check if we are the last in the list */
-		int is_last = list_is_last(&xfer->transfer_list,
+		is_last = list_is_last(&xfer->transfer_list,
 					&msg->transfers);
 		/* assign the current transfer */
 		merged->transfer = xfer;
@@ -294,10 +313,13 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 		if ( (xfer->len)
 			/* || (xfer->vary & SPI_OPTIMIZE_VARY_LENGTH) */) {
 			/* schedule transfer */
+		set_high2();
 			err = spi_merged_dma_fragment_merge_fragment_cache(
 				&bs->fragment_transfer,
 				merged,
 				gfpflags);
+		set_low2();
+
 			if (err)
 				goto error;
 			/* set last transfer */
@@ -318,6 +340,7 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 				merged,
 				gfpflags);
 		}
+
 		if (err)
 			goto error;
 	}
@@ -338,6 +361,7 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 	 * we run the transforms */
 	merged->transfer      = NULL;
 	merged->last_transfer = NULL;
+	set_high2();
 
 	/* and return it */
 	return merged;
@@ -574,8 +598,6 @@ static int bcm2835dma_spi_init_pinmode(struct device *dev) {
 	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_MISO,4);
 	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_MOSI,4);
 	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_SCK, 4);
-
-	bcm2835dma_set_gpio_mode(24, 1);
 
 	return 0;
 error_mosi:
