@@ -862,11 +862,24 @@ static int bcm2835dma_fragment_transform_transfer(
 			goto error;
 	}
 
-	/* map the addresses */
-/*SOMETHING FAUL HERE */
-	SCHEDULE_LINKTIME_TRANSFORM(
-		bcm2835dma_fragment_transform_mapset_data_vary,
-		NULL);
+	/* map the addresses calling vary */
+	if (vary & (SPI_OPTIMIZE_VARY_RX_BUF|SPI_OPTIMIZE_VARY_TX_BUF)) {
+		bcm2835dma_fragment_transform_mapset_data(
+			dma_frag,
+			spi_merged,
+			NULL,
+			gfpflags);
+	} else {
+		/* note that this does only work because we have
+		   transfer in the structure itself - see above */
+		if (! spi_merged_dma_fragment_addnew_predma_transform(
+				spi_merged,
+				dma_frag,0,
+				bcm2835dma_fragment_transform_mapset_data_vary,
+				NULL,
+				gfpflags) )
+			return -ENOMEM;
+	}
 
 	/* and if we are not dma-mapped, the schedule an unmap */
 	if (!message->is_dma_mapped) {
@@ -1241,7 +1254,7 @@ static struct dma_fragment *bcm2835dma_merged_dma_fragments_alloc(
    otherwise you get an oops...
  */
 
-#define PREPARE 3 /* prepare the caches with a typical 3 messages */
+#define PREPARE 10 /* prepare the caches with a typical 10 messages */
 int bcm2835dma_register_dmafragment_components(
 	struct spi_master *master)
 {
