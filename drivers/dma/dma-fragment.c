@@ -491,6 +491,8 @@ struct dma_fragment *dma_fragment_cache_add(
 	if (dest & DMA_FRAGMENT_CACHE_TO_IDLE) {
 		list_add(&frag->cache_list, &cache->idle);
 		cache->count_idle++;
+	} else {
+		cache->count_active++;
 	}
 
 	spin_unlock_irqrestore(&cache->lock, flags);
