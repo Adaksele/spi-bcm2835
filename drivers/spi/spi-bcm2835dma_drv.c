@@ -60,11 +60,18 @@
 #define DRV_NAME	"spi-bcm2835dma"
 
 /* module parameter to dump the dma transforms */
-bool debug_dma = 0;
-module_param(debug_dma, bool, 0);
+int debug_dma = 0;
+module_param(debug_dma, int, 0);
 MODULE_PARM_DESC(debug_dma,
 		"Run the driver with dma debugging enabled");
+#define DEBUG_DMA_ASYNC   (1<<0)
+#define DEBUG_DMA_OPTIMIZE (1<<1)
+#define DEBUG_DMA_IRQ      (1<<2)
 
+bool use_optimize = 1;
+module_param(use_optimize, bool, 0);
+MODULE_PARM_DESC(use_optimize,
+		"Run the driver with optimize support enabled");
 
 /* some functions to measure delays on a logic analyzer
  * note: needs to get run first from non-atomic context!!! */
@@ -188,7 +195,7 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 
 		/* and release fragment - if not optimized */
 		if (
-#ifdef HAVE_SPI_OPTIMIZE
+#ifdef SPI_HAVE_OPTIMIZE
 			! msg->is_optimized
 #else
 			(1)
@@ -207,9 +214,11 @@ irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
 {
 	struct spi_master *master = dev_id;
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
-
+	set_low();
+	udelay(1);
+	set_high();
 	/* write interrupt message to debug */
-	if (unlikely(debug_dma))
+	if (unlikely(debug_dma&DEBUG_DMA_IRQ))
 		printk(KERN_ERR "TX-Interrupt %i triggered\n",irq);
 
 	/* we need to clean the IRQ flag as well
@@ -224,6 +233,10 @@ irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
 	 * this will also call complete
 	 */
 	bcm2835dma_release_cb_chain_complete(master);
+
+	set_low();
+	udelay(1);
+	set_high();
 
 	/* and return with the IRQ marked as handled */
 	return IRQ_HANDLED;
@@ -386,15 +399,22 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 	struct spi_merged_dma_fragment *merged;
 	/* fetch DMA fragment */
 	set_low();
-	merged = bcm2835dma_spi_message_to_dma_fragment(
-		message,
-		0,
-		GFP_ATOMIC);
+#ifdef SPI_HAVE_OPTIMIZE
+	if ((message->is_optimized) )
+		merged = message->state;
+	else
+#endif
+	{
+		merged = bcm2835dma_spi_message_to_dma_fragment(
+			message,
+			0,
+			GFP_ATOMIC);
+		message->state = merged;
+	}
 	set_high();
 	if (!merged)
 		return -ENOMEM;
 	/* assign some values */
-	message->state = merged;
 	message->actual_length = 0;
 
 	/* and execute the pre-transforms */
@@ -403,7 +423,7 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 	if (err)
 		goto error;
 
-	if (unlikely(debug_dma))
+	if (unlikely(debug_dma&DEBUG_DMA_ASYNC))
 		spi_merged_dma_fragment_dump(merged,
 					&message->spi->dev,
 					0,0,
@@ -423,6 +443,37 @@ error:
 	dev_printk(KERN_ERR,&spi->dev,"spi_transfer_failed: %i",err);
 	dma_fragment_release(&merged->dma_fragment);
 	return -EPERM;
+}
+
+static int bcm2835dma_spi_message_optimize(struct spi_message *message)
+{
+	message->state = bcm2835dma_spi_message_to_dma_fragment(
+		message,
+		0,
+		GFP_ATOMIC);
+	if (!message->state)
+		return -ENOMEM;
+	if (unlikely(debug_dma&DEBUG_DMA_OPTIMIZE)) {
+		dev_printk(KERN_INFO,&message->spi->dev,
+			"Optimizing %pf\n",message);
+		spi_merged_dma_fragment_dump(message->state,
+					&message->spi->dev,
+					0,0,
+					&bcm2835_dma_link_dump
+			);
+	}
+
+	return 0;
+}
+
+static void bcm2835dma_spi_message_unoptimize(struct spi_message *msg)
+{
+	dma_fragment_release(msg->state);
+	msg->state=NULL;
+	if (unlikely(debug_dma&DEBUG_DMA_OPTIMIZE)) {
+		dev_printk(KERN_INFO,&msg->spi->dev,
+			"Unoptimizing %pf\n",msg);
+	}
 }
 
 static void bcm2835dma_release_dmachannel(struct spi_master *master,
@@ -775,6 +826,14 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 	master->rt = 1;
 
 	master->transfer = bcm2835dma_spi_transfer;
+#ifdef SPI_HAVE_OPTIMIZE
+	if (use_optimize) {
+		master->optimize_message =
+			bcm2835dma_spi_message_optimize;
+		master->unoptimize_message =
+			bcm2835dma_spi_message_unoptimize;
+	}
+#endif
 
 	/* not sure if this is needed for the device tree case */
 	master->dev.coherent_dma_mask = pdev->dev.coherent_dma_mask;
