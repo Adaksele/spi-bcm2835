@@ -576,7 +576,8 @@ struct dma_fragment *bcm2835dma_spi_create_fragment_config_spi(
 		   of the TX-DMA-transfer */);
 
 	/* start the tx-dma - equivalent to:
-	 * writel(BCM2835_DMA_CS_ACTIVE,txdma_base+BCM2835_DMA_ADDR);
+	 * writel(BCM2835_DMA_CS_ACTIVE|BCM2835_DMA_CS_DISDEBUG,
+	 *        txdma_base+BCM2835_DMA_ADDR);
 	 */
 	ADD_DMA_LINK_TO_FRAGMENT(start_tx_dma);
 	LINKTO(set_tx_dma_next);
@@ -584,7 +585,7 @@ struct dma_fragment *bcm2835dma_spi_create_fragment_config_spi(
 	FIXED(src,    THIS_CB_MEMBER_DMA_ADDR(pad[0]));
 	TXDMA(dst,    BCM2835_DMA_CS);
 	FIXED(length, 4);
-	FIXED(pad[0], BCM2835_DMA_CS_ACTIVE);
+	FIXED(pad[0], BCM2835_DMA_CS_ACTIVE/*|BCM2835_DMA_CS_DISDEBUG*/);
 
 	/* schedule link time handling of settings including SPIDONE */
 	SCHEDULE_LINKTIME_TRANSFORM(
@@ -1136,10 +1137,31 @@ struct dma_fragment_trigger_irq {
 	struct dma_link     set_tx_dma_next;
 	struct dma_link     message_finished;
 	struct dma_link     start_tx_dma;
-	struct dma_fragment_transform trans_predma;
 };
 
+/**
+ * bcm2835dma_fragment_transform_link_length - transform that
+ *   will set up the length for the transfers adding values if needed
+ * @dma_frag: the dma fragment to which we apply this transform
+ * @spi_merge: the spi_merge fragment, to which this gets added
+ * @data: extra data
+ * @gfpflags: gfp flags used to allocate memory
+ */
 static inline int bcm2835dma_irq_transforms_prepare_for_schedule(
+	struct dma_fragment *dma_frag,
+	struct spi_merged_dma_fragment *spi_merged,
+	void *data,
+	gfp_t gfpflags)
+{
+	u32* d = data;
+	d[0] = 0;
+	d[1] = 0;
+	return 0;
+}
+LINK_TRANSFORM_WRAPPER(bcm2835dma_irq_transforms_prepare_for_schedule,
+		_predma);
+
+static inline int bcm2835dma_irq_transforms(
 	struct dma_fragment *dma_frag,
 	struct spi_merged_dma_fragment *spi_merged,
 	void *data,
@@ -1160,9 +1182,18 @@ static inline int bcm2835dma_irq_transforms_prepare_for_schedule(
 	/* and set the pointer so that the interrupt-handler may use it */
 	spi_merged->complete_data = &cb->pad[0];
 
+	/* schedule pre_dma */
+	if (! spi_merged_dma_fragment_addnew_predma_transform(
+			spi_merged,
+			dma_frag,0,
+			bcm2835dma_irq_transforms_prepare_for_schedule_predma,
+			spi_merged->complete_data,
+			gfpflags) )
+		return -ENOMEM;
+
 	return 0;
 }
-VARY_TRANSFORM_WRAPPER(bcm2835dma_irq_transforms_prepare_for_schedule,_vary);
+LINK_TRANSFORM_WRAPPER(bcm2835dma_irq_transforms,_link);
 
 static struct dma_fragment *bcm2835dma_spi_create_fragment_trigger_irq(
 	struct device *device,gfp_t gfpflags)
@@ -1204,8 +1235,8 @@ static struct dma_fragment *bcm2835dma_spi_create_fragment_trigger_irq(
 	FIXED(pad[0],   BCM2835_DMA_CS_ACTIVE);
 
 	/* schedule link time scheduling of complete callback */
-	SCHEDULE_LINKVARY_TRANSFORM(
-		bcm2835dma_irq_transforms_prepare_for_schedule_vary,
+	SCHEDULE_LINKTIME_TRANSFORM(
+		bcm2835dma_irq_transforms_link,
 		NULL);
 
 	END_CREATE_FRAGMENT_ALLOCATE();

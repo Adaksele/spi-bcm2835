@@ -139,9 +139,15 @@ static int bcm2835dma_schedule_dma_fragment(
 			bs->dma_rx.base+BCM2835_DMA_ADDR);
 		dsb();
 
-		writel(BCM2835_DMA_CS_ACTIVE,
+		writel(BCM2835_DMA_CS_ACTIVE/*|BCM2835_DMA_CS_DISDEBUG*/,
 			bs->dma_rx.base+BCM2835_DMA_CS);
+		bs->count_dma_started++;
+		//bs->last_message_dma_was_running = 0;
+	} else {
+		//bs->last_message_dma_was_running = 1;
+		bs->count_dma_still_running++;
 	}
+	/* unlock and return */
 	spin_unlock_irqrestore(&master->queue_lock,flags);
 
 	return 0;
@@ -154,6 +160,15 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 	struct spi_merged_dma_fragment *frag;
 	u32 *complete;
 	unsigned long flags;
+	int count = 0;
+
+	set_low();
+	udelay(1);
+	set_high();
+	udelay(1);
+	set_low();
+	udelay(1);
+	set_high();
 
 	/* check the message queue */
 	while( 1 ) {
@@ -163,11 +178,11 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 			&master->queue,typeof(*msg),queue);
 		spin_unlock_irqrestore(&master->queue_lock,flags);
 		/* return immediately on NULL
-		 * - this actually should not happen...*/
+		 * - this really can happen when interrupts overlap...*/
 		if (!msg) {
 			return;
 		}
-
+		/* get the fragment for the current message */
 		frag = msg->state;
 
 		/* if we do not have a complete data pointer */
@@ -188,35 +203,32 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 
 		/* reset status */
 		msg->status = 0;
+		/* todo: handle bytes_transferred */
+		msg->actual_length = 1;
 
 		/* and execute the post-dma-fragments */
 		spi_merged_dma_fragment_execute_post_dma_transforms(
 			frag,frag,GFP_ATOMIC);
 
 		/* and release fragment - if not optimized */
-		if (
 #ifdef SPI_HAVE_OPTIMIZE
-			! msg->is_optimized
-#else
-			(1)
+		if (! msg->is_optimized )
 #endif
-			)
 			dma_fragment_release(&frag->dma_fragment);
 
-		/* call the callback
-		 * - this could get actually get done also via
-		 * a scheduled post_dma */
+		/* call the complete call */
 		if (msg->complete)
 			msg->complete(msg->context);
+
+		count++;
 	}
 }
+
 irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
 {
 	struct spi_master *master = dev_id;
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
-	set_low();
-	udelay(1);
-	set_high();
+	u32 t;
 	/* write interrupt message to debug */
 	if (unlikely(debug_dma&DEBUG_DMA_IRQ))
 		printk(KERN_ERR "TX-Interrupt %i triggered\n",irq);
@@ -227,19 +239,107 @@ irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
 	 * setting/clearing WAIT_FOR_OUTSTANDING_WRITES
 	 * and we are not using it for the RX path
 	 */
-	writel(BCM2835_DMA_CS_INT, bs->dma_tx.base+BCM2835_DMA_CS);
+	t = readl(bs->dma_tx.base+BCM2835_DMA_CS);
+	if (t&BCM2835_DMA_CS_INT) {
+		writel(t|BCM2835_DMA_CS_INT|BCM2835_DMA_CS_ACTIVE
+			, bs->dma_tx.base+BCM2835_DMA_CS);
+		/* probably we need some cleanup here to avoid
+		 * a second possible race condition happening just now
+		 * if (readl(bs->dma_tx.base+BCM2835_DMA_ADDR))
+		 * but I fear we will need a 3rd DMA to solve it
+		 * completely...
+		 */
+	}
+	bs->last_message_dma_was_running = t;
 
 	/* release the control block chains until we reach the CB
 	 * this will also call complete
 	 */
 	bcm2835dma_release_cb_chain_complete(master);
 
-	set_low();
-	udelay(1);
-	set_high();
-
 	/* and return with the IRQ marked as handled */
 	return IRQ_HANDLED;
+}
+
+/* device statistics */
+static ssize_t bcm2835dma_sysfs_show_stats(
+	struct device *dev,
+	struct device_attribute *attr,
+	char *buf)
+{
+	struct spi_master *master =
+		container_of(dev,typeof(*master),dev);
+	struct bcm2835dma_spi *bs =
+		container_of(attr,typeof(*bs),stats_attr);
+	return scnprintf(buf, PAGE_SIZE,
+			"bcm2835dma_stats_info - 0.1\n"
+			"total spi_messages: %llu\n"
+			"optimized spi_messages: %llu\n"
+			"dma_scheduled: %llu\n"
+			"dma still running:\t%llu\n"
+			"last message dma_running:\t%08x\n",
+			bs->count_spi_messages,
+			bs->count_spi_optimized_messages,
+			bs->count_dma_started,
+			bs->count_dma_still_running,
+			bs->last_message_dma_was_running
+                );
+}
+
+static ssize_t bcm2835dma_sysfs_triggerdump( struct device *dev,
+				struct device_attribute *attr,
+					const char *buf,size_t size)
+{
+	struct spi_master *master =
+		container_of(dev,typeof(*master),dev);
+	struct bcm2835dma_spi *bs =
+		container_of(attr,typeof(*bs),stats_attr);
+	struct spi_message *msg;
+	int count=0;
+
+	unsigned long flags;
+
+	/* dump spi */
+	dev_printk(KERN_INFO, dev, "SPI Registers\n");
+	dev_printk(KERN_INFO, dev, "\tCS:\t%08x\n",
+		readl(bs->spi_regs + BCM2835_SPI_CS));
+	/* do NOT read FIFO - even for Debug !!!*/
+	dev_printk(KERN_INFO, dev, "\tCLK:\t%08x\n",
+		readl(bs->spi_regs + BCM2835_SPI_CLK));
+	dev_printk(KERN_INFO, dev, "\tDLEN:\t%08x\n",
+		readl(bs->spi_regs + BCM2835_SPI_DLEN));
+	dev_printk(KERN_INFO, dev, "\tLOTH:\t%08x\n",
+		readl(bs->spi_regs + BCM2835_SPI_LTOH));
+	dev_printk(KERN_INFO, dev, "\tDC:\t%08x\n",
+		readl(bs->spi_regs + BCM2835_SPI_DC));
+
+	/* dump DMA */
+	dev_printk(KERN_INFO,dev,"RX-DMA registers\n");
+	bcm2835_dma_reg_dump(bs->dma_rx.base,dev,1);
+	dev_printk(KERN_INFO,dev,"TX-DMA registers\n");
+	bcm2835_dma_reg_dump(bs->dma_tx.base,dev,1);
+
+	/* lock structures */
+	spin_lock_irqsave(&master->queue_lock,flags);
+	/* dump each DMA message in queue */
+	dev_printk(KERN_INFO,dev,"Queued messages\n");
+	list_for_each_entry(msg,&master->queue,queue) {
+		dev_printk(KERN_INFO,dev,
+			"\tQueued SPI message %i:\n"
+			"\tmsg-address: %pf",
+			count++,msg);
+		spi_merged_dma_fragment_dump(msg->state,
+					dev,
+					1,0,
+					&bcm2835_dma_link_dump
+			);
+	}
+
+	/* check if we got an entry */
+	spin_unlock_irqrestore(&master->queue_lock,flags);
+
+	/* and return size */
+	return size;
 }
 
 /**
@@ -397,12 +497,15 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 {
 	int err=0;
 	struct spi_merged_dma_fragment *merged;
+	struct spi_master *master = spi->master;
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+	unsigned long flags;
+
 	/* fetch DMA fragment */
-	set_low();
 #ifdef SPI_HAVE_OPTIMIZE
-	if ((message->is_optimized) )
+	if ((message->is_optimized) ) {
 		merged = message->state;
-	else
+	} else
 #endif
 	{
 		merged = bcm2835dma_spi_message_to_dma_fragment(
@@ -411,7 +514,6 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 			GFP_ATOMIC);
 		message->state = merged;
 	}
-	set_high();
 	if (!merged)
 		return -ENOMEM;
 	/* assign some values */
@@ -429,12 +531,19 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 					0,0,
 					&bcm2835_dma_link_dump
 			);
-	set_low();
+
+	/* statistics on message submission */
+	spin_lock_irqsave(&master->queue_lock,flags);
+	bs->count_spi_messages++;
+#ifdef SPI_HAVE_OPTIMIZE
+	if ((message->is_optimized) )
+		bs->count_spi_optimized_messages++;
+#endif
+	spin_unlock_irqrestore(&master->queue_lock,flags);
 
 	/* and schedule it */
 	if (merged) {
 		bcm2835dma_schedule_dma_fragment(message);
-		set_high();
 	}
 
 	/* and return */
@@ -902,6 +1011,14 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 	writel(
 		BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX,
 		bs->spi_regs+BCM2835_SPI_CS);
+
+        bs->stats_attr.attr.name = "stats";
+        bs->stats_attr.attr.mode = S_IRUSR | S_IWUSR ;
+        bs->stats_attr.show      = bcm2835dma_sysfs_show_stats;
+        bs->stats_attr.store     = bcm2835dma_sysfs_triggerdump;
+	err = device_create_file(&master->dev, &bs->stats_attr);
+	if (err)
+		goto out_release_dma;
 
 	return 0;
 out_release_dma:

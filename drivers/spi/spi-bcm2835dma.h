@@ -100,6 +100,13 @@ struct bcm2835dma_spi {
 	struct dma_fragment_cache fragment_trigger_irq;
 	/* the device configs list */
 	struct list_head spi_device_data_chain;
+	/* the device statistics */
+        struct device_attribute stats_attr;
+	u64 count_dma_started;
+	u64 count_dma_still_running;
+	u64 count_spi_messages;
+	u64 count_spi_optimized_messages;
+        u32 last_message_dma_was_running;
 };
 
 int bcm2835dma_register_dmafragment_components(struct spi_master*);
