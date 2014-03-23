@@ -239,17 +239,28 @@ irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
 	 * setting/clearing WAIT_FOR_OUTSTANDING_WRITES
 	 * and we are not using it for the RX path
 	 */
-	t = readl(bs->dma_tx.base+BCM2835_DMA_CS);
-	if (t&BCM2835_DMA_CS_INT) {
-		writel(t|BCM2835_DMA_CS_INT|BCM2835_DMA_CS_ACTIVE
-			, bs->dma_tx.base+BCM2835_DMA_CS);
-		/* probably we need some cleanup here to avoid
-		 * a second possible race condition happening just now
-		 * if (readl(bs->dma_tx.base+BCM2835_DMA_ADDR))
-		 * but I fear we will need a 3rd DMA to solve it
-		 * completely...
-		 */
+
+	/* check if we got an address set for tx dma */
+	t = readl(bs->dma_tx.base+BCM2835_DMA_ADDR);
+	if (!t)  {
+		/* now read the register */
+		t = readl(bs->dma_tx.base+BCM2835_DMA_CS);
+		if (t&BCM2835_DMA_CS_INT) {
+			/* unfortunately this still happens,
+			 * so I wonder what we can do to solve it... */
+			writel(t|BCM2835_DMA_CS_INT|BCM2835_DMA_CS_ACTIVE
+				, bs->dma_tx.base+BCM2835_DMA_CS);
+			/* probably we need some cleanup here to avoid
+			 * a second possible race condition happening just now
+			 * if (readl(bs->dma_tx.base+BCM2835_DMA_ADDR))
+			 * but I fear we will need a 3rd DMA to solve it
+			 * completely...
+			 * the other approach is that we run a watchdog
+			 * thread checking on the transfers ...
+			 */
+		}
 	}
+
 	bs->last_message_dma_was_running = t;
 
 	/* release the control block chains until we reach the CB
