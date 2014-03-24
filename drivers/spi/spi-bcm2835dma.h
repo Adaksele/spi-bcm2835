@@ -89,6 +89,7 @@ struct bcm2835dma_spi {
 	/* the DMA channels allocated */
 	struct bcm2835_dmachannel dma_tx;
 	struct bcm2835_dmachannel dma_rx;
+	struct bcm2835_dmachannel dma_irq;
 	/* the DMA-able pool we use to allocate control blocks from */
 	struct dma_pool *pool;
 	/* the fragment caches */

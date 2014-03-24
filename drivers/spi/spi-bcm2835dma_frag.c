@@ -298,6 +298,14 @@ static int bcm2835dma_fragment_transform_spi_ctldata_offset(
 #define TXDMA(field,offset) cb->field = bs->dma_tx.bus_addr+offset
 
 /**
+ * IRQDMA - macro that assignes the DMA BASE_REGISTER of the interrupt DMA
+ *  + offset to the specific dma_controlblock field.
+ * @field: the field name in the dma controlblock
+ * @offset: the offset of the register we need to access
+ */
+#define IRQDMA(field,offset) cb->field = bs->dma_irq.bus_addr+offset
+
+/**
  * VARY - macro that is just there to document that this value is set via
  * a dma_fragment_transform - for optimized spi_messages this also takes
  * xfer->vary into account as to when to execute the function.
@@ -1134,9 +1142,9 @@ static struct dma_fragment *bcm2835dma_spi_create_fragment_delay(
  *----------------------------------------------------------------------*/
 struct dma_fragment_trigger_irq {
 	struct dma_fragment dma_fragment;
-	struct dma_link     set_tx_dma_next;
+	struct dma_link     set_irq_dma_next;
 	struct dma_link     message_finished;
-	struct dma_link     start_tx_dma;
+	struct dma_link     start_irq_dma;
 };
 
 /**
@@ -1198,19 +1206,19 @@ LINK_TRANSFORM_WRAPPER(bcm2835dma_irq_transforms,_link);
 static struct dma_fragment *bcm2835dma_spi_create_fragment_trigger_irq(
 	struct device *device,gfp_t gfpflags)
 {
-	u32 *link_tx;
+	u32 *link_irq;
 	START_CREATE_FRAGMENT_ALLOCATE(dma_fragment_trigger_irq);
 	/* set up the tx-dma start address - equivalent to:
 	 * writel(dma_address_of_tx_transfer,txdma_base+BCM2835_DMA_ADDR);
 	 */
-	ADD_DMA_LINK_TO_FRAGMENT(set_tx_dma_next);
+	ADD_DMA_LINK_TO_FRAGMENT(set_irq_dma_next);
 	FIXED(ti,BCM2835_DMA_TI_WAIT_RESP);
 	FIXED(src,      THIS_CB_MEMBER_DMA_ADDR(pad[0]));
-	TXDMA(dst,      BCM2835_DMA_ADDR);
+	IRQDMA(dst,     BCM2835_DMA_ADDR);
 	FIXED(length,   4);
 	LATER(pad[0],  /* this is set later, when we know the dma_addr
 			   of the TX-DMA-transfer */);
-	link_tx = &cb->pad[0];
+	link_irq = &cb->pad[0];
 
 	/* copy the timestamp from the counter to a fixed address */
 	ADD_DMA_LINK_TO_FRAGMENT_FLAGS(message_finished,0);
@@ -1221,16 +1229,16 @@ static struct dma_fragment *bcm2835dma_spi_create_fragment_trigger_irq(
 	FIXED(src,      BCM2835_REG_COUNTER_64BIT_BUS);
 	FIXED(dst,      THIS_CB_MEMBER_DMA_ADDR(pad[0]));
 	FIXED(length,   8);
-	*link_tx = link->cb_dma;
+	*link_irq = link->cb_dma;
 
 	/* start the tx-dma - equivalent to:
 	 * writel(BCM2835_DMA_CS_ACTIVE,txdma_base+BCM2835_DMA_ADDR);
 	 */
-	ADD_DMA_LINK_TO_FRAGMENT(start_tx_dma);
-	LINKTO(set_tx_dma_next);
+	ADD_DMA_LINK_TO_FRAGMENT(start_irq_dma);
+	LINKTO(set_irq_dma_next);
 	FIXED(ti,       BCM2835_DMA_TI_WAIT_RESP);
 	FIXED(src,      THIS_CB_MEMBER_DMA_ADDR(pad[0]));
-	TXDMA(dst,      BCM2835_DMA_CS);
+	IRQDMA(dst,     BCM2835_DMA_CS);
 	FIXED(length,   4);
 	FIXED(pad[0],   BCM2835_DMA_CS_ACTIVE);
 

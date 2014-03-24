@@ -139,12 +139,13 @@ static int bcm2835dma_schedule_dma_fragment(
 			bs->dma_rx.base+BCM2835_DMA_ADDR);
 		dsb();
 
-		writel(BCM2835_DMA_CS_ACTIVE/*|BCM2835_DMA_CS_DISDEBUG*/,
+		writel(BCM2835_DMA_CS_ACTIVE,
 			bs->dma_rx.base+BCM2835_DMA_CS);
+
+		bs->last_message_dma_was_running = 0;
 		bs->count_dma_started++;
-		//bs->last_message_dma_was_running = 0;
 	} else {
-		//bs->last_message_dma_was_running = 1;
+		bs->last_message_dma_was_running = 1;
 		bs->count_dma_still_running++;
 	}
 	/* unlock and return */
@@ -224,44 +225,58 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 	}
 }
 
-irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id)
+irqreturn_t bcm2835dma_spi_interrupt_dma_irq(int irq, void *dev_id)
 {
 	struct spi_master *master = dev_id;
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	u32 t;
 	/* write interrupt message to debug */
 	if (unlikely(debug_dma&DEBUG_DMA_IRQ))
-		printk(KERN_ERR "TX-Interrupt %i triggered\n",irq);
+		printk(KERN_ERR "IRQ-Interrupt %i triggered\n",irq);
 
-	/* we need to clean the IRQ flag as well
-	 * otherwise it will trigger again...
-	 * as we are on the READ DMA queue, we should not have an issue
-	 * setting/clearing WAIT_FOR_OUTSTANDING_WRITES
-	 * and we are not using it for the RX path
+	/* we need to clean the IRQ flag as well for this dma
+	 *
+	 * Problem here is that we can not run this on the (main) RX DMA,
+	 * as a chanined transfer will clear the interrupt automatically
+	 * so that the interrupt will not really get handled
+	 *
+	 * The other problem is that we can not reliably use TX-dma either
+	 * as there is a race condition between the interrupt handler and
+	 * a subsequent chained transfer, that may also start TX-dma while
+	 * the interrupt handler is not that far.
+	 *
+	 * TX-DMA issue in more details here:
+	 * when the TX-DMA is triggering an interrupt, there may be already
+	 * the next DMA transaction getting prepared via the RX DMA.
+	 * and at some point this RX-DMA will again start configuring
+	 * the TX dma for the "next" Transfer, so it will first set DMA_ADDR
+	 * and then DMA_CS to trigger a start.
+	 * and if the interrupt handler writes at or after this time to
+	 * DMA_CS, then it will effectively "pause" the already running DMA
+	 * and somehow we would need to detect this and take the "correct"
+	 * corrective measures...
+	 *
+	 * So to avoid these situations we unfortunately have to use a
+	 * separate DMA channel just for the interrupt callback, which is
+	 * a waste of resources, but no means to detect this race and
+	 * react accordingly has been found so far
 	 */
 
 	/* check if we got an address set for tx dma */
-	t = readl(bs->dma_tx.base+BCM2835_DMA_ADDR);
+	t = readl(bs->dma_irq.base+BCM2835_DMA_ADDR);
 	if (!t)  {
-		/* now read the register */
-		t = readl(bs->dma_tx.base+BCM2835_DMA_CS);
+		/* now read the CS register */
+		t = readl(bs->dma_irq.base+BCM2835_DMA_CS);
+		/* and if the interrupt bit is set,
+		 * then clear it by setting it
+		 * and in case another irq-dma is just triggered,
+		 * we make start it again - hopefully this never "stalls"
+		 */
 		if (t&BCM2835_DMA_CS_INT) {
-			/* unfortunately this still happens,
-			 * so I wonder what we can do to solve it... */
-			writel(t|BCM2835_DMA_CS_INT|BCM2835_DMA_CS_ACTIVE
-				, bs->dma_tx.base+BCM2835_DMA_CS);
-			/* probably we need some cleanup here to avoid
-			 * a second possible race condition happening just now
-			 * if (readl(bs->dma_tx.base+BCM2835_DMA_ADDR))
-			 * but I fear we will need a 3rd DMA to solve it
-			 * completely...
-			 * the other approach is that we run a watchdog
-			 * thread checking on the transfers ...
-			 */
+			writel(t|BCM2835_DMA_CS_INT|BCM2835_DMA_CS_ACTIVE,
+				bs->dma_irq.base+BCM2835_DMA_CS);
 		}
 	}
-
-	bs->last_message_dma_was_running = t;
 
 	/* release the control block chains until we reach the CB
 	 * this will also call complete
@@ -282,18 +297,27 @@ static ssize_t bcm2835dma_sysfs_show_stats(
 		container_of(dev,typeof(*master),dev);
 	struct bcm2835dma_spi *bs =
 		container_of(attr,typeof(*bs),stats_attr);
+	struct spi_message *msg;
+	int msg_count=0;
+	/* count  number of messages in queue */
+	list_for_each_entry(msg,&master->queue,queue) {
+		msg_count ++;
+	}
+
 	return scnprintf(buf, PAGE_SIZE,
 			"bcm2835dma_stats_info - 0.1\n"
 			"total spi_messages: %llu\n"
 			"optimized spi_messages: %llu\n"
 			"dma_scheduled: %llu\n"
 			"dma still running:\t%llu\n"
-			"last message dma_running:\t%08x\n",
+			"last message dma_running:\t%08x\n"
+			"queued messages\t%u\n",
 			bs->count_spi_messages,
 			bs->count_spi_optimized_messages,
 			bs->count_dma_started,
 			bs->count_dma_still_running,
-			bs->last_message_dma_was_running
+			bs->last_message_dma_was_running,
+			msg_count
                 );
 }
 
@@ -329,6 +353,8 @@ static ssize_t bcm2835dma_sysfs_triggerdump( struct device *dev,
 	bcm2835_dma_reg_dump(bs->dma_rx.base,dev,1);
 	dev_printk(KERN_INFO,dev,"TX-DMA registers\n");
 	bcm2835_dma_reg_dump(bs->dma_tx.base,dev,1);
+	dev_printk(KERN_INFO,dev,"IRQ-DMA registers\n");
+	bcm2835_dma_reg_dump(bs->dma_irq.base,dev,1);
 
 	/* lock structures */
 	spin_lock_irqsave(&master->queue_lock,flags);
@@ -611,6 +637,10 @@ static void bcm2835dma_release_dmachannel(struct spi_master *master,
 		free_irq(d->irq,master);
         bcm_dma_chan_free(d->chan);
 
+	/* release description */
+	if (d->desc)
+		kfree(d->desc);
+
 	/* cleanup structure */
         d->base = NULL;
 	d->bus_addr=0;
@@ -627,6 +657,7 @@ static int bcm2835dma_allocate_dmachannel(struct spi_master *master,
 	)
 {
         int ret;
+	size_t len;
 	/* fill in defaults */
 	d->base = NULL;
 	d->bus_addr = 0;
@@ -653,14 +684,18 @@ static int bcm2835dma_allocate_dmachannel(struct spi_master *master,
         d->chan = ret;
 	if (handler)
 		dev_info(&master->dev,
-			"DMA channel %d at address %pK with irq %d"
+			"%s-DMA channel %d at address %pK with irq %d"
 			" and handler at %pf\n",
-			d->chan, d->base, d->irq,handler);
+			desc,d->chan, d->base, d->irq,handler);
 	else
 		dev_info(&master->dev,
-			"DMA channel %d at address %pK with irq %d"
+			"%s-DMA channel %d at address %pK with irq %d"
 			" and no handler\n",
-			d->chan, d->base, d->irq);
+			desc,d->chan, d->base, d->irq);
+	/* asign description */
+        len = strlen(dev_name(&master->dev)) + strlen(desc) + 2;
+	d->desc = kmalloc(len,GFP_KERNEL);
+	snprintf((char *)d->desc,len,"%s-%s",dev_name(&master->dev),desc);
 	/* and reset the DMA - just in case */
 	writel(BCM2835_DMA_CS_RESET,d->base+BCM2835_DMA_CS);
 	writel(0,d->base+BCM2835_DMA_ADDR);
@@ -669,7 +704,7 @@ static int bcm2835dma_allocate_dmachannel(struct spi_master *master,
 		ret = request_irq(d->irq,
 				handler,
 				0,
-				dev_name(&master->dev),
+				d->desc,
 				master);
 		if (ret) {
 			dev_err(&master->dev,
@@ -679,7 +714,6 @@ static int bcm2835dma_allocate_dmachannel(struct spi_master *master,
 		}
 	}
 	/* assign other data */
-	d->desc = desc;
 	d->handler = handler;
 	/* calculate the bus_addr */
 	d->bus_addr = (d->chan==15) ? BCM2835_REG_DMA15_BASE_BUS
@@ -694,6 +728,7 @@ static void bcm2835dma_release_dma(struct spi_master *master)
 
 	bcm2835dma_release_dmachannel(master,&bs->dma_tx);
 	bcm2835dma_release_dmachannel(master,&bs->dma_rx);
+	bcm2835dma_release_dmachannel(master,&bs->dma_irq);
 
 	bcm2835dma_release_dmafragment_components(master);
 }
@@ -705,11 +740,15 @@ static int bcm2835dma_allocate_dma(struct spi_master *master,
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	/* allocate DMA-channels */
 	err=bcm2835dma_allocate_dmachannel(
-		master,&bs->dma_tx,bcm2835dma_spi_interrupt_dma_tx,"tx");
+		master,&bs->dma_tx,NULL,"tx");
 	if (err)
 		goto error;
 	err=bcm2835dma_allocate_dmachannel(
 		master,&bs->dma_rx,NULL,"rx");
+	if (err)
+		goto error;
+	err=bcm2835dma_allocate_dmachannel(
+		master,&bs->dma_irq,bcm2835dma_spi_interrupt_dma_irq,"irq");
 	if (err)
 		goto error;
 
