@@ -106,6 +106,13 @@
 #define BCM2835_DMA_DREQ_SLIM_DC8                       30
 #define BCM2835_DMA_DREQ_SLIM_DC9                       31
 
+#define BCM2835_REG_DMA0_BASE_BUS              0x7E007000
+#define BCM2835_REG_DMA15_BASE_BUS             0x7EE05000
+
+#define BCM2835_DMA_BASE_BUS(channel)			\
+	(channel==15) ? BCM2835_REG_DMA15_BASE_BUS	\
+	: BCM2835_REG_DMA0_BASE_BUS + 256*channel
+
 /**
  * struct bcm2835_dma_cb the DMA control block
  * @ti: configuration register
@@ -143,19 +150,31 @@ static inline u32 bcm2835_dma_cb_compose_stride(
 	return *((u32*)&tmp);
 }
 
+#define DIRECT_UNCACHED_BITS 0xC0000000
 static inline int bcm2835_link_dma_link(
 	struct dma_link *from, struct dma_link *to)
 {
 	dma_addr_t next = (to) ? to->cb_dma : 0;
-	((struct bcm2835_dma_cb *)from->cb)->next = next;
+	writel(next,
+		&((struct bcm2835_dma_cb *)from->cb)->next);
 	return 0;
 }
+
+void bcm2835_dma_cb_dump_str(
+	struct bcm2835_dma_cb *dmablock,
+	dma_addr_t dmablock_dma,
+	int tindent,
+	char *buffer, size_t size);
 
 void bcm2835_dma_cb_dump(
 	struct bcm2835_dma_cb *dmablock,
 	dma_addr_t dmablock_dma,
 	struct device *dev,
 	int tindent);
+
+int bcm2835_dma_reg_dump_str(
+	void *base,int tindent,
+	char *buffer, size_t size);
 
 void bcm2835_dma_reg_dump(
 	void* base,

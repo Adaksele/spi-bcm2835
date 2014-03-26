@@ -81,32 +81,52 @@ void bcm2835_dma_cb_dump(
 }
 EXPORT_SYMBOL_GPL(bcm2835_dma_cb_dump);
 
+int bcm2835_dma_reg_dump_str(
+	void *base,int tindent,
+	char *buffer, size_t size)
+{
+	const char *prefix=_tab_indent(tindent);
+	size_t len=0;
+        len+=snprintf(buffer+len,size-len, "%s.addr   = %pf\n",
+		prefix, base);
+        len+=snprintf(buffer+len,size-len, "%s.cs     = %08x\n",
+		prefix, readl(base+BCM2835_DMA_CS));
+        len+=snprintf(buffer+len,size-len,
+		"%s.cbaddr = %08x\n",
+		prefix, readl(base+BCM2835_DMA_ADDR));
+        len+=snprintf(buffer+len,size-len, "%s.ti     = %08x\n",
+		prefix, readl(base+BCM2835_DMA_TI));
+        len+=snprintf(buffer+len,size-len, "%s.src    = %08x\n",
+		prefix, readl(base+BCM2835_DMA_S_ADDR));
+        len+=snprintf(buffer+len,size-len, "%s.dst    = %08x\n",
+		prefix, readl(base+BCM2835_DMA_D_ADDR));
+        len+=snprintf(buffer+len,size-len, "%s.length = %08x\n",
+		prefix, readl(base+BCM2835_DMA_LEN));
+        len+=snprintf(buffer+len,size-len, "%s.stride = %08x\n",
+		prefix, readl(base+BCM2835_DMA_STRIDE));
+        len+=snprintf(buffer+len,size-len, "%s.next   = %08x\n",
+		prefix, readl(base+BCM2835_DMA_NEXT));
+        len+=snprintf(buffer+len,size-len, "%s.debug  = %08x\n",
+		prefix, readl(base+BCM2835_DMA_DEBUG));
+	return len;
+}
+EXPORT_SYMBOL_GPL(bcm2835_dma_reg_dump_str);
+
 void bcm2835_dma_reg_dump(
 	void *base,
 	struct device *dev,
 	int tindent)
 {
-	const char *prefix=_tab_indent(tindent);
-        dev_printk(KERN_INFO, dev, "%s.addr   = %pf\n", prefix,
-		base);
-        dev_printk(KERN_INFO, dev, "%s.cs     = %08x\n", prefix,
-		readl(base+BCM2835_DMA_CS));
-        dev_printk(KERN_INFO, dev, "%s.cbaddr = %08x\n", prefix,
-		readl(base+BCM2835_DMA_ADDR));
-        dev_printk(KERN_INFO, dev, "%s.ti     = %08x\n", prefix,
-		readl(base+BCM2835_DMA_TI));
-        dev_printk(KERN_INFO, dev, "%s.src    = %08x\n", prefix,
-		readl(base+BCM2835_DMA_S_ADDR));
-        dev_printk(KERN_INFO, dev, "%s.dst    = %08x\n", prefix,
-		readl(base+BCM2835_DMA_D_ADDR));
-        dev_printk(KERN_INFO, dev, "%s.length = %08x\n", prefix,
-		readl(base+BCM2835_DMA_LEN));
-        dev_printk(KERN_INFO, dev, "%s.stride = %08x\n", prefix,
-		readl(base+BCM2835_DMA_STRIDE));
-        dev_printk(KERN_INFO, dev, "%s.next   = %08x\n", prefix,
-		readl(base+BCM2835_DMA_NEXT));
-        dev_printk(KERN_INFO, dev, "%s.debug  = %08x\n", prefix,
-		readl(base+BCM2835_DMA_DEBUG));
+	char buffer[768];
+	char *start=buffer;
+	char *line;
+	bcm2835_dma_reg_dump_str(
+		base,tindent,
+		buffer,sizeof(buffer)
+		);
+	while((start) && (line=strsep(&start,"\n"))) {
+		dev_printk(KERN_INFO, dev,line);
+	}
 }
 EXPORT_SYMBOL_GPL(bcm2835_dma_reg_dump);
 

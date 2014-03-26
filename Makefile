@@ -3,11 +3,12 @@ PWD := $(shell pwd)
 
 ccflags-y := -I $(src)/include
 
-obj-m             := spi-bcm2835dma.o dma-fragment.o spi-dmafragment.o dma-bcm2835.o
+obj-m             := spi-bcm2835dma.o dma-fragment.o spi-dmafragment.o dma-bcm2835.o dma-bcm2835-debug.o
 
 spi-bcm2835dma-y  := drivers/spi/spi-bcm2835dma_drv.o
 spi-bcm2835dma-y  += drivers/spi/spi-bcm2835dma_frag.o
 dma-bcm2835-y     := drivers/dma/bcm2835-dma.o
+dma-bcm2835-debug-y     := drivers/dma/bcm2835-dma-debug.o
 dma-fragment-y    := drivers/dma/dma-fragment.o
 spi-dmafragment-y := drivers/spi/spi-dmafragment.o
 

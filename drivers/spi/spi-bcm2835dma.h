@@ -34,8 +34,6 @@
 #include <mach/dma.h>
 
 /* DMA addresses of some of the used registers */
-#define BCM2835_REG_DMA0_BASE_BUS              0x7E007000
-#define BCM2835_REG_DMA15_BASE_BUS             0x7EE05000
 #define BCM2835_REG_GPIO_OUTPUT_SET_BASE_BUS   0x7e20001C
 #define BCM2835_REG_GPIO_OUTPUT_CLEAR_BASE_BUS 0x7e200028
 #define BCM2835_REG_COUNTER_BASE_BUS           0x7e003000
@@ -107,6 +105,7 @@ struct bcm2835dma_spi {
 	u64 count_dma_still_running;
 	u64 count_spi_messages;
 	u64 count_spi_optimized_messages;
+	u64 count_dma_interrupts;
         u32 last_message_dma_was_running;
 };
 
