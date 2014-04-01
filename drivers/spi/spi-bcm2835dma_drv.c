@@ -65,9 +65,10 @@ module_param(debug_dma, int, 0);
 MODULE_PARM_DESC(debug_dma,
 		"Run the driver with dma debugging enabled");
 #define DEBUG_DMA_ASYNC   (1<<0)
-#define DEBUG_DMA_OPTIMIZE (1<<1)
-#define DEBUG_DMA_IRQ      (1<<2)
-
+#define DEBUG_DMA_ASYNC_DUMP_FRAGMENT (1<<1)
+#define DEBUG_DMA_OPTIMIZE (1<<2)
+#define DEBUG_DMA_OPTIMIZE_DUMP_FRAGMENT (1<<3)
+#define DEBUG_DMA_IRQ      (1<<4)
 bool use_optimize = 1;
 module_param(use_optimize, bool, 0);
 MODULE_PARM_DESC(use_optimize,
@@ -561,7 +562,8 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 			goto error;
 	}
 
-	/* and the "end of transfer flag" - must be the last to avoid races... */
+	/* and the "end of transfer flag"
+	 * - must be the last to avoid races... */
 	err=spi_merged_dma_fragment_merge_fragment_cache(
 		&bs->fragment_message_finished,
 		merged,
@@ -623,12 +625,18 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 	if (err)
 		goto error;
 
-	if (unlikely(debug_dma&DEBUG_DMA_ASYNC))
-		spi_merged_dma_fragment_dump(merged,
-					&message->spi->dev,
-					0,0,
-					&bcm2835_dma_link_dump
-			);
+	if (unlikely(debug_dma & DEBUG_DMA_ASYNC)) {
+		dev_printk(KERN_INFO,&message->spi->dev,
+			"Scheduling Message %pf fragment %pf\n",
+			message,merged);
+		if (debug_dma & DEBUG_DMA_ASYNC_DUMP_FRAGMENT) {
+			spi_merged_dma_fragment_dump(merged,
+						&message->spi->dev,
+						0,0,
+						&bcm2835_dma_link_dump
+				);
+		}
+	}
 
 	/* statistics on message submission */
 	spin_lock_irqsave(&master->queue_lock,flags);
@@ -651,6 +659,7 @@ error:
 	dma_fragment_release(&merged->dma_fragment);
 	return -EPERM;
 }
+
 #ifdef SPI_HAVE_OPTIMIZE
 static int bcm2835dma_spi_message_optimize(struct spi_message *message)
 {
@@ -660,14 +669,16 @@ static int bcm2835dma_spi_message_optimize(struct spi_message *message)
 		GFP_ATOMIC);
 	if (!message->state)
 		return -ENOMEM;
-	if (unlikely(debug_dma&DEBUG_DMA_OPTIMIZE)) {
+	if (unlikely(debug_dma & DEBUG_DMA_OPTIMIZE)) {
 		dev_printk(KERN_INFO,&message->spi->dev,
 			"Optimizing %pf %pf\n",message,message->state);
-		spi_merged_dma_fragment_dump(message->state,
-					&message->spi->dev,
-					0,0,
-					&bcm2835_dma_link_dump
-			);
+		if (debug_dma & DEBUG_DMA_OPTIMIZE_DUMP_FRAGMENT) {
+			spi_merged_dma_fragment_dump(message->state,
+						&message->spi->dev,
+						0,0,
+						&bcm2835_dma_link_dump
+				);
+		}
 	}
 
 	return 0;
