@@ -106,91 +106,53 @@ static void set_high2(void) {
 
 static void bcm2835dma_spi_message_unoptimize(struct spi_message *msg);
 
+
 /* schedule a DMA fragment on a specific DMA channel */
-static int bcm2835dma_schedule_dma_fragment(
-	struct spi_message *msg)
+
+static inline void _bcm2835dma_schedule_dma_fragment(
+	struct bcm2835dma_spi *bs,
+	struct spi_merged_dma_fragment *frag)
 {
-	unsigned long flags;
-	struct spi_master *master = msg->spi->master;
-	struct spi_merged_dma_fragment *frag = msg->state;
-	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
-	struct spi_message *last_msg;
-	struct spi_merged_dma_fragment *last_frag;
-
-	/* just in case: clean the fragment tail link */
-	if (0)	bcm2835_link_dma_link(
-		frag->dma_fragment.link_tail,
-		NULL);
-
-	spin_lock_irqsave(&master->queue_lock,flags);
-
-	last_msg = (!list_empty(&master->queue) ?
-		list_last_entry(&master->queue, struct spi_message, queue)
-		: NULL);
-	/* link it to the last one on a spi_message level
-	 * as well as on a dma level
-	 */
-	list_add_tail(&msg->queue,&master->queue);
-
-	if (last_msg) {
-		last_frag = last_msg->state;
-		bcm2835_link_dma_link(
-			last_frag->dma_fragment.link_tail,
-			frag->dma_fragment.link_head);
-	}
-	/* force a memory barrier to sync everything */
+	/* reset the RX DMA with a memory barrier */
+	writel(BCM2835_DMA_CS_RESET, bs->dma_rx.base+BCM2835_DMA_CS);
 	dsb();
 
-	/* now see if DMA is still running */
-	if ( ( readl(bs->dma_rx.base+BCM2835_DMA_CS)
-			& BCM2835_DMA_CS_ACTIVE )) {
-		bs->last_message_dma_was_running = 1;
-		bs->count_dma_still_running++;
-	} else {
-		/* schedule transfer address and start it */
-		writel(frag->dma_fragment.link_head->cb_dma,
-			bs->dma_rx.base+BCM2835_DMA_ADDR);
-		dsb();
+	/* schedule transfer address */
+	writel(frag->dma_fragment.link_head->cb_dma,
+		bs->dma_rx.base+BCM2835_DMA_ADDR);
+	/* and start it */
+	writel(BCM2835_DMA_CS_ACTIVE,bs->dma_rx.base+BCM2835_DMA_CS);
+	dsb();
+}
 
-		writel(BCM2835_DMA_CS_ACTIVE,
-			bs->dma_rx.base+BCM2835_DMA_CS);
-
-		bs->last_message_dma_was_running = 0;
-		bs->count_dma_started++;
-	}
-	/* unlock and return */
-	spin_unlock_irqrestore(&master->queue_lock,flags);
-
-	return 0;
+static inline void _bcm2835dma_link_dma_fragment(
+	struct bcm2835dma_spi *bs,
+	struct spi_merged_dma_fragment *frag,
+	struct spi_merged_dma_fragment *last_frag)
+{
+	/* we got an address, so link it */
+	bcm2835_link_dma_link(
+		last_frag->dma_fragment.link_tail,
+		frag->dma_fragment.link_head);
+	/* force a memory barrier to sync everything */
+	dsb();
 }
 
 void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 {
+	/* assumes interrupt or locked context */
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	struct spi_message *msg;
 	struct spi_merged_dma_fragment *frag;
 	u32 *complete;
-	unsigned long flags;
 
-	set_low();
-	udelay(1);
-	set_high();
-	udelay(1);
-	set_low();
-	udelay(1);
-	set_high();
-
-	spin_lock_irqsave(&master->queue_lock,flags);
 	bs->count_dma_interrupts ++;
-	spin_unlock_irqrestore(&master->queue_lock,flags);
 
 	/* check the message queue */
 	while( 1 ) {
 		/* check if we got an entry */
-		spin_lock_irqsave(&master->queue_lock,flags);
 		msg = list_first_entry_or_null(
 			&master->queue,typeof(*msg),queue);
-		spin_unlock_irqrestore(&master->queue_lock,flags);
 		/* return immediately on NULL
 		 * - this really can happen when interrupts overlap...*/
 		if (!msg) {
@@ -199,7 +161,9 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 		/* get the fragment for the current message */
 		frag = msg->state;
 
-		/* if we do not have a complete data pointer */
+		/* if we have a complete data pointer and it is empty,
+		 * then check if it has completed
+		 */
 		if (frag->complete_data) {
 			complete = (u32*)frag->complete_data;
 			/* and if the values are 0, then we stop
@@ -208,12 +172,12 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 				( complete[0] == 0 )
 				&& ( complete[1] == 0 ) )
 				return;
+		} else {
+			/* how to decide if we can release this message? */
 		}
 
 		/* otherwise we can release the message */
-		spin_lock_irqsave(&master->queue_lock,flags);
 		list_del_init(&frag->message->queue);
-		spin_unlock_irqrestore(&master->queue_lock,flags);
 
 		/* reset status */
 		msg->status = 0;
@@ -224,14 +188,6 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 		spi_merged_dma_fragment_execute_post_dma_transforms(
 			frag,frag,GFP_ATOMIC);
 
-		/* clean the NEXT pointer of the fragment */
-/*
-		bcm2835_link_dma_link(
-			frag->dma_fragment.link_tail,
-			NULL);
-		dsb();
-*/
-
 		/* and release fragment - if not optimized */
 #ifdef SPI_HAVE_OPTIMIZE
 		if ( (! msg->is_optimized ) && (use_optimize) )
@@ -239,9 +195,86 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 				bcm2835dma_spi_message_unoptimize(msg);
 
 		/* call the complete call */
-		if (msg->complete)
+		if (msg->complete) {
 			msg->complete(msg->context);
+		}
 	}
+}
+
+static int bcm2835dma_schedule_dma_fragment(
+	struct spi_message *msg)
+{
+	unsigned long flags;
+	struct spi_master *master = msg->spi->master;
+	struct spi_merged_dma_fragment *frag = msg->state;
+	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
+	struct spi_message *last_msg;
+
+	set_low();
+
+	/* to avoid possible race-conditions between interrupt handlers
+	 * for DMA and other sources (=GPIO) we need to release the
+	 * messages first
+	 */
+	spin_lock_irqsave(&master->queue_lock,flags);
+	if (!list_empty(&master->queue))
+		bcm2835dma_release_cb_chain_complete(master);
+	spin_unlock_irqrestore(&master->queue_lock,flags);
+
+	/* now start locking things down */
+	spin_lock_irqsave(&master->queue_lock,flags);
+
+	/* just in case: clean the fragment tail link to 0 */
+	bcm2835_link_dma_link(
+		frag->dma_fragment.link_tail,
+		NULL);
+
+	/* handle the queue */
+	if (!list_empty(&master->queue)) {
+		/* get the last entry */
+		last_msg = list_last_entry(
+			&master->queue, struct spi_message, queue);
+		/* now add the fragment to the dma queue */
+		_bcm2835dma_link_dma_fragment(
+			bs,frag,
+			last_msg->state);
+	}
+	set_high();
+
+	/* link the message to get scheduled to the queue */
+	list_add_tail(&msg->queue,&master->queue);
+
+	/* now check if we need to queue it */
+	if ( readl(bs->dma_rx.base+BCM2835_DMA_CS)
+		& BCM2835_DMA_CS_ACTIVE) {
+		dsb();
+		/* dma is running, so see if it still has an address set */
+		if (readl(bs->dma_rx.base+BCM2835_DMA_ADDR)) {
+			dsb();
+			/* and just in case check again for running */
+			if ( readl(bs->dma_rx.base+BCM2835_DMA_CS)
+				& BCM2835_DMA_CS_ACTIVE ) {
+				/* and increase counters */
+				bs->count_scheduled_msg_dma_running++;
+				bs->last_dma_schedule_type = "linked";
+				/* and exit */
+				goto exit;
+			}
+		}
+	}
+	set_low();
+	/* otherwise we schedule it */
+	_bcm2835dma_schedule_dma_fragment(bs,frag);
+
+	/* and increase counters */
+	bs->count_scheduled_msg_dma_restarted++;
+	bs->last_dma_schedule_type = "restarted";
+
+	/* unlock and return */
+exit:
+	set_high();
+	spin_unlock_irqrestore(&master->queue_lock,flags);
+	return 0;
 }
 
 irqreturn_t bcm2835dma_spi_interrupt_dma_irq(int irq, void *dev_id)
@@ -249,6 +282,7 @@ irqreturn_t bcm2835dma_spi_interrupt_dma_irq(int irq, void *dev_id)
 	struct spi_master *master = dev_id;
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	u32 t;
+	set_low2();
 	/* write interrupt message to debug */
 	if (unlikely(debug_dma&DEBUG_DMA_IRQ))
 		printk(KERN_ERR "IRQ-Interrupt %i triggered\n",irq);
@@ -302,6 +336,7 @@ irqreturn_t bcm2835dma_spi_interrupt_dma_irq(int irq, void *dev_id)
 	 */
 	bcm2835dma_release_cb_chain_complete(master);
 
+	set_high2();
 	/* and return with the IRQ marked as handled */
 	return IRQ_HANDLED;
 }
@@ -318,28 +353,30 @@ static ssize_t bcm2835dma_sysfs_show_stats(
 		container_of(attr,typeof(*bs),stats_attr);
 	struct spi_message *msg;
 	int msg_count=0;
+	ssize_t len=0;
+
 	/* count  number of messages in queue */
 	list_for_each_entry(msg,&master->queue,queue) {
 		msg_count ++;
 	}
 
-	return scnprintf(buf, PAGE_SIZE,
+	len = scnprintf(buf, PAGE_SIZE,
 			"bcm2835dma_stats_info - 0.1\n"
-			"total spi_messages: %llu\n"
+			"total spi_messages:     %llu\n"
 			"optimized spi_messages: %llu\n"
-			"dma_scheduled: %llu\n"
-			"dma still running:\t%llu\n"
-			"dma interrupts:\t%llu\n"
-			"last message dma_running:\t%08x\n"
-			"queued messages\t%u\n",
+			"started dma:            %llu\n"
+			"linked to running dma:  %llu\n"
+			"last dma_schedule type: %s\n"
+			"dma interrupts:         %llu\n"
+			"queued messages:        %u\n",
 			bs->count_spi_messages,
 			bs->count_spi_optimized_messages,
-			bs->count_dma_started,
-			bs->count_dma_still_running,
+			bs->count_scheduled_msg_dma_restarted,
+			bs->count_scheduled_msg_dma_running,
+			bs->last_dma_schedule_type,
 			bs->count_dma_interrupts,
-			bs->last_message_dma_was_running,
-			msg_count
-                );
+			msg_count);
+	return len;
 }
 
 static ssize_t bcm2835dma_sysfs_triggerdump( struct device *dev,
@@ -421,8 +458,6 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 	int err=0;
 	int is_last;
 
-	set_low2();
-
 	/* some optimizations - it might help if we knew the length... */
 	/* check if we got a frame that is of a single transfer */
 	if ( list_is_singular(&msg->transfers) ) {
@@ -484,13 +519,10 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 		if ( (xfer->len)
 			/* || (xfer->vary & SPI_OPTIMIZE_VARY_LENGTH) */) {
 			/* schedule transfer */
-		set_high2();
 			err = spi_merged_dma_fragment_merge_fragment_cache(
 				&bs->fragment_transfer,
 				merged,
 				gfpflags);
-		set_low2();
-
 			if (err)
 				goto error;
 			/* set last transfer */
@@ -515,6 +547,7 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 		if (err)
 			goto error;
 	}
+
 	/* and add an interrupt if we got a callback to handle
 	 * if there is no callback, then we do not need to release it
 	 * immediately - even for prepared messages
@@ -528,11 +561,18 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 			goto error;
 	}
 
+	/* and the "end of transfer flag" - must be the last to avoid races... */
+	err=spi_merged_dma_fragment_merge_fragment_cache(
+		&bs->fragment_message_finished,
+		merged,
+		gfpflags);
+	if (err)
+		goto error;
+
 	/* reset transfers, as these are invalid by the time
 	 * we run the transforms */
 	merged->transfer      = NULL;
 	merged->last_transfer = NULL;
-	set_high2();
 
 	/* and return it */
 	return merged;
@@ -611,7 +651,7 @@ error:
 	dma_fragment_release(&merged->dma_fragment);
 	return -EPERM;
 }
-
+#ifdef SPI_HAVE_OPTIMIZE
 static int bcm2835dma_spi_message_optimize(struct spi_message *message)
 {
 	message->state = bcm2835dma_spi_message_to_dma_fragment(
@@ -622,7 +662,7 @@ static int bcm2835dma_spi_message_optimize(struct spi_message *message)
 		return -ENOMEM;
 	if (unlikely(debug_dma&DEBUG_DMA_OPTIMIZE)) {
 		dev_printk(KERN_INFO,&message->spi->dev,
-			"Optimizing %pf\n",message);
+			"Optimizing %pf %pf\n",message,message->state);
 		spi_merged_dma_fragment_dump(message->state,
 					&message->spi->dev,
 					0,0,
@@ -642,6 +682,7 @@ static void bcm2835dma_spi_message_unoptimize(struct spi_message *msg)
 			"Unoptimizing %pf\n",msg);
 	}
 }
+#endif
 
 static void bcm2835dma_release_dmachannel(struct spi_master *master,
 			struct bcm2835_dmachannel *d)

@@ -97,16 +97,18 @@ struct bcm2835dma_spi {
 	struct dma_fragment_cache fragment_cs_deselect;
 	struct dma_fragment_cache fragment_delay;
 	struct dma_fragment_cache fragment_trigger_irq;
+	struct dma_fragment_cache fragment_message_finished;
 	/* the device configs list */
 	struct list_head spi_device_data_chain;
 	/* the device statistics */
         struct device_attribute stats_attr;
-	u64 count_dma_started;
-	u64 count_dma_still_running;
+	u64 count_scheduled_msg_dma_restarted;
+	u64 count_scheduled_msg_dma_running;
 	u64 count_spi_messages;
 	u64 count_spi_optimized_messages;
 	u64 count_dma_interrupts;
-        u32 last_message_dma_was_running;
+
+	const char *last_dma_schedule_type;
 };
 
 int bcm2835dma_register_dmafragment_components(struct spi_master*);
