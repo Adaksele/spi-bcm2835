@@ -76,40 +76,46 @@ MODULE_PARM_DESC(use_optimize,
 
 /* some functions to measure delays on a logic analyzer
  * note: needs to get run first from non-atomic context!!! */
-static int debugpin = 0;
-module_param(debugpin,int,0);
-MODULE_PARM_DESC(debugpin,"the pin that we should toggle");
-static u32* gpio=0;
-static void set_low(void) {
+int debugpin = 0;
+module_param(debugpin, int, 0);
+MODULE_PARM_DESC(debugpin, "the pin that we should toggle");
+u32 *gpio = 0;
+static void set_low(void)
+{
 	if (!gpio)
 		gpio = ioremap(0x20200000, SZ_16K);
-	gpio[0x28/4]=debugpin;
-}
-static void set_high(void) {
-	if (!gpio)
-		gpio = ioremap(0x20200000, SZ_16K);
-	gpio[0x1C/4]=debugpin;
+	gpio[0x28/4] = debugpin;
 }
 
-static int debugpin2 = 0;
-module_param(debugpin2,int,0);
-MODULE_PARM_DESC(debugpin2,"the pin that we should toggle");
-static void set_low2(void) {
+static void set_high(void)
+{
 	if (!gpio)
 		gpio = ioremap(0x20200000, SZ_16K);
-	gpio[0x28/4]=debugpin2;
+	gpio[0x1C/4] = debugpin;
 }
-static void set_high2(void) {
+
+int debugpin2 = 0;
+module_param(debugpin2, int, 0);
+MODULE_PARM_DESC(debugpin2, "the pin that we should toggle");
+static void set_low2(void)
+{
 	if (!gpio)
 		gpio = ioremap(0x20200000, SZ_16K);
-	gpio[0x1C/4]=debugpin2;
+	gpio[0x28/4] = debugpin2;
+}
+static void set_high2(void)
+{
+	if (!gpio)
+		gpio = ioremap(0x20200000, SZ_16K);
+	gpio[0x1C/4] = debugpin2;
 }
 
 static void bcm2835dma_spi_message_unoptimize(struct spi_message *msg);
 
 
-/* schedule a DMA fragment on a specific DMA channel */
-
+/* schedule a DMA fragment on a specific DMA channel
+ * this could probably get executed via the dma-engine...
+ */
 static inline void _bcm2835dma_schedule_dma_fragment(
 	struct bcm2835dma_spi *bs,
 	struct spi_merged_dma_fragment *frag)
@@ -121,13 +127,13 @@ static inline void _bcm2835dma_schedule_dma_fragment(
 	/* schedule transfer address */
 	writel(frag->dma_fragment.link_head->cb_dma,
 		bs->dma_rx.base+BCM2835_DMA_ADDR);
+
 	/* and start it */
-	writel(BCM2835_DMA_CS_ACTIVE,bs->dma_rx.base+BCM2835_DMA_CS);
+	writel(BCM2835_DMA_CS_ACTIVE, bs->dma_rx.base+BCM2835_DMA_CS);
 	dsb();
 }
 
 static inline void _bcm2835dma_link_dma_fragment(
-	struct bcm2835dma_spi *bs,
 	struct spi_merged_dma_fragment *frag,
 	struct spi_merged_dma_fragment *last_frag)
 {
@@ -135,30 +141,27 @@ static inline void _bcm2835dma_link_dma_fragment(
 	bcm2835_link_dma_link(
 		last_frag->dma_fragment.link_tail,
 		frag->dma_fragment.link_head);
-	/* force a memory barrier to sync everything */
-	dsb();
+	dsb(); /* this is absolutely necessary */
 }
 
 void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 {
 	/* assumes interrupt or locked context */
-	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	struct spi_message *msg;
 	struct spi_merged_dma_fragment *frag;
 	u32 *complete;
 
-	bs->count_dma_interrupts ++;
-
 	/* check the message queue */
-	while( 1 ) {
+	while (1) {
 		/* check if we got an entry */
 		msg = list_first_entry_or_null(
-			&master->queue,typeof(*msg),queue);
+			&master->queue,
+			typeof(*msg),
+			queue);
 		/* return immediately on NULL
 		 * - this really can happen when interrupts overlap...*/
-		if (!msg) {
+		if (!msg)
 			return;
-		}
 		/* get the fragment for the current message */
 		frag = msg->state;
 
@@ -166,12 +169,13 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 		 * then check if it has completed
 		 */
 		if (frag->complete_data) {
-			complete = (u32*)frag->complete_data;
+			complete = (u32 *)frag->complete_data;
 			/* and if the values are 0, then we stop
 			 * further processing */
 			if (
-				( complete[0] == 0 )
-				&& ( complete[1] == 0 ) )
+				(complete[0] == 0)
+				&& (complete[1] == 0)
+				)
 				return;
 		} else {
 			/* how to decide if we can release this message? */
@@ -187,18 +191,17 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 
 		/* and execute the post-dma-fragments */
 		spi_merged_dma_fragment_execute_post_dma_transforms(
-			frag,frag,GFP_ATOMIC);
+			frag, frag, GFP_ATOMIC);
 
 		/* and release fragment - if not optimized */
 #ifdef SPI_HAVE_OPTIMIZE
-		if ( (! msg->is_optimized ) && (use_optimize) )
+		if ((!msg->is_optimized) && (use_optimize))
 #endif
 				bcm2835dma_spi_message_unoptimize(msg);
 
 		/* call the complete call */
-		if (msg->complete) {
+		if (msg->complete)
 			msg->complete(msg->context);
-		}
 	}
 }
 
@@ -217,13 +220,13 @@ static int bcm2835dma_schedule_dma_fragment(
 	 * for DMA and other sources (=GPIO) we need to release the
 	 * messages first
 	 */
-	spin_lock_irqsave(&master->queue_lock,flags);
+	spin_lock_irqsave(&master->queue_lock, flags);
 	if (!list_empty(&master->queue))
 		bcm2835dma_release_cb_chain_complete(master);
-	spin_unlock_irqrestore(&master->queue_lock,flags);
+	spin_unlock_irqrestore(&master->queue_lock, flags);
 
 	/* now start locking things down */
-	spin_lock_irqsave(&master->queue_lock,flags);
+	spin_lock_irqsave(&master->queue_lock, flags);
 
 	/* just in case: clean the fragment tail link to 0 */
 	bcm2835_link_dma_link(
@@ -237,24 +240,23 @@ static int bcm2835dma_schedule_dma_fragment(
 			&master->queue, struct spi_message, queue);
 		/* now add the fragment to the dma queue */
 		_bcm2835dma_link_dma_fragment(
-			bs,frag,
-			last_msg->state);
+			frag, last_msg->state);
 	}
 	set_high();
 
 	/* link the message to get scheduled to the queue */
-	list_add_tail(&msg->queue,&master->queue);
+	list_add_tail(&msg->queue, &master->queue);
 
 	/* now check if we need to queue it */
-	if ( readl(bs->dma_rx.base+BCM2835_DMA_CS)
+	if (readl(bs->dma_rx.base+BCM2835_DMA_CS)
 		& BCM2835_DMA_CS_ACTIVE) {
 		dsb();
 		/* dma is running, so see if it still has an address set */
 		if (readl(bs->dma_rx.base+BCM2835_DMA_ADDR)) {
 			dsb();
 			/* and just in case check again for running */
-			if ( readl(bs->dma_rx.base+BCM2835_DMA_CS)
-				& BCM2835_DMA_CS_ACTIVE ) {
+			if (readl(bs->dma_rx.base+BCM2835_DMA_CS)
+				& BCM2835_DMA_CS_ACTIVE) {
 				/* and increase counters */
 				bs->count_scheduled_msg_dma_running++;
 				bs->last_dma_schedule_type = "linked";
@@ -265,7 +267,7 @@ static int bcm2835dma_schedule_dma_fragment(
 	}
 	set_low();
 	/* otherwise we schedule it */
-	_bcm2835dma_schedule_dma_fragment(bs,frag);
+	_bcm2835dma_schedule_dma_fragment(bs, frag);
 
 	/* and increase counters */
 	bs->count_scheduled_msg_dma_restarted++;
@@ -274,7 +276,7 @@ static int bcm2835dma_schedule_dma_fragment(
 	/* unlock and return */
 exit:
 	set_high();
-	spin_unlock_irqrestore(&master->queue_lock,flags);
+	spin_unlock_irqrestore(&master->queue_lock, flags);
 	return 0;
 }
 
@@ -286,7 +288,7 @@ irqreturn_t bcm2835dma_spi_interrupt_dma_irq(int irq, void *dev_id)
 	set_low2();
 	/* write interrupt message to debug */
 	if (unlikely(debug_dma&DEBUG_DMA_IRQ))
-		printk(KERN_ERR "IRQ-Interrupt %i triggered\n",irq);
+		dev_err(&master->dev, "IRQ-Interrupt %i triggered\n", irq);
 
 	/* we need to clean the IRQ flag as well for this dma
 	 *
@@ -337,6 +339,8 @@ irqreturn_t bcm2835dma_spi_interrupt_dma_irq(int irq, void *dev_id)
 	 */
 	bcm2835dma_release_cb_chain_complete(master);
 
+	bs->count_dma_interrupts++;
+
 	set_high2();
 	/* and return with the IRQ marked as handled */
 	return IRQ_HANDLED;
@@ -349,16 +353,16 @@ static ssize_t bcm2835dma_sysfs_show_stats(
 	char *buf)
 {
 	struct spi_master *master =
-		container_of(dev,typeof(*master),dev);
+		container_of(dev, typeof(*master), dev);
 	struct bcm2835dma_spi *bs =
-		container_of(attr,typeof(*bs),stats_attr);
+		container_of(attr, typeof(*bs), stats_attr);
 	struct spi_message *msg;
-	int msg_count=0;
-	ssize_t len=0;
+	int msg_count = 0;
+	ssize_t len = 0;
 
 	/* count  number of messages in queue */
-	list_for_each_entry(msg,&master->queue,queue) {
-		msg_count ++;
+	list_for_each_entry(msg, &master->queue, queue) {
+		msg_count++;
 	}
 
 	len = scnprintf(buf, PAGE_SIZE,
@@ -380,59 +384,60 @@ static ssize_t bcm2835dma_sysfs_show_stats(
 	return len;
 }
 
-static ssize_t bcm2835dma_sysfs_triggerdump( struct device *dev,
-				struct device_attribute *attr,
-					const char *buf,size_t size)
+static ssize_t bcm2835dma_sysfs_triggerdump(struct device *dev,
+					struct device_attribute *attr,
+					const char *buf,
+					size_t size)
 {
 	struct spi_master *master =
-		container_of(dev,typeof(*master),dev);
+		container_of(dev, typeof(*master), dev);
 	struct bcm2835dma_spi *bs =
-		container_of(attr,typeof(*bs),stats_attr);
+		container_of(attr, typeof(*bs), stats_attr);
 	struct spi_message *msg;
-	int count=0;
+	int count = 0;
 
 	unsigned long flags;
 
 	/* dump spi */
-	dev_printk(KERN_INFO, dev, "SPI Registers\n");
-	dev_printk(KERN_INFO, dev, "\tCS:\t%08x\n",
+	dev_info(dev, "SPI Registers\n");
+	dev_info(dev, "\tCS:\t%08x\n",
 		readl(bs->spi_regs + BCM2835_SPI_CS));
 	/* do NOT read FIFO - even for Debug !!!*/
-	dev_printk(KERN_INFO, dev, "\tCLK:\t%08x\n",
+	dev_info(dev, "\tCLK:\t%08x\n",
 		readl(bs->spi_regs + BCM2835_SPI_CLK));
-	dev_printk(KERN_INFO, dev, "\tDLEN:\t%08x\n",
+	dev_info(dev, "\tDLEN:\t%08x\n",
 		readl(bs->spi_regs + BCM2835_SPI_DLEN));
-	dev_printk(KERN_INFO, dev, "\tLOTH:\t%08x\n",
+	dev_info(dev, "\tLOTH:\t%08x\n",
 		readl(bs->spi_regs + BCM2835_SPI_LTOH));
-	dev_printk(KERN_INFO, dev, "\tDC:\t%08x\n",
+	dev_info(dev, "\tDC:\t%08x\n",
 		readl(bs->spi_regs + BCM2835_SPI_DC));
 
 	/* dump DMA */
-	dev_printk(KERN_INFO,dev,"RX-DMA registers\n");
-	bcm2835_dma_reg_dump(bs->dma_rx.base,dev,1);
-	dev_printk(KERN_INFO,dev,"TX-DMA registers\n");
-	bcm2835_dma_reg_dump(bs->dma_tx.base,dev,1);
-	dev_printk(KERN_INFO,dev,"IRQ-DMA registers\n");
-	bcm2835_dma_reg_dump(bs->dma_irq.base,dev,1);
+	dev_info(dev, "RX-DMA registers\n");
+	bcm2835_dma_reg_dump(bs->dma_rx.base, dev, 1);
+	dev_info(dev, "TX-DMA registers\n");
+	bcm2835_dma_reg_dump(bs->dma_tx.base, dev, 1);
+	dev_info(dev, "IRQ-DMA registers\n");
+	bcm2835_dma_reg_dump(bs->dma_irq.base, dev, 1);
 
 	/* lock structures */
-	spin_lock_irqsave(&master->queue_lock,flags);
+	spin_lock_irqsave(&master->queue_lock, flags);
 	/* dump each DMA message in queue */
-	dev_printk(KERN_INFO,dev,"Queued messages\n");
-	list_for_each_entry(msg,&master->queue,queue) {
-		dev_printk(KERN_INFO,dev,
+	dev_info(dev, "Queued messages\n");
+	list_for_each_entry(msg, &master->queue, queue) {
+		dev_info(dev,
 			"\tQueued SPI message %i:\n"
 			"\tmsg-address: %pf",
-			count++,msg);
+			count++, msg);
 		spi_merged_dma_fragment_dump(msg->state,
 					dev,
-					1,0,
+					1,
 					&bcm2835_dma_link_dump
 			);
 	}
 
 	/* check if we got an entry */
-	spin_unlock_irqrestore(&master->queue_lock,flags);
+	spin_unlock_irqrestore(&master->queue_lock, flags);
 
 	/* and return size */
 	return size;
@@ -456,12 +461,12 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 
 	struct spi_merged_dma_fragment *merged;
 	struct spi_transfer *xfer;
-	int err=0;
+	int err = 0;
 	int is_last;
 
 	/* some optimizations - it might help if we knew the length... */
 	/* check if we got a frame that is of a single transfer */
-	if ( list_is_singular(&msg->transfers) ) {
+	if (list_is_singular(&msg->transfers)) {
 		/* check if we got something in the structure we could use */
 	}
 
@@ -470,7 +475,7 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 		dma_fragment_cache_fetch(
 			&bs->fragment_merged,
 			gfpflags);
-	if (! merged)
+	if (!merged)
 		return NULL;
 
 	/* initialize some fields */
@@ -490,7 +495,7 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 		merged->transfer = xfer;
 		/* do we need to reconfigure spi
 		   compared to the last transfer */
-		if (! merged->needs_spi_setup) {
+		if (!merged->needs_spi_setup) {
 			if (merged->last_transfer->speed_hz
 				!= xfer->speed_hz)
 				merged->needs_spi_setup = 1;
@@ -517,8 +522,9 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 		}
 		/* add transfer if the transfer length is not 0
 		   or if we vary length */
-		if ( (xfer->len)
-			/* || (xfer->vary & SPI_OPTIMIZE_VARY_LENGTH) */) {
+		if ((xfer->len)
+			/* || (xfer->vary & SPI_OPTIMIZE_VARY_LENGTH) */
+			) {
 			/* schedule transfer */
 			err = spi_merged_dma_fragment_merge_fragment_cache(
 				&bs->fragment_transfer,
@@ -527,17 +533,18 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 			if (err)
 				goto error;
 			/* set last transfer */
-			merged->last_transfer=xfer;
+			merged->last_transfer = xfer;
 		}
 		/* add cs_change with optional extra delay
 		   if requested or last in sequence */
-		if ((xfer->cs_change)||(is_last)) {
+		if ((xfer->cs_change) || (is_last)) {
 			err = spi_merged_dma_fragment_merge_fragment_cache(
 				&bs->fragment_cs_deselect,
 				merged,
 				gfpflags);
-		} else if ( (xfer->delay_usecs)
-			/* || (xfer->vary & SPI_OPTIMIZE_VARY_DELAY) */) {
+		} else if ((xfer->delay_usecs)
+			/* || (xfer->vary & SPI_OPTIMIZE_VARY_DELAY) */
+			) {
 			/* or add a delay if requested */
 			err = spi_merged_dma_fragment_merge_fragment_cache(
 				&bs->fragment_delay,
@@ -554,7 +561,7 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 	 * immediately - even for prepared messages
 	 */
 	if (msg->complete) {
-		err=spi_merged_dma_fragment_merge_fragment_cache(
+		err = spi_merged_dma_fragment_merge_fragment_cache(
 			&bs->fragment_trigger_irq,
 			merged,
 			gfpflags);
@@ -564,7 +571,7 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 
 	/* and the "end of transfer flag"
 	 * - must be the last to avoid races... */
-	err=spi_merged_dma_fragment_merge_fragment_cache(
+	err = spi_merged_dma_fragment_merge_fragment_cache(
 		&bs->fragment_message_finished,
 		merged,
 		gfpflags);
@@ -580,13 +587,13 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 	return merged;
 
 error:
-	dev_printk(KERN_ERR,&spi->dev,
+	dev_err(&spi->dev,
 		"bcm2835dma_spi_message_to_dma_fragment: err=%i\n",
 		err);
 	spi_merged_dma_fragment_dump(
 		merged,
 		&msg->spi->dev,
-		0,0,
+		0,
 		&bcm2835_dma_link_dump
 		);
 	return NULL;
@@ -595,7 +602,7 @@ error:
 static int bcm2835dma_spi_transfer(struct spi_device *spi,
 				struct spi_message *message)
 {
-	int err=0;
+	int err = 0;
 	struct spi_merged_dma_fragment *merged;
 	struct spi_master *master = spi->master;
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
@@ -603,7 +610,7 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 
 	/* fetch DMA fragment */
 #ifdef SPI_HAVE_OPTIMIZE
-	if ((message->is_optimized) ) {
+	if ((message->is_optimized)) {
 		merged = message->state;
 	} else
 #endif
@@ -621,41 +628,40 @@ static int bcm2835dma_spi_transfer(struct spi_device *spi,
 
 	/* and execute the pre-transforms */
 	err = spi_merged_dma_fragment_execute_pre_dma_transforms(
-		merged,merged,GFP_ATOMIC);
+		merged, merged, GFP_ATOMIC);
 	if (err)
 		goto error;
 
 	if (unlikely(debug_dma & DEBUG_DMA_ASYNC)) {
-		dev_printk(KERN_INFO,&message->spi->dev,
+		dev_info(&message->spi->dev,
 			"Scheduling Message %pf fragment %pf\n",
-			message,merged);
+			message, merged);
 		if (debug_dma & DEBUG_DMA_ASYNC_DUMP_FRAGMENT) {
 			spi_merged_dma_fragment_dump(merged,
 						&message->spi->dev,
-						0,0,
+						0,
 						&bcm2835_dma_link_dump
 				);
 		}
 	}
 
 	/* statistics on message submission */
-	spin_lock_irqsave(&master->queue_lock,flags);
+	spin_lock_irqsave(&master->queue_lock, flags);
 	bs->count_spi_messages++;
 #ifdef SPI_HAVE_OPTIMIZE
-	if ((message->is_optimized) )
+	if ((message->is_optimized))
 		bs->count_spi_optimized_messages++;
 #endif
-	spin_unlock_irqrestore(&master->queue_lock,flags);
+	spin_unlock_irqrestore(&master->queue_lock, flags);
 
 	/* and schedule it */
-	if (merged) {
+	if (merged)
 		bcm2835dma_schedule_dma_fragment(message);
-	}
 
 	/* and return */
 	return 0;
 error:
-	dev_printk(KERN_ERR,&spi->dev,"spi_transfer_failed: %i",err);
+	dev_err(&spi->dev, "spi_transfer_failed: %i", err);
 	dma_fragment_release(&merged->dma_fragment);
 	return -EPERM;
 }
@@ -670,12 +676,14 @@ static int bcm2835dma_spi_message_optimize(struct spi_message *message)
 	if (!message->state)
 		return -ENOMEM;
 	if (unlikely(debug_dma & DEBUG_DMA_OPTIMIZE)) {
-		dev_printk(KERN_INFO,&message->spi->dev,
-			"Optimizing %pf %pf\n",message,message->state);
+		dev_info(&message->spi->dev,
+			"Optimizing %pf %pf\n",
+			message,
+			message->state);
 		if (debug_dma & DEBUG_DMA_OPTIMIZE_DUMP_FRAGMENT) {
 			spi_merged_dma_fragment_dump(message->state,
 						&message->spi->dev,
-						0,0,
+						0,
 						&bcm2835_dma_link_dump
 				);
 		}
@@ -687,10 +695,10 @@ static int bcm2835dma_spi_message_optimize(struct spi_message *message)
 static void bcm2835dma_spi_message_unoptimize(struct spi_message *msg)
 {
 	dma_fragment_release(msg->state);
-	msg->state=NULL;
+	msg->state = NULL;
 	if (unlikely(debug_dma&DEBUG_DMA_OPTIMIZE)) {
-		dev_printk(KERN_INFO,&msg->spi->dev,
-			"Unoptimizing %pf\n",msg);
+		dev_info(&msg->spi->dev,
+			"Unoptimizing %pf\n", msg);
 	}
 }
 #endif
@@ -700,36 +708,35 @@ static void bcm2835dma_release_dmachannel(struct spi_master *master,
 {
 	/* if no base, then we are not configured, so return */
 	if (!d->base)
-                return;
+		return;
 	/* reset the DMA */
-	writel(BCM2835_DMA_CS_RESET,d->base+BCM2835_DMA_CS);
-	writel(0,d->base+BCM2835_DMA_ADDR);
+	writel(BCM2835_DMA_CS_RESET, d->base+BCM2835_DMA_CS);
+	writel(0, d->base+BCM2835_DMA_ADDR);
 
 	/* release interrupt handler and dma */
 	if (d->handler)
-		free_irq(d->irq,master);
-        bcm_dma_chan_free(d->chan);
+		free_irq(d->irq, master);
+	bcm_dma_chan_free(d->chan);
 
 	/* release description */
-	if (d->desc)
-		kfree(d->desc);
+	kfree(d->desc);
 
 	/* cleanup structure */
-        d->base = NULL;
-	d->bus_addr=0;
-        d->chan = 0;
-        d->irq = 0;
-	d->handler=NULL;
-	d->desc=NULL;
+	d->base = NULL;
+	d->bus_addr = 0;
+	d->chan = 0;
+	d->irq = 0;
+	d->handler = NULL;
+	d->desc = NULL;
 }
 
 static int bcm2835dma_allocate_dmachannel(struct spi_master *master,
 					struct bcm2835_dmachannel *d,
 					irq_handler_t handler,
-					const char* desc
+					const char *desc
 	)
 {
-        int ret;
+	int ret;
 	size_t len;
 	/* fill in defaults */
 	d->base = NULL;
@@ -738,40 +745,41 @@ static int bcm2835dma_allocate_dmachannel(struct spi_master *master,
 	d->irq = 0;
 	d->handler = NULL;
 	d->desc = NULL;
-        /* register DMA channel */
+	/* register DMA channel */
 #ifdef CONFIG_MACH_BCM2708
-        ret = bcm_dma_chan_alloc(BCM_DMA_FEATURE_FAST,
-				(void**)&d->base, &d->irq);
+	ret = bcm_dma_chan_alloc(BCM_DMA_FEATURE_FAST,
+				(void **)&d->base, &d->irq);
 #else
 	/* TODO - use dmaengine allocate */
 	ret = -1;
 #endif
-        if (ret < 0) {
+	if (ret < 0) {
 		d->base = NULL;
 		d->chan = 0;
 		d->irq = 0;
-                dev_err(&master->dev,
+		dev_err(&master->dev,
 			"couldn't allocate a DMA channel\n");
-                return ret;
-        }
-        d->chan = ret;
+		return ret;
+	}
+	d->chan = ret;
 	if (handler)
 		dev_info(&master->dev,
 			"%s-DMA channel %d at address %pK with irq %d"
 			" and handler at %pf\n",
-			desc,d->chan, d->base, d->irq,handler);
+			desc, d->chan, d->base, d->irq, handler);
 	else
 		dev_info(&master->dev,
 			"%s-DMA channel %d at address %pK with irq %d"
 			" and no handler\n",
-			desc,d->chan, d->base, d->irq);
+			desc, d->chan, d->base, d->irq);
 	/* asign description */
-        len = strlen(dev_name(&master->dev)) + strlen(desc) + 2;
-	d->desc = kmalloc(len,GFP_KERNEL);
-	snprintf((char *)d->desc,len,"%s-%s",dev_name(&master->dev),desc);
+	len = strlen(dev_name(&master->dev)) + strlen(desc) + 2;
+	d->desc = kmalloc(len, GFP_KERNEL);
+	snprintf((char *)d->desc, len, "%s-%s",
+		dev_name(&master->dev), desc);
 	/* and reset the DMA - just in case */
-	writel(BCM2835_DMA_CS_RESET,d->base+BCM2835_DMA_CS);
-	writel(0,d->base+BCM2835_DMA_ADDR);
+	writel(BCM2835_DMA_CS_RESET, d->base+BCM2835_DMA_CS);
+	writel(0, d->base+BCM2835_DMA_ADDR);
 	/* and add the irq handler */
 	if (handler) {
 		ret = request_irq(d->irq,
@@ -782,7 +790,7 @@ static int bcm2835dma_allocate_dmachannel(struct spi_master *master,
 		if (ret) {
 			dev_err(&master->dev,
 				"could not request IRQ: %d\n", d->irq);
-			bcm2835dma_release_dmachannel(master,d);
+			bcm2835dma_release_dmachannel(master, d);
 			return ret;
 		}
 	}
@@ -791,16 +799,16 @@ static int bcm2835dma_allocate_dmachannel(struct spi_master *master,
 	/* calculate the bus_addr */
 	d->bus_addr = BCM2835_DMA_BASE_BUS(d->chan);
 	/* and return */
-        return 0;
+	return 0;
 }
 
 static void bcm2835dma_release_dma(struct spi_master *master)
 {
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 
-	bcm2835dma_release_dmachannel(master,&bs->dma_tx);
-	bcm2835dma_release_dmachannel(master,&bs->dma_rx);
-	bcm2835dma_release_dmachannel(master,&bs->dma_irq);
+	bcm2835dma_release_dmachannel(master, &bs->dma_tx);
+	bcm2835dma_release_dmachannel(master, &bs->dma_rx);
+	bcm2835dma_release_dmachannel(master, &bs->dma_irq);
 
 	bcm2835dma_release_dmafragment_components(master);
 }
@@ -811,21 +819,23 @@ static int bcm2835dma_allocate_dma(struct spi_master *master,
 	int err;
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	/* allocate DMA-channels */
-	err=bcm2835dma_allocate_dmachannel(
-		master,&bs->dma_tx,NULL,"tx");
+	err = bcm2835dma_allocate_dmachannel(
+		master, &bs->dma_tx, NULL, "txdma");
 	if (err)
 		goto error;
-	err=bcm2835dma_allocate_dmachannel(
-		master,&bs->dma_rx,NULL,"rx");
+	err = bcm2835dma_allocate_dmachannel(
+		master, &bs->dma_rx, NULL, "rxdma");
 	if (err)
 		goto error;
-	err=bcm2835dma_allocate_dmachannel(
-		master,&bs->dma_irq,bcm2835dma_spi_interrupt_dma_irq,"irq");
+	err = bcm2835dma_allocate_dmachannel(
+		master, &bs->dma_irq,
+		bcm2835dma_spi_interrupt_dma_irq,
+		"irqdma");
 	if (err)
 		goto error;
 
 	/* and register the dmafragment_caches */
-	err=bcm2835dma_register_dmafragment_components(master);
+	err = bcm2835dma_register_dmafragment_components(master);
 	if (!err)
 		return 0;
 error:
@@ -833,7 +843,8 @@ error:
 	return -ENOMEM;
 }
 
-static void bcm2835dma_set_gpio_mode(u8 pin,u32 mode) {
+static void bcm2835dma_set_gpio_mode(u8 pin, u32 mode)
+{
 	/* this is a bit of a hack, as there seems to be no official
 	   way of doing this... */
 	/* TODO - PINMUX */
@@ -843,58 +854,65 @@ static void bcm2835dma_set_gpio_mode(u8 pin,u32 mode) {
 	u32 *reg = &gpio[pin/10];
 	u8 shift = ((pin)%10)*3;
 	u32 v = *reg;
-	v &= ~( ((u32)(7)) << shift );
+	v &= ~(((u32)(7)) << shift);
 	v |= (mode & 7) << shift;
-	*reg= v;
+	*reg = v;
 	iounmap(gpio);
 }
 
-static int bcm2835dma_spi_init_pinmode(struct device *dev) {
+static int bcm2835dma_spi_init_pinmode(struct device *dev)
+{
 	int err;
-	err=devm_gpio_request_one(dev,BCM2835_SPI_GPIO_MISO,GPIOF_IN,
-			DRV_NAME":MISO");
+	err = devm_gpio_request_one(dev,
+				BCM2835_SPI_GPIO_MISO,
+				GPIOF_IN,
+				DRV_NAME":MISO");
 	if (err) {
-		printk(KERN_ERR DRV_NAME": problems requesting SPI:MISO"
-			" on GPIO %i - err %i\n",BCM2835_SPI_GPIO_MISO,
+		dev_err(dev, DRV_NAME": problems requesting SPI:MISO"
+			" on GPIO %i - err %i\n", BCM2835_SPI_GPIO_MISO,
 			err);
 		return err;
 	}
-	err=devm_gpio_request_one(dev,BCM2835_SPI_GPIO_MOSI,GPIOF_OUT_INIT_HIGH,
-			DRV_NAME":MOSI");
+	err = devm_gpio_request_one(dev,
+				BCM2835_SPI_GPIO_MOSI,
+				GPIOF_OUT_INIT_HIGH,
+				DRV_NAME":MOSI");
 	if (err) {
-		printk(KERN_ERR DRV_NAME": problems requesting SPI:MOSI"
-			" on GPIO %i - err %i\n",BCM2835_SPI_GPIO_MOSI,
+		dev_err(dev, DRV_NAME": problems requesting SPI:MOSI"
+			" on GPIO %i - err %i\n", BCM2835_SPI_GPIO_MOSI,
 			err);
 		goto error_miso;
 	}
-	err=devm_gpio_request_one(dev,BCM2835_SPI_GPIO_SCK,GPIOF_OUT_INIT_HIGH,
-			DRV_NAME":SCK");
+	err = devm_gpio_request_one(dev,
+				BCM2835_SPI_GPIO_SCK,
+				GPIOF_OUT_INIT_HIGH,
+				DRV_NAME":SCK");
 	if (err) {
-		printk(KERN_ERR DRV_NAME": problems requesting SPI:SCK"
-			"on GPIO %i - err %i\n",BCM2835_SPI_GPIO_SCK,
+		dev_err(dev, DRV_NAME": problems requesting SPI:SCK"
+			"on GPIO %i - err %i\n", BCM2835_SPI_GPIO_SCK,
 			err);
 		goto error_mosi;
 	}
 	/* SET modes to ALT0=4 - unfortunately there is not API for that...
 	* (which I found) */
-	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_MISO,4);
-	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_MOSI,4);
-	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_SCK, 4);
+	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_MISO, 4);
+	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_MOSI, 4);
+	bcm2835dma_set_gpio_mode(BCM2835_SPI_GPIO_SCK,  4);
 
 	return 0;
 error_mosi:
-	gpio_free(BCM2835_SPI_GPIO_MOSI);
+	devm_gpio_free(dev, BCM2835_SPI_GPIO_MOSI);
 error_miso:
-	gpio_free(BCM2835_SPI_GPIO_MISO);
+	devm_gpio_free(dev, BCM2835_SPI_GPIO_MISO);
 	return err;
 }
 
 static void bcm2835dma_spi_restore_pinmodes(struct device *dev)
 {
 	/* we assume this will reset the MODE */
-	devm_gpio_free(dev,BCM2835_SPI_GPIO_MISO);
-	devm_gpio_free(dev,BCM2835_SPI_GPIO_MOSI);
-	devm_gpio_free(dev,BCM2835_SPI_GPIO_SCK);
+	devm_gpio_free(dev, BCM2835_SPI_GPIO_MISO);
+	devm_gpio_free(dev, BCM2835_SPI_GPIO_MOSI);
+	devm_gpio_free(dev, BCM2835_SPI_GPIO_SCK);
 }
 
 static void bcm2835dma_cleanup_spi_device_data(
@@ -917,24 +935,25 @@ static void bcm2835dma_spi_cleanup(struct spi_device *spi)
 	/* release the memory and GPIO allocated for the SPI device */
 	if (data) {
 		bcm2835dma_cleanup_spi_device_data(data);
-		spi_set_ctldata(spi,NULL);
+		spi_set_ctldata(spi, NULL);
 	}
 }
 
-static int bcm2835dma_spi_setup(struct spi_device *spi) {
-	struct spi_master * master = spi->master;
+static int bcm2835dma_spi_setup(struct spi_device *spi)
+{
+	struct spi_master *master = spi->master;
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	struct bcm2835dma_spi_device_data *data;
 	u32 tmp;
 	int err;
 
 	/* allocate data - if not allocated yet */
-	data=spi_get_ctldata(spi);
+	data = spi_get_ctldata(spi);
 	if (!data) {
-		data=kzalloc(sizeof(*data),GFP_KERNEL);
+		data = kzalloc(sizeof(*data), GFP_KERNEL);
 		if (!data)
 			return -ENOMEM;
-		spi_set_ctldata(spi,data);
+		spi_set_ctldata(spi, data);
 		list_add(&data->spi_device_data_chain,
 			&bs->spi_device_data_chain);
 	}
@@ -943,9 +962,15 @@ static int bcm2835dma_spi_setup(struct spi_device *spi) {
 		data->cs_gpio = spi->cs_gpio;
 	} else {
 		switch (spi->chip_select) {
-		case 0:  data->cs_gpio = BCM2835_SPI_GPIO_CS0 ; break;
-		case 1:  data->cs_gpio = BCM2835_SPI_GPIO_CS1 ; break;
-		default: data->cs_gpio = spi->chip_select     ; break;
+		case 0:
+			data->cs_gpio = BCM2835_SPI_GPIO_CS0;
+			break;
+		case 1:
+			data->cs_gpio = BCM2835_SPI_GPIO_CS1;
+			break;
+		default:
+			data->cs_gpio = spi->chip_select;
+			break;
 		}
 	}
 
@@ -961,9 +986,11 @@ static int bcm2835dma_spi_setup(struct spi_device *spi) {
 				" as it is conflicting with the"
 				" standard SPI lines\n",
 				data->cs_gpio);
-			err=-EPERM;
+			err = -EPERM;
 			goto error_free;
-		default: break;
+			break;
+		default:
+			break;
 		}
 	}
 
@@ -975,8 +1002,8 @@ static int bcm2835dma_spi_setup(struct spi_device *spi) {
 	data->cs_select_gpio_reg = BCM2835_REG_GPIO_OUTPUT_SET_BASE_BUS
 		+ 4 * (data->cs_gpio >> 5);
 	/* and create the name for the gpio */
-	snprintf(data->cs_name,sizeof(data->cs_name),
-		DRV_NAME":CS%i",spi->chip_select);
+	snprintf(data->cs_name, sizeof(data->cs_name),
+		DRV_NAME":CS%i", spi->chip_select);
 
 	/* based od SPI_CS configure the registers */
 	if (spi->mode & SPI_CS_HIGH) {
@@ -985,7 +1012,8 @@ static int bcm2835dma_spi_setup(struct spi_device *spi) {
 			(BCM2835_REG_GPIO_OUTPUT_CLEAR_BASE_BUS
 				- BCM2835_REG_GPIO_OUTPUT_SET_BASE_BUS);
 		/* request the GPIO with correct defaults*/
-		err=gpio_request_one(data->cs_gpio,GPIOF_OUT_INIT_LOW,
+		err = gpio_request_one(data->cs_gpio,
+				GPIOF_OUT_INIT_LOW,
 				data->cs_name);
 		if (err)
 			goto error_gpio;
@@ -995,16 +1023,16 @@ static int bcm2835dma_spi_setup(struct spi_device *spi) {
 			(BCM2835_REG_GPIO_OUTPUT_CLEAR_BASE_BUS
 				- BCM2835_REG_GPIO_OUTPUT_SET_BASE_BUS);
 		/* request the GPIO */
-		err=gpio_request_one(data->cs_gpio,GPIOF_OUT_INIT_HIGH,
+		err = gpio_request_one(data->cs_gpio,
+				GPIOF_OUT_INIT_HIGH,
 				data->cs_name);
 		if (err)
 			goto error_gpio;
 	}
 
 	/* and the CS register values used to configure SPI */
-	tmp=
-		BCM2835_SPI_CS_TA
-	        | BCM2835_SPI_CS_CS_01
+	tmp = BCM2835_SPI_CS_TA
+		| BCM2835_SPI_CS_CS_01
 		| BCM2835_SPI_CS_CS_10
 		| ((spi->mode & SPI_CPOL) ? BCM2835_SPI_CS_CPOL : 0)
 		| ((spi->mode & SPI_CPHA) ? BCM2835_SPI_CS_CPHA : 0)
@@ -1022,11 +1050,11 @@ static int bcm2835dma_spi_setup(struct spi_device *spi) {
 	return 0;
 
 error_gpio:
-	dev_err(&spi->dev,"Error allocating GPIO%i - error %i\n"
-		,data->cs_gpio,err);
+	dev_err(&spi->dev, "Error allocating GPIO%i - error %i\n",
+		data->cs_gpio, err);
 error_free:
 	kfree(data);
-	dev_set_drvdata(&spi->dev,NULL);
+	dev_set_drvdata(&spi->dev, NULL);
 	return err;
 }
 
@@ -1120,7 +1148,7 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 		goto out_release_gpio;
 	}
 
-	err = bcm2835dma_allocate_dma(master,pdev);
+	err = bcm2835dma_allocate_dma(master, pdev);
 	if (err) {
 		dev_err(&pdev->dev,
 			"could not register SPI master: %d\n",
@@ -1134,10 +1162,10 @@ static int bcm2835dma_spi_probe(struct platform_device *pdev)
 		BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX,
 		bs->spi_regs+BCM2835_SPI_CS);
 
-        bs->stats_attr.attr.name = "stats";
-        bs->stats_attr.attr.mode = S_IRUSR | S_IWUSR ;
-        bs->stats_attr.show      = bcm2835dma_sysfs_show_stats;
-        bs->stats_attr.store     = bcm2835dma_sysfs_triggerdump;
+	bs->stats_attr.attr.name = "stats";
+	bs->stats_attr.attr.mode = S_IRUSR | S_IWUSR;
+	bs->stats_attr.show      = bcm2835dma_sysfs_show_stats;
+	bs->stats_attr.store     = bcm2835dma_sysfs_triggerdump;
 	err = device_create_file(&master->dev, &bs->stats_attr);
 	if (err)
 		goto out_release_dma;
@@ -1165,13 +1193,13 @@ static int bcm2835dma_spi_remove(struct platform_device *pdev)
 	 * cleanup does not get called on the spi_device when unloading
 	 * the module
 	 */
-	while( !list_empty(&bs->spi_device_data_chain)) {
+	while (!list_empty(&bs->spi_device_data_chain)) {
 		struct bcm2835dma_spi_device_data *data
 			= list_first_entry(&bs->spi_device_data_chain,
-                                        typeof(*data),
+					typeof(*data),
 					spi_device_data_chain);
 		bcm2835dma_cleanup_spi_device_data(data);
-        }
+	}
 
 	/* release pool - also releases all objects */
 	bcm2835dma_release_dma(master);
@@ -1204,14 +1232,14 @@ MODULE_DEVICE_TABLE(of, bcm2835dma_spi_match);
 /* and "normal" aliases */
 #ifdef CONFIG_MACH_BCM2708
 static const struct platform_device_id bcm2835dma_id_table[] = {
-        { "bcm2835_spi", 2835 },
-        { "bcm2708_spi", 2708 },
-        { },
+	{ "bcm2835_spi", 2835 },
+	{ "bcm2708_spi", 2708 },
+	{ },
 };
 #endif
 
 static struct platform_driver bcm2835dma_spi_driver = {
-	.driver		= {
+	.driver	        = {
 		.name		= DRV_NAME,
 		.owner		= THIS_MODULE,
 		.of_match_table	= bcm2835dma_spi_match,
@@ -1219,7 +1247,7 @@ static struct platform_driver bcm2835dma_spi_driver = {
 	.probe		= bcm2835dma_spi_probe,
 	.remove		= bcm2835dma_spi_remove,
 #ifdef CONFIG_MACH_BCM2708
-        .id_table = bcm2835dma_id_table,
+	.id_table       = bcm2835dma_id_table,
 #endif
 };
 module_platform_driver(bcm2835dma_spi_driver);

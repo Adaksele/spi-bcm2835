@@ -28,42 +28,42 @@
 
 /* the DMA registers and their bitflags */
 #define BCM2835_DMA_CS                                  0x00
-#define BCM2835_DMA_CS_ACTIVE				(1 << 0)
-#define BCM2835_DMA_CS_END				(1 << 1)
-#define BCM2835_DMA_CS_INT				(1 << 2)
-#define BCM2835_DMA_CS_DREQ				(1 << 3)
-#define BCM2835_DMA_CS_ISPAUSED				(1 << 4)
-#define BCM2835_DMA_CS_ISHELD				(1 << 5)
-#define BCM2835_DMA_CS_WAITING_FOR_OUTSTANDING_WRITES	(1 << 6)
+#define BCM2835_DMA_CS_ACTIVE				(1 <<  0)
+#define BCM2835_DMA_CS_END				(1 <<  1)
+#define BCM2835_DMA_CS_INT				(1 <<  2)
+#define BCM2835_DMA_CS_DREQ				(1 <<  3)
+#define BCM2835_DMA_CS_ISPAUSED				(1 <<  4)
+#define BCM2835_DMA_CS_ISHELD				(1 <<  5)
+#define BCM2835_DMA_CS_WAITING_FOR_OUTSTANDING_WRITES	(1 <<  6)
 /* bit 7: reserved */
-#define BCM2835_DMA_CS_ERR				(1 << 8)
+#define BCM2835_DMA_CS_ERR				(1 <<  8)
 /* bit 9-15: reserved */
-#define BCM2835_DMA_CS_PRIORITY(x)			(((x)&0x0f) <<16)
-#define BCM2835_DMA_CS_PANICPRIORITY(x)			(((x)&0x0f) <<20)
+#define BCM2835_DMA_CS_PRIORITY(x)			(((x)&0x0f) << 16)
+#define BCM2835_DMA_CS_PANICPRIORITY(x)			(((x)&0x0f) << 20)
 /* bit 24-27: reserved */
-#define BCM2835_DMA_CS_WAIT_FOR_OUTSTANDING_WRITES	(1 <<28)
-#define BCM2835_DMA_CS_DISDEBUG				(1 <<29)
-#define BCM2835_DMA_CS_ABORT				(1 <<30)
-#define BCM2835_DMA_CS_RESET				(1 <<31)
+#define BCM2835_DMA_CS_WAIT_FOR_OUTSTANDING_WRITES	(1 << 28)
+#define BCM2835_DMA_CS_DISDEBUG				(1 << 29)
+#define BCM2835_DMA_CS_ABORT				(1 << 30)
+#define BCM2835_DMA_CS_RESET				(1 << 31)
 
 #define BCM2835_DMA_ADDR                                0x04
 #define BCM2835_DMA_TI                                  0x08
-#define BCM2835_DMA_TI_INT_EN				(1 << 0)
-#define BCM2835_DMA_TI_TDMODE				(1 << 1)
-#define BCM2835_DMA_TI_RESERVED				(1 << 2)
-#define BCM2835_DMA_TI_WAIT_RESP		       	(1 << 3)
-#define BCM2835_DMA_TI_D_INC				(1 << 4)
-#define BCM2835_DMA_TI_D_WIDTH				(1 << 5)
-#define BCM2835_DMA_TI_D_DREQ				(1 << 6)
-#define BCM2835_DMA_TI_D_IGNORE				(1 << 7)
-#define BCM2835_DMA_TI_S_INC				(1 << 8)
-#define BCM2835_DMA_TI_S_WIDTH				(1 << 9)
-#define BCM2835_DMA_TI_S_DREQ				(1 <<10)
-#define BCM2835_DMA_TI_S_IGNORE				(1 <<11)
-#define BCM2835_DMA_TI_BURST(x)				(((x)&0x0f) <<12)
-#define BCM2835_DMA_TI_PER_MAP(x)		       	(((x)&0x1f) <<16)
-#define BCM2835_DMA_TI_WAITS(x)				(((x)&0x1f) <<21)
-#define BCM2835_DMA_TI_NO_WIDE_BURSTS			(1 <<26)
+#define BCM2835_DMA_TI_INT_EN				(1 <<  0)
+#define BCM2835_DMA_TI_TDMODE				(1 <<  1)
+#define BCM2835_DMA_TI_RESERVED				(1 <<  2)
+#define BCM2835_DMA_TI_WAIT_RESP			(1 <<  3)
+#define BCM2835_DMA_TI_D_INC				(1 <<  4)
+#define BCM2835_DMA_TI_D_WIDTH				(1 <<  5)
+#define BCM2835_DMA_TI_D_DREQ				(1 <<  6)
+#define BCM2835_DMA_TI_D_IGNORE				(1 <<  7)
+#define BCM2835_DMA_TI_S_INC				(1 <<  8)
+#define BCM2835_DMA_TI_S_WIDTH				(1 <<  9)
+#define BCM2835_DMA_TI_S_DREQ				(1 << 10)
+#define BCM2835_DMA_TI_S_IGNORE				(1 << 11)
+#define BCM2835_DMA_TI_BURST(x)				(((x)&0x0f) << 12)
+#define BCM2835_DMA_TI_PER_MAP(x)			(((x)&0x1f) << 16)
+#define BCM2835_DMA_TI_WAITS(x)				(((x)&0x1f) << 21)
+#define BCM2835_DMA_TI_NO_WIDE_BURSTS			(1 << 26)
 /* bit 27-31: reserved */
 
 #define BCM2835_DMA_S_ADDR                              0x0C
@@ -109,9 +109,9 @@
 #define BCM2835_REG_DMA0_BASE_BUS              0x7E007000
 #define BCM2835_REG_DMA15_BASE_BUS             0x7EE05000
 
-#define BCM2835_DMA_BASE_BUS(channel)			\
-	(channel==15) ? BCM2835_REG_DMA15_BASE_BUS	\
-	: BCM2835_REG_DMA0_BASE_BUS + 256*channel
+#define BCM2835_DMA_BASE_BUS(channel)				\
+	((channel == 15) ? BCM2835_REG_DMA15_BASE_BUS		\
+		: BCM2835_REG_DMA0_BASE_BUS + 256*channel)
 
 /**
  * struct bcm2835_dma_cb the DMA control block
@@ -145,18 +145,19 @@ static inline u32 bcm2835_dma_cb_compose_stride(
 	s16 src_stride, s16 dst_stride)
 {
 	struct bcm2835_dma_cb_stride tmp;
-	tmp.src=src_stride;
-	tmp.dst=dst_stride;
-	return *((u32*)&tmp);
+	tmp.src = src_stride;
+	tmp.dst = dst_stride;
+	return *((u32 *)&tmp);
 }
 
-#define DIRECT_UNCACHED_BITS 0xC0000000
 static inline int bcm2835_link_dma_link(
 	struct dma_link *from, struct dma_link *to)
 {
 	dma_addr_t next = (to) ? to->cb_dma : 0;
 	writel(next,
 		&((struct bcm2835_dma_cb *)from->cb)->next);
+	/* add a barrier here */
+	dsb();
 	return 0;
 }
 
@@ -173,11 +174,11 @@ void bcm2835_dma_cb_dump(
 	int tindent);
 
 int bcm2835_dma_reg_dump_str(
-	void *base,int tindent,
+	void *base, int tindent,
 	char *buffer, size_t size);
 
 void bcm2835_dma_reg_dump(
-	void* base,
+	void *base,
 	struct device *dev,
 	int tindent);
 
@@ -190,11 +191,12 @@ static inline void bcm2835_dma_link_dump(
 	bcm2835_dma_cb_dump(
 		link->cb,
 		link->cb_dma,
-		dev,tindent);
+		dev,
+		tindent);
 }
 
-#define BCM2835_DMA_CB_MEMBER_DMA_ADDR(link,member)	\
-	( link->cb_dma + offsetof(struct bcm2835_dma_cb,member))
+#define BCM2835_DMA_CB_MEMBER_DMA_ADDR(link, member)	\
+	(link->cb_dma + offsetof(struct bcm2835_dma_cb, member))
 
 /* delay function definitions to get a certain delay via DMA only */
 /* empirical measurements of 3 DMAs (set GPIO, delay_length,clear GPIO)
@@ -295,11 +297,11 @@ happens.
 #define BCM2835_DMA_UDELAY_SLOPE     889
 
 static inline void dump_dma_regs(
-	struct device* dev,
-	const char* str,
+	struct device *dev,
+	const char *str,
 	void __iomem *base)
 {
-	dev_printk(KERN_INFO,dev,
+	dev_info(dev,
 		"%s:%08x %08x %08x %08x %08x %08x\n",
 		str,
 		readl(base+BCM2835_DMA_CS),

@@ -42,8 +42,8 @@
 struct bcm2835_dmachannel {
 	void __iomem *base;
 	dma_addr_t bus_addr;
-        int chan;
-        int irq;
+	int chan;
+	int irq;
 	irq_handler_t handler;
 	const char *desc;
 };
@@ -101,7 +101,7 @@ struct bcm2835dma_spi {
 	/* the device configs list */
 	struct list_head spi_device_data_chain;
 	/* the device statistics */
-        struct device_attribute stats_attr;
+	struct device_attribute stats_attr;
 	u64 count_scheduled_msg_dma_restarted;
 	u64 count_scheduled_msg_dma_running;
 	u64 count_spi_messages;
@@ -111,8 +111,8 @@ struct bcm2835dma_spi {
 	const char *last_dma_schedule_type;
 };
 
-int bcm2835dma_register_dmafragment_components(struct spi_master*);
-void bcm2835dma_release_dmafragment_components(struct spi_master*);
+int bcm2835dma_register_dmafragment_components(struct spi_master *);
+void bcm2835dma_release_dmafragment_components(struct spi_master *);
 
 /* the interrupt-handlers */
 irqreturn_t bcm2835dma_spi_interrupt_dma_tx(int irq, void *dev_id);
@@ -133,7 +133,7 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
  * dmalink_to_cb - casts dma_link to a control_block
  * @dmalink: the dmalink to use
  */
-static inline struct bcm2835_dma_cb * dma_link_to_cb(
+static inline struct bcm2835_dma_cb *dma_link_to_cb(
 	struct dma_link *link)
 {
 	return (struct bcm2835_dma_cb *)(link->cb);
@@ -145,6 +145,6 @@ static inline struct bcm2835_dma_cb * dma_link_to_cb(
  * @second: the dma_link that is being linked to the first
  */
 static inline void link_dma_link(struct dma_link *first,
-				struct dma_link * second) {
+				struct dma_link *second) {
 	dma_link_to_cb(first)->next = second->cb_dma;
 }
