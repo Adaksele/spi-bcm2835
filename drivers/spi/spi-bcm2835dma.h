@@ -26,7 +26,7 @@
  */
 
 #include <linux/spi/spi-dmafragment.h>
-#include <linux/dma/bcm2835-dma.h>
+#include <linux/dma/bcm2835-dmafragment.h>
 #include <linux/spi/bcm2835.h>
 #include <linux/interrupt.h>
 #include <linux/spi/spi.h>

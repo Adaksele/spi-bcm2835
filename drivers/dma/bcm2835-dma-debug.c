@@ -18,7 +18,7 @@
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  *
  */
-#include <linux/dma/bcm2835-dma.h>
+#include <linux/dma/bcm2835-dmafragment.h>
 #include <linux/printk.h>
 #include <linux/module.h>
 #include <asm/io.h>
