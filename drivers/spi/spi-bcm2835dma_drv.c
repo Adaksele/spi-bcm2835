@@ -38,6 +38,7 @@
  */
 #include "spi-bcm2835dma.h"
 
+#include <linux/version.h>
 #include <linux/clk.h>
 #include <linux/completion.h>
 #include <linux/delay.h>
@@ -58,6 +59,12 @@
 #define SPI_TIMEOUT_MS	3000
 
 #define DRV_NAME	"spi-bcm2835dma"
+
+#ifndef list_last_entry
+#define list_last_entry(ptr, type, member) \
+         list_entry((ptr)->prev, type, member)
+#endif
+
 
 /* module parameter to dump the dma transforms */
 int debug_dma = 0;
@@ -110,8 +117,9 @@ static void set_high2(void)
 	gpio[0x1C/4] = debugpin2;
 }
 
+#ifdef SPI_HAVE_OPTIMIZE
 static void bcm2835dma_spi_message_unoptimize(struct spi_message *msg);
-
+#endif
 
 /* schedule a DMA fragment on a specific DMA channel
  * this could probably get executed via the dma-engine...
@@ -196,9 +204,8 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 		/* and release fragment - if not optimized */
 #ifdef SPI_HAVE_OPTIMIZE
 		if ((!msg->is_optimized) && (use_optimize))
-#endif
 				bcm2835dma_spi_message_unoptimize(msg);
-
+#endif
 		/* call the complete call */
 		if (msg->complete)
 			msg->complete(msg->context);
@@ -499,12 +506,14 @@ struct spi_merged_dma_fragment *bcm2835dma_spi_message_to_dma_fragment(
 			if (merged->last_transfer->speed_hz
 				!= xfer->speed_hz)
 				merged->needs_spi_setup = 1;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,12,0)
 			else if (merged->last_transfer->tx_nbits
 				!= xfer->tx_nbits)
 				merged->needs_spi_setup = 1;
 			else if (merged->last_transfer->rx_nbits
 				!= xfer->rx_nbits)
 				merged->needs_spi_setup = 1;
+#endif
 			else if (merged->last_transfer->bits_per_word
 				!= xfer->bits_per_word)
 				merged->needs_spi_setup = 1;
