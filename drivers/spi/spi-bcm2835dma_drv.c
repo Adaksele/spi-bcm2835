@@ -953,6 +953,8 @@ static int bcm2835dma_spi_setup(struct spi_device *spi)
 	struct spi_master *master = spi->master;
 	struct bcm2835dma_spi *bs = spi_master_get_devdata(master);
 	struct bcm2835dma_spi_device_data *data;
+	u32 level;
+	bool needs_gpioalloc=0;
 	u32 tmp;
 	int err;
 
@@ -965,6 +967,7 @@ static int bcm2835dma_spi_setup(struct spi_device *spi)
 		spi_set_ctldata(spi, data);
 		list_add(&data->spi_device_data_chain,
 			&bs->spi_device_data_chain);
+		needs_gpioalloc=1;
 	}
 	/* calculate the real GPIO to use */
 	if (spi->master->cs_gpios) {
@@ -1020,23 +1023,26 @@ static int bcm2835dma_spi_setup(struct spi_device *spi)
 		data->cs_deselect_gpio_reg +=
 			(BCM2835_REG_GPIO_OUTPUT_CLEAR_BASE_BUS
 				- BCM2835_REG_GPIO_OUTPUT_SET_BASE_BUS);
-		/* request the GPIO with correct defaults*/
-		err = gpio_request_one(data->cs_gpio,
-				GPIOF_OUT_INIT_LOW,
-				data->cs_name);
-		if (err)
-			goto error_gpio;
+		level=GPIOF_OUT_INIT_LOW;
 	} else {
 		/* set the registers accordingly */
 		data->cs_select_gpio_reg +=
 			(BCM2835_REG_GPIO_OUTPUT_CLEAR_BASE_BUS
 				- BCM2835_REG_GPIO_OUTPUT_SET_BASE_BUS);
-		/* request the GPIO */
-		err = gpio_request_one(data->cs_gpio,
-				GPIOF_OUT_INIT_HIGH,
-				data->cs_name);
+		level=GPIOF_OUT_INIT_LOW;
+	}
+	/* request the GPIO with correct defaults*/
+	if (needs_gpioalloc) {
+		err = gpio_request_one(
+			data->cs_gpio,
+			level,
+			data->cs_name);
 		if (err)
 			goto error_gpio;
+	} else {
+		/* set level as requested */
+		gpio_set_value(data->cs_gpio,
+			(level == GPIOF_OUT_INIT_HIGH));
 	}
 
 	/* and the CS register values used to configure SPI */
