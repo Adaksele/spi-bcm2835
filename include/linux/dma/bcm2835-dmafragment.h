@@ -313,4 +313,25 @@ static inline void dump_dma_regs(
 		);
 }
 
+
+struct dma_link * bcm2835_addDMAPoke(dma_addr_t addr,
+				u32 val,
+				struct dma_fragment *frag);
+struct dma_link * bcm2835_addDMAPoke2(dma_addr_t addr,
+				u32 val1,  u32 val2,
+				struct dma_fragment *frag);
+dma_addr_t* bcm2835_getDMAPokeReg(struct dma_link *link);
+u32* bcm2835_getDMAPokeVal(struct dma_link *link);
+
+struct dma_link *bcm2835_addDMADelay(u32 udelay);
+int bcm2835_setDMADelay(struct dma_link *link, u32 udelay);
+
+struct dma_link *bcm2835_addTransfer(
+	dma_addr_t src, dma_addr_t dst,u32 length);
+int bcm2835_setTransfer(
+	dma_addr_t src, dma_addr_t dst,u32 length);
+
+
+
+
 #endif /* __BCM2835_DMA_H */

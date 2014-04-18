@@ -49,24 +49,26 @@ static int bcm2835_dma_param_set_debug_dma(
 	if (debug_dma > 15)
 		return -ENODEV;
 	if (debug_dma == 15)
-		cbaddr = BCM2835_REG_DMA15_BASE_BUS - 0x7E000000;
+		cbaddr = BCM2835_REG_DMA15_BASE_BUS - 0x5E000000;
 	else
-		cbaddr = BCM2835_REG_DMA0_BASE_BUS - 0x7E000000
+		cbaddr = BCM2835_REG_DMA0_BASE_BUS - 0x5E000000
 			+ (debug_dma << 8);
 
 	/* get the control registers adresses for access */
+	printk(KERN_INFO "XXX %i - %08x\n",debug_dma,cbaddr);
 	base = ioremap(cbaddr, SZ_16K);
+	printk(KERN_INFO "YYY %pf\n",base);
 	if (!base)
 		return -EPERM;
 	/* start dumping DMA */
 	/* maybe we should stop it first ?*/
-	pr_info("Dumping DMA %i at bus address %pf\n",
+	printk(KERN_INFO "Dumping DMA %i at bus address %pf\n",
 		debug_dma, base);
 	bcm2835_dma_reg_dump_str(
 		base, 1,
 		buffer, sizeof(buffer)
 		);
-	pr_info("%s", buffer);
+	printk(KERN_INFO "%s", buffer);
 
 	/* get the control-block that is there right now */
 	cbaddr = readl(base + BCM2835_DMA_ADDR);

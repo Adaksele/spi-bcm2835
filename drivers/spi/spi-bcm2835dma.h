@@ -106,9 +106,11 @@ struct bcm2835dma_spi {
 	u64 count_scheduled_msg_dma_running;
 	u64 count_spi_messages;
 	u64 count_spi_optimized_messages;
+	u64 count_completed_on_retry;
 	u64 count_dma_interrupts;
 
 	const char *last_dma_schedule_type;
+	void (*last_complete)(void *);
 };
 
 int bcm2835dma_register_dmafragment_components(struct spi_master *);
