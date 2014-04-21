@@ -47,7 +47,6 @@ int spi_merged_dma_fragment_merge_fragment_cache(
 	err = dma_fragment_add_subfragment(
 		frag,
 		&merged->dma_fragment,
-		merged->link_dma_link,
 		gfpflags
 		);
 	if (err)
@@ -84,73 +83,12 @@ void spi_merged_dma_fragment_dump(
 			struct device *, int)
 	)
 {
-	int i;
-	struct dma_fragment_transform *transform;
 
 	dma_fragment_dump(&fragment->dma_fragment, dev,
 			tindent, dma_cb_dump);
 	tindent++;
-
-	/* dump the individual dma_fragment_transforms */
-	dev_info(dev, "%spre-DMA-Transforms:\n",
-		_tab_indent(tindent));
-	i = 0;
-	list_for_each_entry(transform,
-			&fragment->transform_pre_dma_list,
-			transform_list) {
-		dev_info(dev, "%spre-DMA-Transform %i:\n",
-			_tab_indent(tindent+1),
-			i++);
-		dma_fragment_transform_dump(transform, dev, tindent+2);
-	}
-	/* dump the individual dma_fragment_transforms */
-	dev_info(dev, "%spost-DMA-Transforms:\n",
-		_tab_indent(tindent));
-	i = 0;
-	list_for_each_entry(transform,
-			&fragment->transform_post_dma_list,
-			transform_list) {
-		dev_info(dev, "%spost-DMA-Transform %i:\n",
-			_tab_indent(tindent+1),
-			i++);
-		dma_fragment_transform_dump(transform, dev, tindent+2);
-	}
-	dev_info(dev, "%s\tcomplete_data_ptr: %pf\n",
-		_tab_indent(tindent-1),
-		fragment->complete_data
-		);
 }
 EXPORT_SYMBOL_GPL(spi_merged_dma_fragment_dump);
-
-void spi_merged_dma_fragment_release(
-	struct dma_fragment *frag, int releasetocache)
-{
-	struct spi_merged_dma_fragment *merged = (typeof(merged))frag;
-	struct dma_fragment_transform *transform;
-
-	/* remove all the dma_fragment_transforms belonging to us */
-	while (!list_empty(&merged->transform_pre_dma_list)) {
-		transform = list_first_entry(
-			&merged->transform_pre_dma_list,
-			typeof(*transform),
-			transform_list);
-		list_del_init(&transform->transform_list);
-		dma_fragment_transform_free(transform);
-	}
-	/* remove all the dma_fragment_transforms belonging to us */
-	while (!list_empty(&merged->transform_post_dma_list)) {
-		transform = list_first_entry(
-			&merged->transform_post_dma_list,
-			typeof(*transform),
-			transform_list);
-		list_del_init(&transform->transform_list);
-		dma_fragment_transform_free(transform);
-	}
-	/* if we are not released to cache, then free us */
-	if (!releasetocache)
-		kfree(frag);
-}
-EXPORT_SYMBOL_GPL(spi_merged_dma_fragment_release);
 
 MODULE_DESCRIPTION("spi specific dma-fragment infrastructure");
 MODULE_AUTHOR("Martin Sperl <kernel@martin.sperl.org>");

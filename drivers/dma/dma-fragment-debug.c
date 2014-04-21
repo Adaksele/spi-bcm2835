@@ -171,8 +171,8 @@ void dma_fragment_dump(
 		dev_info(dev, "%sdescr:\t%s\n",	indent, fragment->desc);
 	dev_info(dev, "%slink_h:\t%pK\n", indent, fragment->link_head);
 	dev_info(dev, "%slink_t:\t%pK\n", indent, fragment->link_tail);
-	dev_info(dev, "%srelease:\t%pK\n", indent,
-		fragment->release_fragment);
+	dev_info(dev, "%slinc_frag:\t%pK\n", indent,
+		fragment->link_fragment);
 	/* dump extra data */
 	if (sizeof(*fragment) < fragment->size)
 		_dump_extra_data(
@@ -205,13 +205,26 @@ void dma_fragment_dump(
 	}
 
 	/* dump the individual dma_fragment_transforms */
-	if (!list_empty(&fragment->transform_list)) {
-		dev_info(dev, "%sDMA-Transforms:\n", indent);
+	if (!list_empty(&fragment->pre_dma_transform_list)) {
+		dev_info(dev, "%spre-DMA-Transforms:\n", indent);
 		i = 0;
 		list_for_each_entry(transform,
-				&fragment->transform_list,
+				&fragment->pre_dma_transform_list,
 				transform_list) {
-			dev_info(dev, "%sDMA-Transform %i:\n",
+			dev_info(dev, "%spre-DMA-Transform %i:\n",
+				_tab_indent(tindent+1), i++);
+			dma_fragment_transform_dump(
+				transform, dev, tindent+2);
+		}
+	}
+	/* dump the individual dma_fragment_transforms */
+	if (!list_empty(&fragment->post_dma_transform_list)) {
+		dev_info(dev, "%spost-DMA-Transforms:\n", indent);
+		i = 0;
+		list_for_each_entry(transform,
+				&fragment->post_dma_transform_list,
+				transform_list) {
+			dev_info(dev, "%spost-DMA-Transform %i:\n",
 				_tab_indent(tindent+1), i++);
 			dma_fragment_transform_dump(
 				transform, dev, tindent+2);

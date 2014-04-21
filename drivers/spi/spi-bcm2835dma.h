@@ -94,12 +94,12 @@ struct bcm2835dma_spi {
 	struct dma_fragment_cache fragment_merged;
 	struct dma_fragment_cache fragment_setup_spi;
 	struct dma_fragment_cache fragment_transfer;
-	struct dma_fragment_cache fragment_cs_deselect;
+	struct dma_fragment_cache fragment_cs_deselect_delay;
 	struct dma_fragment_cache fragment_delay;
-	struct dma_fragment_cache fragment_trigger_irq;
-	struct dma_fragment_cache fragment_message_finished;
+
 	/* the device configs list */
 	struct list_head spi_device_data_chain;
+
 	/* the device statistics */
 	struct device_attribute stats_attr;
 	u64 count_scheduled_msg_dma_restarted;

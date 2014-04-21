@@ -50,13 +50,9 @@
  * @need_spi_setup: marks that we need to schedule an spi_setup prior
  *    to a new transfer
  * @link_dma_link: dma control-block linking function pointer.
- * @complete_data: TODO
  */
 struct spi_merged_dma_fragment {
 	struct dma_fragment dma_fragment;
-
-	struct list_head transform_pre_dma_list;
-	struct list_head transform_post_dma_list;
 
 	/* message for which this is prepared */
 	struct spi_message *message;
@@ -67,46 +63,16 @@ struct spi_merged_dma_fragment {
 	struct spi_transfer *last_transfer;
 
 	bool needs_spi_setup;
-
-	/* and the link function*/
-	int (*link_dma_link)(struct dma_link *, struct dma_link *);
-
-	void *complete_data;
 };
-
-void spi_merged_dma_fragment_release(
-	struct dma_fragment *frag, int releasetocache);
-
-static inline void spi_merged_dma_fragment_init(
-	struct spi_merged_dma_fragment *frag,
-	int (*link_dma_link)(struct dma_link *, struct dma_link *),
-	size_t size
-	)
-{
-	dma_fragment_init(&frag->dma_fragment, size, 0);
-
-	INIT_LIST_HEAD(&frag->transform_pre_dma_list);
-	INIT_LIST_HEAD(&frag->transform_post_dma_list);
-
-	frag->link_dma_link = link_dma_link;
-	frag->dma_fragment.release_fragment =
-		&spi_merged_dma_fragment_release;
-}
 
 static inline
 struct spi_merged_dma_fragment *spi_merged_dma_fragment_alloc(
-	int (*link_dma_link)(struct dma_link *, struct dma_link *),
 	size_t size, gfp_t gfpflags)
 {
 	struct spi_merged_dma_fragment *frag;
 	size = max(size, sizeof(*frag));
 
-	frag = kzalloc(size, gfpflags);
-	if (frag)
-		spi_merged_dma_fragment_init(
-			frag,
-			link_dma_link,
-			size);
+	frag = (typeof(frag))dma_fragment_alloc(size,NULL, gfpflags);
 
 	return frag;
 }
@@ -127,19 +93,6 @@ void spi_merged_dma_fragment_dump(
 			struct device *, int)
 	);
 
-static inline void spi_merged_dma_fragment_add_dma_fragment_transform(
-	struct spi_merged_dma_fragment *frag,
-	struct dma_fragment_transform *transform,
-	int post)
-{
-	if (post)
-		list_add_tail(&transform->transform_list,
-			&frag->transform_post_dma_list);
-	else
-		list_add_tail(&transform->transform_list,
-			&frag->transform_pre_dma_list);
-}
-
 /**
  * spi_merged_dma_fragment_merge_dma_fragment_from_cache - merge a
  * dma_fragment from a pool
@@ -152,131 +105,4 @@ int spi_merged_dma_fragment_merge_fragment_cache(
 	struct spi_merged_dma_fragment *merged,
 	gfp_t gfpflags);
 
-/**
- * spi_merged_dma_fragment_add_predma_transform - add a pre-DMA
- *   transform to the fragment
- * @fragment: the fragment to which to add
- * @transform: the link object of the DMA controlblock to add
- */
-static inline void spi_merged_dma_fragment_add_predma_transform(
-	struct spi_merged_dma_fragment *fragment,
-	struct dma_fragment_transform *transform
-	)
-{
-	list_add_tail(&transform->transform_list,
-		&fragment->transform_pre_dma_list);
-}
-
-/**
- * spi_merged_dma_fragment_addnew_predma_transform - add a new pre-dma
- *   transform
- * @addto: the spi_merged_dma_fragment to which we should add this
- * @frag: the dma_fragment for which we are doing this
- * @size: the size to allocate
- * @function: the function to call
- * @data: some extra data to pass to the function
- * @gpfflags: the flags used during allocation of memory
- */
-static inline struct dma_fragment_transform *
-spi_merged_dma_fragment_addnew_predma_transform(
-	struct spi_merged_dma_fragment *addto,
-	struct dma_fragment *frag,
-	ssize_t size,
-	int (*function)(struct dma_fragment_transform *, void *, gfp_t),
-	void *data,
-	gfp_t gfpflags)
-{
-	struct dma_fragment_transform *trans =
-		dma_fragment_transform_alloc(
-			size,
-			function,
-			frag,
-			data,
-			gfpflags);
-	if (trans)
-		spi_merged_dma_fragment_add_predma_transform(
-			addto, trans);
-
-	return trans;
-}
-
-/**
- * spi_merged_dma_fragment_execute_pre_dma_transforms - execute all the
- *   pre_dma transforms scheduled  for execution
- * @merged: the spi_merged_dma_fragment
- * @data: extra data to pass to the function
- * @gpfflags: the flags used during allocation of memory
- */
-static inline int spi_merged_dma_fragment_execute_pre_dma_transforms(
-	struct spi_merged_dma_fragment *merged, void *data, gfp_t gfpflags)
-{
-	return dma_fragment_transform_call_list(
-		&merged->transform_pre_dma_list,
-		data,
-		gfpflags);
-}
-
-/**
- * spi_merged_dma_fragment_add_postdma_transform - add a post-DMA
- *   transform to the fragment
- * @fragment: the fragment to which to add
- * @transform: the link object of the DMA controlblock to add
- */
-static inline void spi_merged_dma_fragment_add_postdma_transform(
-	struct spi_merged_dma_fragment *fragment,
-	struct dma_fragment_transform *transform
-	)
-{
-	list_add_tail(&transform->transform_list,
-		&fragment->transform_post_dma_list);
-}
-
-/**
- * spi_merged_dma_fragment_addnew_postdma_transform - add a new post-dma
- *   transform
- * @addto: the spi_merged_dma_fragment to which we should add this
- * @frag: the dma_fragment for which we are doing this
- * @size: the size to allocate
- * @function: the function to call
- * @data: some extra data to pass to the function
- * @gpfflags: the flags used during allocation of memory
- */
-static inline struct dma_fragment_transform *
-spi_merged_dma_fragment_addnew_postdma_transform(
-	struct spi_merged_dma_fragment *addto,
-	struct dma_fragment *frag,
-	ssize_t size,
-	int (*function)(struct dma_fragment_transform *, void *, gfp_t),
-	void *data,
-	gfp_t gfpflags)
-{
-	struct dma_fragment_transform *trans =
-		dma_fragment_transform_alloc(
-			size,
-			function,
-			frag,
-			data,
-			gfpflags);
-	if (trans)
-		spi_merged_dma_fragment_add_postdma_transform(
-			addto, trans);
-
-	return trans;
-}
-
-/**
- * spi_merged_dma_fragment_execute_post_dma_transforms - execute all the
- *   post_dma transforms scheduled  for execution
- * @merged: the spi_merged_dma_fragment
- * @data: extra data to pass to the function
- * @gpfflags: the flags used during allocation of memory
- */
-static inline int spi_merged_dma_fragment_execute_post_dma_transforms(
-	struct spi_merged_dma_fragment *merged, void *data, gfp_t gfpflags)
-{
-	return dma_fragment_transform_call_list(
-		&merged->transform_post_dma_list,
-		data,
-		gfpflags);
-}
 #endif /* __SPI_DMAFRAGMENT_H */

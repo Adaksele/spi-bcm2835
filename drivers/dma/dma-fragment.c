@@ -41,13 +41,23 @@ EXPORT_SYMBOL_GPL(dma_fragment_release_subfragments);
 void dma_fragment_free_transforms(struct dma_fragment *frag)
 {
 	struct dma_fragment_transform *transform;
-	while (!list_empty(&frag->transform_list)) {
+
+	while (!list_empty(&frag->pre_dma_transform_list)) {
 		transform = list_first_entry(
-			&frag->transform_list,
+			&frag->pre_dma_transform_list,
 			typeof(*transform),
 			transform_list);
 		dma_fragment_transform_free(transform);
 	}
+
+	while (!list_empty(&frag->post_dma_transform_list)) {
+		transform = list_first_entry(
+			&frag->post_dma_transform_list,
+			typeof(*transform),
+			transform_list);
+		dma_fragment_transform_free(transform);
+	}
+
 }
 EXPORT_SYMBOL_GPL(dma_fragment_free_transforms);
 
@@ -60,8 +70,6 @@ void dma_fragment_release(struct dma_fragment *frag)
 	/* release other stuff */
 	/* return to fragment cache if we are member of one */
 	if (frag->cache) {
-		if (frag->release_fragment)
-			frag->release_fragment(frag, 1);
 		dma_fragment_cache_return(frag);
 	} else {
 		/* remove all the dma_links belonging to us */
@@ -76,13 +84,8 @@ void dma_fragment_release(struct dma_fragment *frag)
 		/* remove all the dma_fragment_transforms belonging to us */
 		dma_fragment_free_transforms(frag);
 
-		/* release if allocated ourselves*/
-		if (frag->release_fragment)
-			frag->release_fragment(frag, 0);
-		else {
-			if (!frag->embedded)
-				kfree(frag);
-		}
+		/* free memory allocated ourselves*/
+		kfree(frag);
 	}
 }
 EXPORT_SYMBOL_GPL(dma_fragment_release);
