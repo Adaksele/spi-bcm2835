@@ -204,6 +204,17 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 	unsigned long flags;
 
 	spin_lock_irqsave(&master->queue_lock, flags);
+
+	/* check that we are not already running
+	 * - otherwise we would have an inversion of the complete sequence
+	 */
+/*
+	if (bs->cb_chain_complete_running)
+		goto exit_running_already;
+*/
+	/* mark as running */
+	bs->cb_chain_complete_running=1;
+
 	set_low4();
 	/* check the message queue */
 	while (
@@ -259,8 +270,10 @@ void bcm2835dma_release_cb_chain_complete(struct spi_master *master)
 		}
 	}
 exit:
-	spin_unlock_irqrestore(&master->queue_lock, flags);
+	bs->cb_chain_complete_running=0;
 	set_high4();
+exit_running_already:
+	spin_unlock_irqrestore(&master->queue_lock, flags);
 	return;
 }
 
@@ -278,12 +291,12 @@ static int bcm2835dma_schedule_dma_fragment(
 	/* now start locking things down */
 	spin_lock_irqsave(&master->queue_lock, flags);
 
-/*
+#ifdef SPI_HAVE_OPTIMIZE
 	if ((frag->message->is_optimized) && (! list_empty(&frag->message->queue))) {
 		printk(KERN_ERR "message still scheduled: %pf\n",
 			frag->message->complete);
 	}
-*/
+#endif
 	/* just in case: clean the fragment tail link to 0 */
 	bcm2835_link_dma_link(
 		frag->dma_fragment.link_tail,
@@ -324,7 +337,6 @@ static int bcm2835dma_schedule_dma_fragment(
 	/* and increase counters */
 	bs->count_scheduled_msg_dma_restarted++;
 	bs->last_dma_schedule_type = "restarted";
-
 	/* to avoid possible race-conditions between interrupt handlers
 	 * for DMA and other sources (=GPIO) we need to release the
 	 * messages first

@@ -109,6 +109,7 @@ struct bcm2835dma_spi {
 	u64 count_completed_on_retry;
 	u64 count_dma_interrupts;
 
+	bool cb_chain_complete_running;
 	const char *last_dma_schedule_type;
 	void (*last_complete)(void *);
 };
