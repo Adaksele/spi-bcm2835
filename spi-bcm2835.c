@@ -89,6 +89,7 @@ struct bcm2835_spi {
 	const u8 *tx_buf;
 	u8 *rx_buf;
 	int len;
+	u8 bits_per_word;
 };
 
 static inline u32 bcm2835_rd(struct bcm2835_spi *bs, unsigned reg)
@@ -114,14 +115,26 @@ static inline void bcm2835_rd_fifo(struct bcm2835_spi *bs, int len)
 
 static inline void bcm2835_wr_fifo(struct bcm2835_spi *bs, int len)
 {
-	u8 byte;
+	u32 val;
 
 	if (len > bs->len)
 		len = bs->len;
 
-	while (len--) {
-		byte = bs->tx_buf ? *bs->tx_buf++ : 0;
-		bcm2835_wr(bs, BCM2835_SPI_FIFO, byte);
+	while (len) {
+		val = 0;
+		if (bs->bits_per_word == 9) {
+			if (bs->tx_buf) {
+				val = *(const u16 *)bs->tx_buf;
+				bs->tx_buf += 2;
+			}
+			len-=2;
+		} else {
+			if (bs->tx_buf) {
+				val = *bs->tx_buf++;
+			}
+			len--;
+		}
+		bcm2835_wr(bs, BCM2835_SPI_FIFO, val);
 		bs->len--;
 	}
 }
@@ -227,10 +240,15 @@ static int bcm2835_spi_start_transfer(struct spi_device *spi,
 		cs |= spi->chip_select;
 	}
 
+	/* LoSSI/9-bit mode */
+	if (spi->bits_per_word == 9)
+		cs |= BCM2835_SPI_CS_LEN;
+
 	reinit_completion(&bs->done);
 	bs->tx_buf = tfr->tx_buf;
 	bs->rx_buf = tfr->rx_buf;
 	bs->len = tfr->len;
+	bs->bits_per_word = spi->bits_per_word;
 
         bcm2835_wr(bs, BCM2835_SPI_CLK, cdiv);
         /** Enable the HW block, but without the interrupts enabled,
@@ -339,7 +357,7 @@ static int bcm2835_spi_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, master);
 
 	master->mode_bits = BCM2835_SPI_MODE_BITS;
-	master->bits_per_word_mask = SPI_BPW_MASK(8);
+	master->bits_per_word_mask = SPI_BPW_RANGE_MASK(8,9);
 	master->num_chipselect = 3;
 	master->transfer_one_message = bcm2835_spi_transfer_one;
 	master->dev.of_node = pdev->dev.of_node;
