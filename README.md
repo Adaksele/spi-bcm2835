@@ -11,4 +11,4 @@ history:
 Planned enhancments:
 --------------------
 
-See wiki for details
+See [wiki](wiki) for details
