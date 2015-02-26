@@ -36,6 +36,12 @@
 #include <linux/of_device.h>
 #include <linux/spi/spi.h>
 
+/* define some DEBUG pins */
+#include "bcm2835-gpio-debugpin.h"
+DEFINE_DEBUG_PIN()  /* used to mark "in worker thread"  */
+DEFINE_DEBUG_PIN(2) /* used to mark "waiting on wakeup" */
+DEFINE_DEBUG_PIN(3) /* used to mark "in SPI-interrupt"  */
+
 /* SPI register offsets */
 #define BCM2835_SPI_CS			0x00
 #define BCM2835_SPI_FIFO		0x04
@@ -125,6 +131,7 @@ static irqreturn_t bcm2835_spi_interrupt(int irq, void *dev_id)
 	struct spi_master *master = dev_id;
 	struct bcm2835_spi *bs = spi_master_get_devdata(master);
 	u32 cs = bcm2835_rd(bs, BCM2835_SPI_CS);
+	debug_set_high3();
 
 	/*
 	 * RXR - RX needs Reading. This means 12 (or more) bytes have been
@@ -152,6 +159,7 @@ static irqreturn_t bcm2835_spi_interrupt(int irq, void *dev_id)
 		 * early. Note that DONE could also be set if we serviced an
 		 * RXR interrupt really late.
 		 */
+		debug_set_low3();
 		return IRQ_HANDLED;
 	}
 
@@ -176,9 +184,11 @@ static irqreturn_t bcm2835_spi_interrupt(int irq, void *dev_id)
 			complete(&bs->done);
 		}
 
+		debug_set_low3();
 		return IRQ_HANDLED;
 	}
 
+	debug_set_low3();
 	return IRQ_NONE;
 }
 
@@ -246,8 +256,11 @@ static int bcm2835_spi_finish_transfer(struct spi_device *spi,
 		cs = bcm2835_rd(bs, BCM2835_SPI_CS);
 	}
 
-	if (tfr->delay_usecs)
+	if (tfr->delay_usecs) {
+		debug_set_high2();
 		udelay(tfr->delay_usecs);
+		debug_set_low2();
+	}
 
 	if (cs_change)
 		/* Clear TA flag */
@@ -266,13 +279,18 @@ static int bcm2835_spi_transfer_one(struct spi_master *master,
 	unsigned int timeout;
 	bool cs_change;
 
+	debug_set_high();
+
 	list_for_each_entry(tfr, &mesg->transfers, transfer_list) {
 		err = bcm2835_spi_start_transfer(spi, tfr);
 		if (err)
 			goto out;
 
+		debug_set_high2();
 		timeout = wait_for_completion_timeout(&bs->done,
 				msecs_to_jiffies(BCM2835_SPI_TIMEOUT_MS));
+		debug_set_low2();
+
 		if (!timeout) {
 			err = -ETIMEDOUT;
 			goto out;
@@ -295,6 +313,7 @@ out:
 	mesg->status = err;
 	spi_finalize_current_message(master);
 
+	debug_set_low();
 	return 0;
 }
 
@@ -304,6 +323,10 @@ static int bcm2835_spi_probe(struct platform_device *pdev)
 	struct bcm2835_spi *bs;
 	struct resource *res;
 	int err;
+
+	debug_set_low();
+	debug_set_low2();
+	debug_set_low3();
 
 	master = spi_alloc_master(&pdev->dev, sizeof(*bs));
 	if (!master) {

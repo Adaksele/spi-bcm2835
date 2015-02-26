@@ -36,6 +36,12 @@
 #include <linux/sched.h>
 #include <linux/wait.h>
 
+/* define some DEBUG pins */
+#include "bcm2835-gpio-debugpin.h"
+DEFINE_DEBUG_PIN()  /* used to mark "in worker thread"  */
+DEFINE_DEBUG_PIN(2) /* used to mark "waiting on wakeup" */
+DEFINE_DEBUG_PIN(3) /* used to mark "in SPI-interrupt"  */
+
 /* SPI register offsets */
 #define SPI_CS			0x00
 #define SPI_FIFO		0x04
@@ -183,6 +189,7 @@ static irqreturn_t bcm2708_spi_interrupt(int irq, void *dev_id)
 	struct spi_master *master = dev_id;
 	struct bcm2708_spi *bs = spi_master_get_devdata(master);
 	u32 cs;
+	debug_set_high3();
 
 	spin_lock(&bs->lock);
 
@@ -215,6 +222,7 @@ static irqreturn_t bcm2708_spi_interrupt(int irq, void *dev_id)
 	}
 
 	spin_unlock(&bs->lock);
+	debug_set_low3();
 
 	return IRQ_HANDLED;
 }
@@ -328,15 +336,20 @@ static int bcm2708_process_transfer(struct bcm2708_spi *bs,
 	bcm2708_wr(bs, SPI_CLK, stp->cdiv);
 	bcm2708_wr(bs, SPI_CS, cs);
 
+	debug_set_high2();
 	ret = wait_for_completion_timeout(&bs->done,
 			msecs_to_jiffies(SPI_TIMEOUT_MS));
+	debug_set_low2();
 	if (ret == 0) {
 		dev_err(&spi->dev, "transfer timed out\n");
 		return -ETIMEDOUT;
 	}
 
-	if (xfer->delay_usecs)
+	if (xfer->delay_usecs) {
+		debug_set_high2();
 		udelay(xfer->delay_usecs);
+		debug_set_low2();
+	}
 
 	if (list_is_last(&xfer->transfer_list, &msg->transfers) ||
 			xfer->cs_change) {
@@ -356,6 +369,7 @@ static void bcm2708_work(struct work_struct *work)
 	struct spi_message *msg;
 	struct spi_transfer *xfer;
 	int status = 0;
+	debug_set_high();
 
 	spin_lock_irqsave(&bs->lock, flags);
 	while (!list_empty(&bs->queue)) {
@@ -375,6 +389,7 @@ static void bcm2708_work(struct work_struct *work)
 		spin_lock_irqsave(&bs->lock, flags);
 	}
 	spin_unlock_irqrestore(&bs->lock, flags);
+	debug_set_low();
 }
 
 static int bcm2708_spi_setup(struct spi_device *spi)
@@ -477,6 +492,10 @@ static int bcm2708_spi_probe(struct platform_device *pdev)
 	struct clk *clk;
 	struct spi_master *master;
 	struct bcm2708_spi *bs;
+
+	debug_set_low();
+	debug_set_low2();
+	debug_set_low3();
 
 	regs = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!regs) {
