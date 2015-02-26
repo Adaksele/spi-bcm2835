@@ -197,7 +197,7 @@ static int bcm2835_spi_start_transfer(struct spi_device *spi,
 {
 	struct bcm2835_spi *bs = spi_master_get_devdata(spi->master);
 	unsigned long spi_hz, clk_hz, cdiv;
-	u32 cs = BCM2835_SPI_CS_INTR | BCM2835_SPI_CS_INTD | BCM2835_SPI_CS_TA;
+	u32 cs = BCM2835_SPI_CS_INTR | BCM2835_SPI_CS_TA;
 
 	spi_hz = tfr->speed_hz;
 	clk_hz = clk_get_rate(bs->clk);
@@ -232,14 +232,16 @@ static int bcm2835_spi_start_transfer(struct spi_device *spi,
 	bs->rx_buf = tfr->rx_buf;
 	bs->len = tfr->len;
 
-	bcm2835_wr(bs, BCM2835_SPI_CLK, cdiv);
-	/*
-	 * Enable the HW block. This will immediately trigger a DONE (TX
-	 * empty) interrupt, upon which we will fill the TX FIFO with the
-	 * first TX bytes. Pre-filling the TX FIFO here to avoid the
-	 * interrupt doesn't work:-(
-	 */
-	bcm2835_wr(bs, BCM2835_SPI_CS, cs);
+        bcm2835_wr(bs, BCM2835_SPI_CLK, cdiv);
+        /** Enable the HW block, but without the interrupts enabled,
+         * so that we can fill in some data into the fifo now
+         * and avoid delays doe to interrupt overheads...
+         */
+        bcm2835_wr(bs, BCM2835_SPI_CS, cs);
+        /* Write up to 16 bytes */
+        bcm2835_wr_fifo(bs, 16);
+        /* and now enable the interrupt for TX-empty*/
+        bcm2835_wr(bs, BCM2835_SPI_CS, cs | BCM2835_SPI_CS_INTD);
 
 	return 0;
 }

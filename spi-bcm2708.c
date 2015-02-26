@@ -331,10 +331,17 @@ static int bcm2708_process_transfer(struct bcm2708_spi *bs,
 	bs->rx_buf = xfer->rx_buf;
 	bs->len = xfer->len;
 
-	cs = stp->cs | SPI_CS_INTR | SPI_CS_INTD | SPI_CS_TA;
+        /* start SPI */
+        bcm2708_wr(bs, SPI_CLK, stp->cdiv);
+        cs = stp->cs | SPI_CS_INTR | SPI_CS_TA;
+        bcm2708_wr(bs, SPI_CS, cs);
 
-	bcm2708_wr(bs, SPI_CLK, stp->cdiv);
-	bcm2708_wr(bs, SPI_CS, cs);
+        /* fill the TX fifo with up to 16 bytes */
+        bcm2708_wr_fifo(bs, 16);
+
+        /* enable interrupts */
+        cs = stp->cs | SPI_CS_INTR | SPI_CS_INTD | SPI_CS_TA;
+        bcm2708_wr(bs, SPI_CS, cs);
 
 	debug_set_high2();
 	ret = wait_for_completion_timeout(&bs->done,
