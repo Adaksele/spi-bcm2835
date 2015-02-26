@@ -102,40 +102,38 @@ static inline void bcm2835_wr(struct bcm2835_spi *bs, unsigned reg, u32 val)
 	writel(val, bs->regs + reg);
 }
 
-static inline void bcm2835_rd_fifo(struct bcm2835_spi *bs, int len)
+static inline void bcm2835_rd_fifo(struct bcm2835_spi *bs)
 {
 	u8 byte;
 
-	while (len--) {
+	while (bcm2835_rd(bs, BCM2835_SPI_CS) & BCM2835_SPI_CS_RXD) {
 		byte = bcm2835_rd(bs, BCM2835_SPI_FIFO);
 		if (bs->rx_buf)
 			*bs->rx_buf++ = byte;
 	}
 }
 
-static inline void bcm2835_wr_fifo(struct bcm2835_spi *bs, int len)
+static inline void bcm2835_wr_fifo(struct bcm2835_spi *bs)
 {
 	u32 val;
 
-	if (len > bs->len)
-		len = bs->len;
-
-	while (len) {
+	while ( (bs->len)
+		&& (bcm2835_rd(bs, BCM2835_SPI_CS) & BCM2835_SPI_CS_TXD)
+		) {
 		val = 0;
 		if (bs->bits_per_word == 9) {
 			if (bs->tx_buf) {
 				val = *(const u16 *)bs->tx_buf;
 				bs->tx_buf += 2;
 			}
-			len-=2;
+			bs->len-=2;
 		} else {
 			if (bs->tx_buf) {
 				val = *bs->tx_buf++;
 			}
-			len--;
+			bs->len--;
 		}
 		bcm2835_wr(bs, BCM2835_SPI_FIFO, val);
-		bs->len--;
 	}
 }
 
@@ -160,11 +158,11 @@ static irqreturn_t bcm2835_spi_interrupt(int irq, void *dev_id)
 	 * bcm2835_spi_finish_transfer() drain the RX FIFO.
 	 */
 	if (bs->len && (cs & BCM2835_SPI_CS_RXR)) {
-		/* Read 12 bytes of data */
-		bcm2835_rd_fifo(bs, 12);
+		/* Read as many bytes of data as possible */
+		bcm2835_rd_fifo(bs);
 
-		/* Write up to 12 bytes */
-		bcm2835_wr_fifo(bs, 12);
+		/* Write as many bytes of data as possible */
+		bcm2835_wr_fifo(bs);
 
 		/*
 		 * We must have written something to the TX FIFO due to the
@@ -184,7 +182,7 @@ static irqreturn_t bcm2835_spi_interrupt(int irq, void *dev_id)
 	 */
 	if (cs & BCM2835_SPI_CS_DONE) {
 		if (bs->len) { /* First interrupt in a transfer */
-			bcm2835_wr_fifo(bs, 16);
+			bcm2835_wr_fifo(bs);
 		} else { /* Transfer complete */
 			/* Disable SPI interrupts */
 			cs &= ~(BCM2835_SPI_CS_INTR | BCM2835_SPI_CS_INTD);
@@ -256,8 +254,8 @@ static int bcm2835_spi_start_transfer(struct spi_device *spi,
          * and avoid delays doe to interrupt overheads...
          */
         bcm2835_wr(bs, BCM2835_SPI_CS, cs);
-        /* Write up to 16 bytes */
-        bcm2835_wr_fifo(bs, 16);
+        /* Write as many bytes of data as possible */
+        bcm2835_wr_fifo(bs);
         /* and now enable the interrupt for TX-empty*/
         bcm2835_wr(bs, BCM2835_SPI_CS, cs | BCM2835_SPI_CS_INTD);
 
@@ -271,10 +269,7 @@ static int bcm2835_spi_finish_transfer(struct spi_device *spi,
 	u32 cs = bcm2835_rd(bs, BCM2835_SPI_CS);
 
 	/* Drain RX FIFO */
-	while (cs & BCM2835_SPI_CS_RXD) {
-		bcm2835_rd_fifo(bs, 1);
-		cs = bcm2835_rd(bs, BCM2835_SPI_CS);
-	}
+	bcm2835_rd_fifo(bs);
 
 	if (tfr->delay_usecs) {
 		debug_set_high2();
