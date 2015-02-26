@@ -65,6 +65,9 @@ void dma_fragment_release(struct dma_fragment *frag)
 {
 	struct dma_link *link;
 
+	if (!frag)
+		return;
+
 	/* release sub-fragments */
 	dma_fragment_release_subfragments(frag);
 	/* release other stuff */
@@ -96,8 +99,7 @@ static ssize_t dma_fragment_cache_sysfs_show(
 static ssize_t dma_fragment_cache_sysfs_store(
 	struct device *, struct device_attribute *, const char *, size_t);
 
-int dma_fragment_cache_initialize(
-	struct dma_fragment_cache *cache,
+struct dma_fragment_cache *dma_fragment_cache_alloc(
 	struct device *device,
 	const char *name,
 	struct dma_fragment *(*allocateFragment)(struct device *, gfp_t),
@@ -106,7 +108,10 @@ int dma_fragment_cache_initialize(
 {
 	char *fullname;
 	int i, err;
-	memset(cache, 0, sizeof(struct dma_fragment_cache));
+	struct dma_fragment_cache *cache =
+		kzalloc(sizeof(*cache),GFP_KERNEL);
+	if (!cache)
+		return NULL;
 
 	spin_lock_init(&cache->lock);
 
@@ -116,7 +121,7 @@ int dma_fragment_cache_initialize(
 	i = sizeof(SYSFS_PREFIX)+strlen(name);
 	fullname = kmalloc(i, GFP_KERNEL);
 	if (!fullname)
-		return -ENOMEM;
+		goto error;
 	strncpy(fullname, SYSFS_PREFIX, i);
 	strncat(fullname, name, i);
 
@@ -135,13 +140,23 @@ int dma_fragment_cache_initialize(
 		dev_err(cache->device,
 			"duplicate dma_fragment_cache name \"%s\"\n",
 			cache->dev_attr.attr.name);
-		return err;
+		goto error;
 	}
 
 	/* now allocate new entries to fill the pool */
-	return dma_fragment_cache_resize(cache, initial_size);
+	err = dma_fragment_cache_resize(cache, initial_size);
+	if (err)
+		goto error;
+
+	return cache;
+
+error:
+	kfree(cache->dev_attr.attr.name);
+	kfree(cache);
+	return NULL;
+
 }
-EXPORT_SYMBOL_GPL(dma_fragment_cache_initialize);
+EXPORT_SYMBOL_GPL(dma_fragment_cache_alloc);
 
 static ssize_t dma_fragment_cache_sysfs_show(
 	struct device *dev,
@@ -281,6 +296,7 @@ struct dma_fragment *dma_fragment_cache_add_active(
 	return _dma_fragment_cache_add(cache, gfpflags, 0);
 }
 EXPORT_SYMBOL_GPL(dma_fragment_cache_add_active);
+
 struct dma_fragment *dma_fragment_cache_add_idle(
 	struct dma_fragment_cache *cache, gfp_t gfpflags)
 {
@@ -288,11 +304,14 @@ struct dma_fragment *dma_fragment_cache_add_idle(
 }
 EXPORT_SYMBOL_GPL(dma_fragment_cache_add_idle);
 
-void dma_fragment_cache_release(struct dma_fragment_cache *cache)
+void dma_fragment_cache_free(struct dma_fragment_cache *cache)
 {
 	unsigned long flags;
 	struct dma_fragment *frag;
 
+	if (!cache)
+		return;
+	printk(KERN_INFO "RELEASE %pf\n",cache);
 	spin_lock_irqsave(&cache->lock, flags);
 
 	while (!list_empty(&cache->idle)) {
@@ -304,6 +323,7 @@ void dma_fragment_cache_release(struct dma_fragment_cache *cache)
 		dma_fragment_release(frag);
 	}
 	cache->count_idle = 0;
+	printk(KERN_INFO "RELEASE2 %pf\n",cache);
 
 	if (cache->count_active)
 		dev_err(cache->device,
@@ -314,6 +334,8 @@ void dma_fragment_cache_release(struct dma_fragment_cache *cache)
 
 	spin_unlock_irqrestore(&cache->lock, flags);
 
+	printk(KERN_INFO "RELEASE3 %pf\n",cache);
+
 	/* release sysfs info file */
 	if (cache->dev_attr.show)
 		device_remove_file(cache->device,
@@ -321,8 +343,11 @@ void dma_fragment_cache_release(struct dma_fragment_cache *cache)
 
 	/* and release name */
 	kfree(cache->dev_attr.attr.name);
+
+	printk(KERN_INFO "RELEASE4 %pf\n",cache);
+	kfree(cache);
 }
-EXPORT_SYMBOL_GPL(dma_fragment_cache_release);
+EXPORT_SYMBOL_GPL(dma_fragment_cache_free);
 
 MODULE_DESCRIPTION("generic dma-fragment infrastructure");
 MODULE_AUTHOR("Martin Sperl <kernel@martin.sperl.org>");

@@ -136,18 +136,21 @@ struct bcm2835_dma_cb {
 	u32        pad[2];
 };
 
-struct bcm2835_dma_cb_stride {
-	s16 src;
-	s16 dst;
-};
-
-static inline u32 bcm2835_dma_cb_compose_stride(
+static inline void bcm2835_dma_cb_compose_2d(
+	struct bcm2835_dma_cb *cb,
+	u32 flags,
+	u16 transfers, u16 bytes_per_transfer,
 	s16 src_stride, s16 dst_stride)
 {
-	struct bcm2835_dma_cb_stride tmp;
-	tmp.src = src_stride;
-	tmp.dst = dst_stride;
-	return *((u32 *)&tmp);
+	cb->ti                 = ( flags
+				| BCM2835_DMA_TI_S_INC
+				| BCM2835_DMA_TI_D_INC
+				| BCM2835_DMA_TI_TDMODE
+		);
+	((u16*)&cb->length)[0] = bytes_per_transfer;
+	((u16*)&cb->length)[1] = transfers;
+	((s16*)&cb->stride)[0] = src_stride;
+	((s16*)&cb->stride)[1] = dst_stride;
 }
 
 static inline int bcm2835_link_dma_link(
@@ -314,32 +317,38 @@ static inline void dump_dma_regs(
 }
 
 struct dma_link * bcm2835_addDMAPoke(
-	struct dma_fragment *frag,
-	dma_addr_t addr,
-	u32 val,
+	struct dma_pool *bcm2835_dma_pool,
+	struct dma_fragment *frag, bool linkit,
+	dma_addr_t addr, u32 val,
 	gfp_t gfp);
 struct dma_link * bcm2835_addDMAPoke2(
-	struct dma_fragment *frag,
-	dma_addr_t addr,
-	u32 val1,  u32 val2,
+	struct dma_pool *bcm2835_dma_pool,
+	struct dma_fragment *frag, bool linkit,
+	dma_addr_t addr, u32 val1,  u32 val2,
 	gfp_t gfp);
 
 dma_addr_t* bcm2835_getDMAPokeReg(struct dma_link *link);
 u32* bcm2835_getDMAPokeVal(struct dma_link *link);
 
 struct dma_link *bcm2835_addDMADelay(
-	struct dma_fragment *frag, u32 delay, gfp_t gfp);
+	struct dma_pool *bcm2835_dma_pool,
+	struct dma_fragment *frag, bool linkit,
+	u32 delay,
+	gfp_t gfp);
 int bcm2835_setDMADelay(struct dma_link *link, u32 udelay);
 
 struct dma_link *bcm2835_addDMAStart(
-	struct dma_fragment *frag,u32 channel, gfp_t gfp);
+	struct dma_pool *bcm2835_dma_pool,
+	struct dma_fragment *frag, bool linkit,
+	u32 channel,
+	gfp_t gfp);
 int bcm2835_setDMAStartLink(struct dma_link *link,
 			struct dma_link *to_start);
 
 struct dma_link *bcm2835_addDMATransfer(
-	struct dma_fragment *frag,
+	struct dma_pool *bcm2835_dma_pool,
+	struct dma_fragment *frag, bool linkit,
 	dma_addr_t src, dma_addr_t dst,u32 length,
-	bool do_dma_link,
 	gfp_t gfp);
 int bcm2835_setDMATransfer(
 	struct dma_fragment *frag,

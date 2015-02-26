@@ -171,7 +171,7 @@ void dma_fragment_dump(
 		dev_info(dev, "%sdescr:\t%s\n",	indent, fragment->desc);
 	dev_info(dev, "%slink_h:\t%pK\n", indent, fragment->link_head);
 	dev_info(dev, "%slink_t:\t%pK\n", indent, fragment->link_tail);
-	dev_info(dev, "%slinc_frag:\t%pK\n", indent,
+	dev_info(dev, "%slink_f:\t%pf\n", indent,
 		fragment->link_fragment);
 	/* dump extra data */
 	if (sizeof(*fragment) < fragment->size)

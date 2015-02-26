@@ -312,6 +312,7 @@ void dma_fragment_transform_dump(
  *                    used to link dma fragments together
  * @release_fragment: method called prior to returning the fragment
  *                    to the fragment cache
+ * @link_dma_link:    link two dma_links
  */
 struct dma_fragment {
 	int size;
@@ -342,6 +343,7 @@ struct dma_fragment {
 	/* fragment function */
 	int (*link_fragment)(struct dma_fragment *,
 			struct dma_fragment *);
+	void (*link_dma_link)(struct dma_link* head, struct dma_link* tail);
 };
 
 /**
@@ -427,6 +429,9 @@ static inline void dma_fragment_add_dma_link(
 	dmalink->fragment = fragment;
 
 	if (mark_as_tail) {
+		if ((fragment->link_tail) && (fragment->link_dma_link))
+			fragment->link_dma_link(
+				fragment->link_tail, dmalink);
 		if (!fragment->link_head)
 			fragment->link_head = dmalink;
 		fragment->link_tail = dmalink;
@@ -610,15 +615,14 @@ struct dma_fragment_cache {
 };
 
 /**
- * dma_fragment_cache_initialize - initialize a dma_fragment cache
+ * dma_fragment_cache_alloc - allocate a dma_fragment cache
  * @cache:            the cache to initialize
  * @device:           the device for which we run this cache
  * @name:             the identifier of the dma_fragment_cache
  * @allocateFragment: the fragment allocation/initialization function
  * @initial_size:     the initial size of the cache
  */
-int dma_fragment_cache_initialize(
-	struct dma_fragment_cache *cache,
+struct dma_fragment_cache *dma_fragment_cache_alloc(
 	struct device *device,
 	const char *name,
 	struct dma_fragment *(*allocateFragment)(struct device *, gfp_t),
@@ -626,12 +630,12 @@ int dma_fragment_cache_initialize(
 	);
 
 /**
- * dma_fragment_cache_release: release the DMA Fragment cache
+ * dma_fragment_cache_free: release the DMA Fragment cache
  * @cache: the cache to release
  * note that this only releases idle dma_fragments.
  *   any still active fragments are NOT released.
  */
-void dma_fragment_cache_release(struct dma_fragment_cache *cache);
+void dma_fragment_cache_free(struct dma_fragment_cache *cache);
 
 /**
  * dma_fragment_cache_add_active - add an item to the dma cache active

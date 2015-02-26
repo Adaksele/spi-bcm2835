@@ -97,8 +97,9 @@ void bcm2835_dma_cb_dump(
 	int tindent)
 {
 	const char *prefix = _tab_indent(tindent);
-	struct bcm2835_dma_cb_stride *stride =
-		(struct bcm2835_dma_cb_stride *)&dmablock->stride;
+	u16 *length_u16 = (u16*) &dmablock->length;
+	s16 *stride_s16 = (s16*) &dmablock->stride;
+
 	dev_info(dev, "%saddr:\t%pK\n", prefix,
 		dmablock);
 	if (dmablock_dma)
@@ -128,11 +129,15 @@ void bcm2835_dma_cb_dump(
 	else
 		dev_info(dev, "%sdst:\t%08x\n", prefix,
 			dmablock->dst);
-	dev_info(dev, "%slength:\t%u\n", prefix,
-		dmablock->length);
-	if (dmablock->stride)
-		dev_info(dev, "%sstride:\tsrc+=%i dst+=%i\n", prefix,
-			stride->src, stride->dst);
+	if (dmablock->ti & BCM2835_DMA_TI_TDMODE ) {
+		dev_info(dev, "%strans:\t%u * %u bytes\n", prefix,
+			length_u16[1], length_u16[0]);
+		dev_info(dev, "%sincr:\t s:%i, d:%i\n", prefix,
+			stride_s16[0], stride_s16[1]);
+	} else {
+		dev_info(dev, "%slength:\t%u\n", prefix,
+			dmablock->length);
+	}
 	dev_info(dev, "%snext:\t%08x\n", prefix,
 		dmablock->next);
 	dev_info(dev, "%spad0:\t%08x\n", prefix,

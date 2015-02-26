@@ -88,14 +88,12 @@ struct bcm2835dma_spi {
 	struct bcm2835_dmachannel dma_tx;
 	struct bcm2835_dmachannel dma_rx;
 	struct bcm2835_dmachannel dma_irq;
-	/* the DMA-able pool we use to allocate control blocks from */
-	struct dma_pool *pool;
 	/* the fragment caches */
-	struct dma_fragment_cache fragment_merged;
-	struct dma_fragment_cache fragment_setup_spi;
-	struct dma_fragment_cache fragment_transfer;
-	struct dma_fragment_cache fragment_cs_deselect_delay;
-	struct dma_fragment_cache fragment_delay;
+	struct dma_fragment_cache *fragment_merged;
+	struct dma_fragment_cache *fragment_setup_spi;
+	struct dma_fragment_cache *fragment_transfer;
+	struct dma_fragment_cache *fragment_cs_deselect_delay;
+	struct dma_fragment_cache *fragment_delay;
 
 	/* the device configs list */
 	struct list_head spi_device_data_chain;
