@@ -11,4 +11,4 @@ history:
 Planned enhancments:
 --------------------
 
-See wiki for details
+See [wiki](https://github.com/msperl/spi-bcm2835/wiki) for details
