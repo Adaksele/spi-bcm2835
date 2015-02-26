@@ -144,63 +144,27 @@ static irqreturn_t bcm2835_spi_interrupt(int irq, void *dev_id)
 	u32 cs = bcm2835_rd(bs, BCM2835_SPI_CS);
 	debug_set_high3();
 
-	/*
-	 * RXR - RX needs Reading. This means 12 (or more) bytes have been
-	 * transmitted and hence 12 (or more) bytes have been received.
-	 *
-	 * The FIFO is 16-bytes deep. We check for this interrupt to keep the
-	 * FIFO full; we have a 4-byte-time buffer for IRQ latency. We check
-	 * this before DONE (TX empty) just in case we delayed processing this
-	 * interrupt for some reason.
-	 *
-	 * We only check for this case if we have more bytes to TX; at the end
-	 * of the transfer, we ignore this pipelining optimization, and let
-	 * bcm2835_spi_finish_transfer() drain the RX FIFO.
-	 */
-	if (bs->len && (cs & BCM2835_SPI_CS_RXR)) {
-		/* Read as many bytes of data as possible */
-		bcm2835_rd_fifo(bs);
+	/* Read as many bytes of data as possible */
+	bcm2835_rd_fifo(bs);
 
-		/* Write as many bytes of data as possible */
-		bcm2835_wr_fifo(bs);
+	/* Write as many bytes of data as possible */
+	bcm2835_wr_fifo(bs);
+
+	/* if length is empty, then disable interrupts */
+	if (! bs->len) {
+		/* Disable SPI interrupts */
+		cs &= ~(BCM2835_SPI_CS_INTR | BCM2835_SPI_CS_INTD);
+		bcm2835_wr(bs, BCM2835_SPI_CS, cs);
 
 		/*
-		 * We must have written something to the TX FIFO due to the
-		 * bs->len check above, so cannot be DONE. Hence, return
-		 * early. Note that DONE could also be set if we serviced an
-		 * RXR interrupt really late.
+		 * Wake up bcm2835_spi_transfer_one(), which will call
+		 * bcm2835_spi_finish_transfer(), to drain the RX FIFO.
 		 */
-		debug_set_low3();
-		return IRQ_HANDLED;
-	}
-
-	/*
-	 * DONE - TX empty. This occurs when we first enable the transfer
-	 * since we do not pre-fill the TX FIFO. At any other time, given that
-	 * we refill the TX FIFO above based on RXR, and hence ignore DONE if
-	 * RXR is set, DONE really does mean end-of-transfer.
-	 */
-	if (cs & BCM2835_SPI_CS_DONE) {
-		if (bs->len) { /* First interrupt in a transfer */
-			bcm2835_wr_fifo(bs);
-		} else { /* Transfer complete */
-			/* Disable SPI interrupts */
-			cs &= ~(BCM2835_SPI_CS_INTR | BCM2835_SPI_CS_INTD);
-			bcm2835_wr(bs, BCM2835_SPI_CS, cs);
-
-			/*
-			 * Wake up bcm2835_spi_transfer_one(), which will call
-			 * bcm2835_spi_finish_transfer(), to drain the RX FIFO.
-			 */
-			complete(&bs->done);
-		}
-
-		debug_set_low3();
-		return IRQ_HANDLED;
+		complete(&bs->done);
 	}
 
 	debug_set_low3();
-	return IRQ_NONE;
+	return IRQ_HANDLED;
 }
 
 static int bcm2835_spi_start_transfer(struct spi_device *spi,
