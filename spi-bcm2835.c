@@ -320,6 +320,7 @@ static int bcm2835_spi_probe(struct platform_device *pdev)
 	master->num_chipselect = 3;
 	master->transfer_one_message = bcm2835_spi_transfer_one;
 	master->dev.of_node = pdev->dev.of_node;
+	master->rt = 1;
 
 	bs = spi_master_get_devdata(master);
 
