@@ -77,7 +77,8 @@ DEFINE_DEBUG_PIN(3) /* used to mark "in SPI-interrupt"  */
 #define BCM2835_SPI_CS_CS_01		0x00000001
 
 #define BCM2835_SPI_TIMEOUT_MS	30000
-#define BCM2835_SPI_MODE_BITS	(SPI_CPOL | SPI_CPHA | SPI_CS_HIGH | SPI_NO_CS)
+#define BCM2835_SPI_MODE_BITS	(SPI_CPOL | SPI_CPHA | SPI_CS_HIGH \
+				| SPI_NO_CS | SPI_3WIRE)
 
 #define DRV_NAME	"spi-bcm2835"
 
@@ -209,6 +210,10 @@ static int bcm2835_spi_start_transfer(struct spi_device *spi,
 	/* LoSSI/9-bit mode */
 	if (spi->bits_per_word == 9)
 		cs |= BCM2835_SPI_CS_LEN;
+
+	/* 3-WIRE mode */
+	if ( (spi->mode & SPI_3WIRE) && (tfr->rx_buf) )
+		cs |= BCM2835_SPI_CS_REN;
 
 	reinit_completion(&bs->done);
 	bs->tx_buf = tfr->tx_buf;
