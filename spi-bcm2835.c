@@ -91,6 +91,8 @@ struct bcm2835_spi {
 	u8 *rx_buf;
 	int len;
 	u8 bits_per_word;
+	spinlock_t cspol_lock;
+	u32 cspol;
 };
 
 static inline u32 bcm2835_rd(struct bcm2835_spi *bs, unsigned reg)
@@ -174,6 +176,7 @@ static int bcm2835_spi_start_transfer(struct spi_device *spi,
 	struct bcm2835_spi *bs = spi_master_get_devdata(spi->master);
 	unsigned long spi_hz, clk_hz, cdiv;
 	u32 cs = BCM2835_SPI_CS_INTR | BCM2835_SPI_CS_TA;
+	unsigned long flags;
 
 	spi_hz = tfr->speed_hz;
 	clk_hz = clk_get_rate(bs->clk);
@@ -199,13 +202,12 @@ static int bcm2835_spi_start_transfer(struct spi_device *spi,
 		cs |= BCM2835_SPI_CS_CPHA;
 
 	if (!(spi->mode & SPI_NO_CS)) {
-		if (spi->mode & SPI_CS_HIGH) {
-			cs |= BCM2835_SPI_CS_CSPOL;
-			cs |= BCM2835_SPI_CS_CSPOL0 << spi->chip_select;
-		}
-
 		cs |= spi->chip_select;
 	}
+
+	spin_lock_irqsave(&bs->cspol_lock, flags);
+	cs |= bs->cspol;
+	spin_unlock_irqrestore(&bs->cspol_lock, flags);
 
 	/* LoSSI/9-bit mode */
 	if (spi->bits_per_word == 9)
@@ -266,6 +268,7 @@ static int bcm2835_spi_transfer_one(struct spi_master *master,
 	int err = 0;
 	unsigned int timeout;
 	bool cs_change;
+	unsigned long flags;
 
 	debug_set_high();
 
@@ -296,12 +299,40 @@ static int bcm2835_spi_transfer_one(struct spi_master *master,
 
 out:
 	/* Clear FIFOs, and disable the HW block */
+	spin_lock_irqsave(&bs->cspol_lock, flags);
 	bcm2835_wr(bs, BCM2835_SPI_CS,
-		   BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX);
+		BCM2835_SPI_CS_CLEAR_RX
+		| BCM2835_SPI_CS_CLEAR_TX
+		| bs->cspol );
+	spin_unlock_irqrestore(&bs->cspol_lock, flags);
+
 	mesg->status = err;
 	spi_finalize_current_message(master);
 
 	debug_set_low();
+	return 0;
+}
+
+static int bcm2835_spi_setup(struct spi_device *spi)
+{
+	struct bcm2835_spi *bs = spi_master_get_devdata(spi->master);
+	u32 mask = BCM2835_SPI_CS_CSPOL0 << spi->chip_select;
+	unsigned long flags;
+
+	spin_lock_irqsave(&bs->cspol_lock, flags);
+
+	/* clear the bit */
+	bs->cspol &= ~(mask);
+
+	/* set cspol correctly */
+	if (!(spi->mode & SPI_NO_CS)) {
+		if (spi->mode & SPI_CS_HIGH)
+			/* set the bit */
+			bs->cspol |= mask;
+	}
+
+	spin_unlock_irqrestore(&bs->cspol_lock, flags);
+
 	return 0;
 }
 
@@ -328,6 +359,7 @@ static int bcm2835_spi_probe(struct platform_device *pdev)
 	master->bits_per_word_mask = SPI_BPW_RANGE_MASK(8,9);
 	master->num_chipselect = 3;
 	master->transfer_one_message = bcm2835_spi_transfer_one;
+	master->setup = bcm2835_spi_setup;
 	master->dev.of_node = pdev->dev.of_node;
 	master->rt = 1;
 
@@ -356,6 +388,9 @@ static int bcm2835_spi_probe(struct platform_device *pdev)
 		goto out_master_put;
 	}
 
+	spin_lock_init(&bs->cspol_lock);
+	bs->cspol=0;
+
 	clk_prepare_enable(bs->clk);
 
 	err = devm_request_irq(&pdev->dev, bs->irq, bcm2835_spi_interrupt, 0,
@@ -367,7 +402,9 @@ static int bcm2835_spi_probe(struct platform_device *pdev)
 
 	/* initialise the hardware */
 	bcm2835_wr(bs, BCM2835_SPI_CS,
-		   BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX);
+		bs->cspol
+		| BCM2835_SPI_CS_CLEAR_RX
+		| BCM2835_SPI_CS_CLEAR_TX);
 
 	err = devm_spi_register_master(&pdev->dev, master);
 	if (err) {
