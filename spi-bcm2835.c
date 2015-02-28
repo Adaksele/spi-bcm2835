@@ -80,6 +80,9 @@ DEFINE_DEBUG_PIN(3) /* used to mark "in SPI-interrupt"  */
 #define BCM2835_SPI_MODE_BITS	(SPI_CPOL | SPI_CPHA | SPI_CS_HIGH \
 				| SPI_NO_CS | SPI_3WIRE)
 
+/* the time we will poll the device */
+#define BCM2835_SPI_POLLTIME_US 20
+
 #define DRV_NAME	"spi-bcm2835"
 
 struct bcm2835_spi {
@@ -174,8 +177,8 @@ static int bcm2835_spi_start_transfer(struct spi_device *spi,
 		struct spi_transfer *tfr)
 {
 	struct bcm2835_spi *bs = spi_master_get_devdata(spi->master);
-	unsigned long spi_hz, clk_hz, cdiv;
-	u32 cs = BCM2835_SPI_CS_INTR | BCM2835_SPI_CS_TA;
+	unsigned long spi_hz, clk_hz, cdiv,xfer_time_us;
+	u32 cs = BCM2835_SPI_CS_TA;
 	unsigned long flags;
 
 	spi_hz = tfr->speed_hz;
@@ -231,8 +234,33 @@ static int bcm2835_spi_start_transfer(struct spi_device *spi,
         bcm2835_wr(bs, BCM2835_SPI_CS, cs);
         /* Write as many bytes of data as possible */
         bcm2835_wr_fifo(bs);
-        /* and now enable the interrupt for TX-empty*/
-        bcm2835_wr(bs, BCM2835_SPI_CS, cs | BCM2835_SPI_CS_INTD);
+
+	/* calculate how long we have to wait aproximately */
+	xfer_time_us = cdiv
+		* 9 /* 8bit + 1 clock gap */
+		* tfr->len /* times the number of bytes to transfer */
+		* 1000000 /* get the measure in us */
+		/ clk_hz
+		;
+
+	/* if the time is bigger than the given BCM2835_SPI_POLLTIME_US
+	 * or we still have bytes to transfer
+	 * then run the interrupt
+	 * note that this still hides the fact that the interrupt+wakeup
+	 * is "expensive" and we should do all transfers in a message
+	 * without waking up the worker thread
+	 */
+	if ((bs->len) || (xfer_time_us > BCM2835_SPI_POLLTIME_US))  {
+		/* and now enable the interrupt for TX-empty*/
+		bcm2835_wr(bs, BCM2835_SPI_CS,
+			cs | BCM2835_SPI_CS_INTR | BCM2835_SPI_CS_INTD);
+	} else {
+		/* poll until we get there */
+		while (!(bcm2835_rd(bs, BCM2835_SPI_CS)
+				& BCM2835_SPI_CS_DONE)) ;
+		/* and set completed */
+		complete(&bs->done);
+	}
 
 	return 0;
 }
