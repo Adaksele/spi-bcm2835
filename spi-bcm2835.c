@@ -1,7 +1,9 @@
 /*
  * Driver for Broadcom BCM2835 SPI Controllers
  *
- * Copyright (C) 2012 Chris Boot, Martin Sperl
+ * Copyright (C) 2012 Chris Boot
+ * Copyright (C) 2013 Stephen Warren
+ * Copyright (C) 2015 Martin Sperl
  *
  * This driver is inspired by:
  * spi-ath79.c, Copyright (C) 2009-2011 Gabor Juhos <juhosg@openwrt.org>
@@ -16,780 +18,354 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
 
+#include <linux/clk.h>
+#include <linux/completion.h>
+#include <linux/delay.h>
+#include <linux/err.h>
+#include <linux/interrupt.h>
+#include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/spinlock.h>
-#include <linux/clk.h>
-#include <linux/err.h>
-#include <linux/platform_device.h>
-#include <linux/io.h>
+#include <linux/of.h>
+#include <linux/of_irq.h>
+#include <linux/of_gpio.h>
+#include <linux/of_device.h>
 #include <linux/spi/spi.h>
-#include <linux/interrupt.h>
-#include <linux/delay.h>
-#include <linux/log2.h>
-#include <linux/sched.h>
-#include <linux/wait.h>
-#include <linux/dma-mapping.h>
-#include <mach/dma.h>
-#include <linux/moduleparam.h>
-
-static bool realtime = 1;
-module_param(realtime, bool, 0);
-MODULE_PARM_DESC(realtime, "Run the driver with realtime priority");
-
-static bool debugio = 0;
-module_param(debugio, bool, 0);
-MODULE_PARM_DESC(debugio, "debug the messages of the specific CS");
-
-static unsigned debug=0;
-module_param(debug, uint, 0);
-MODULE_PARM_DESC(debug, "Turn on debug output");
-
-#undef dev_dbg
-#define dev_dbg(dev, fmt, args...)           \
-do {                                         \
-	if (unlikely(debug > 0))             \
-		dev_info(dev, fmt, ##args);  \
-} while (0)
 
 /* SPI register offsets */
-#define SPI_CS			0x00
-#define SPI_FIFO		0x04
-#define SPI_CLK			0x08
-#define SPI_DLEN		0x0c
-#define SPI_LTOH		0x10
-#define SPI_DC			0x14
+#define BCM2835_SPI_CS			0x00
+#define BCM2835_SPI_FIFO		0x04
+#define BCM2835_SPI_CLK			0x08
+#define BCM2835_SPI_DLEN		0x0c
+#define BCM2835_SPI_LTOH		0x10
+#define BCM2835_SPI_DC			0x14
 
 /* Bitfields in CS */
-#define SPI_CS_LEN_LONG		0x02000000
-#define SPI_CS_DMA_LEN		0x01000000
-#define SPI_CS_CSPOL2		0x00800000
-#define SPI_CS_CSPOL1		0x00400000
-#define SPI_CS_CSPOL0		0x00200000
-#define SPI_CS_RXF		0x00100000
-#define SPI_CS_RXR		0x00080000
-#define SPI_CS_TXD		0x00040000
-#define SPI_CS_RXD		0x00020000
-#define SPI_CS_DONE		0x00010000
-#define SPI_CS_LEN		0x00002000
-#define SPI_CS_REN		0x00001000
-#define SPI_CS_ADCS		0x00000800
-#define SPI_CS_INTR		0x00000400
-#define SPI_CS_INTD		0x00000200
-#define SPI_CS_DMAEN		0x00000100
-#define SPI_CS_TA		0x00000080
-#define SPI_CS_CSPOL		0x00000040
-#define SPI_CS_CLEAR_RX		0x00000020
-#define SPI_CS_CLEAR_TX		0x00000010
-#define SPI_CS_CPOL		0x00000008
-#define SPI_CS_CPHA		0x00000004
-#define SPI_CS_CS_10		0x00000002
-#define SPI_CS_CS_01		0x00000001
+#define BCM2835_SPI_CS_LEN_LONG		0x02000000
+#define BCM2835_SPI_CS_DMA_LEN		0x01000000
+#define BCM2835_SPI_CS_CSPOL2		0x00800000
+#define BCM2835_SPI_CS_CSPOL1		0x00400000
+#define BCM2835_SPI_CS_CSPOL0		0x00200000
+#define BCM2835_SPI_CS_RXF		0x00100000
+#define BCM2835_SPI_CS_RXR		0x00080000
+#define BCM2835_SPI_CS_TXD		0x00040000
+#define BCM2835_SPI_CS_RXD		0x00020000
+#define BCM2835_SPI_CS_DONE		0x00010000
+#define BCM2835_SPI_CS_LEN		0x00002000
+#define BCM2835_SPI_CS_REN		0x00001000
+#define BCM2835_SPI_CS_ADCS		0x00000800
+#define BCM2835_SPI_CS_INTR		0x00000400
+#define BCM2835_SPI_CS_INTD		0x00000200
+#define BCM2835_SPI_CS_DMAEN		0x00000100
+#define BCM2835_SPI_CS_TA		0x00000080
+#define BCM2835_SPI_CS_CSPOL		0x00000040
+#define BCM2835_SPI_CS_CLEAR_RX		0x00000020
+#define BCM2835_SPI_CS_CLEAR_TX		0x00000010
+#define BCM2835_SPI_CS_CPOL		0x00000008
+#define BCM2835_SPI_CS_CPHA		0x00000004
+#define BCM2835_SPI_CS_CS_10		0x00000002
+#define BCM2835_SPI_CS_CS_01		0x00000001
 
-#define SPI_TIMEOUT_MS	150
+#define BCM2835_SPI_TIMEOUT_MS	30000
+#define BCM2835_SPI_MODE_BITS	(SPI_CPOL | SPI_CPHA | SPI_CS_HIGH \
+				| SPI_NO_CS | SPI_3WIRE)
 
-#define DRV_NAME	"bcm2835_spi"
-
-#define FLAGS_FIRST_TRANSFER 0x01
-#define FLAGS_LAST_TRANSFER  0x02
-
-/* the defines that are missing in arch/arm/mach-bcm2708/include/mach/dma.h */
-/* the Base address for DMA on the (VideoCore) bus */
-#define DMA_SPI_BASE 0x7E204000
-
-/* some flags */
-#ifndef BCM2708_DMA_D_IGNORE
-#define BCM2708_DMA_D_IGNORE (1<<7)
-#endif
-#ifndef BCM2708_DMA_S_IGNORE
-#define BCM2708_DMA_S_IGNORE (1<<11)
-#endif
-
-struct bcm2835_spi_dma {
-	int chan;
-	int irq;
-	void __iomem *base;
-};
+#define DRV_NAME	"spi-bcm2835"
 
 struct bcm2835_spi {
-	spinlock_t lock;
-	void __iomem *base;
+	void __iomem *regs;
 	struct clk *clk;
-	bool stopping;
-
-	struct completion done;
-
-	/* dma buffer structures */
-	/* the dma region for CBs */
-	struct bcm2708_dma_cb *dma_buffer;
-	dma_addr_t dma_buffer_handle;
-
-	/* the dma bounce buffer */
-	void *dma_bouncebuffer;
-	dma_addr_t dma_bouncebuffer_handle;
-
-	/* and the information on the DMA channels we use */
-	struct bcm2835_spi_dma dma_tx;
-	struct bcm2835_spi_dma dma_rx;
-
-	/* structures from the transfer buffer needed during the transfer */
-	const char *tx_buf;
+	int irq;
+	const u8 *tx_buf;
+	u8 *rx_buf;
 	int tx_len;
-	char *rx_buf;
 	int rx_len;
-	int cs;
 };
-
-struct bcm2835_spi_state {
-	u32 cs;
-	u16 cdiv;
-};
-
-/*
- * This function sets the ALT mode on the SPI pins so that we can use them with
- * the SPI hardware.
- *
- * FIXME: This is a hack. Use pinmux / pinctrl.
- */
-static void bcm2835_init_pinmode(void)
-{
-#define INP_GPIO(g) *(gpio+((g)/10)) &= ~(7<<(((g)%10)*3))
-#define SET_GPIO_ALT(g, a) *(gpio+(((g)/10))) |= (((a) <= 3 ? (a)+4 : (a) == 4 ? 3 : 2)<<(((g)%10)*3))
-
-	int pin;
-	u32 *gpio = ioremap(0x20200000, SZ_16K);
-
-	/* SPI is on GPIO 7..11 */
-	for (pin = 7; pin <= 11; pin++) {
-		INP_GPIO(pin);		/* set mode to GPIO input first */
-		SET_GPIO_ALT(pin, 0);	/* set mode to ALT 0 */
-	}
-
-	iounmap(gpio);
-
-#undef INP_GPIO
-#undef SET_GPIO_ALT
-}
 
 static inline u32 bcm2835_rd(struct bcm2835_spi *bs, unsigned reg)
 {
-	return readl(bs->base + reg);
+	return readl(bs->regs + reg);
 }
 
 static inline void bcm2835_wr(struct bcm2835_spi *bs, unsigned reg, u32 val)
 {
-	writel(val, bs->base + reg);
+	writel(val, bs->regs + reg);
 }
 
-static int bcm2835_setup_state(struct spi_master *master,
-			struct device *dev, struct bcm2835_spi_state *state,
-			u32 hz, u8 csel, u8 mode, u8 bpw)
+static inline void bcm2835_rd_fifo(struct bcm2835_spi *bs)
+{
+	u8 byte;
+
+	while ((bs->rx_len) &&
+	       (bcm2835_rd(bs, BCM2835_SPI_CS) & BCM2835_SPI_CS_RXD)) {
+		byte = bcm2835_rd(bs, BCM2835_SPI_FIFO);
+		if (bs->rx_buf)
+			*bs->rx_buf++ = byte;
+		bs->rx_len--;
+	}
+}
+
+static inline void bcm2835_wr_fifo(struct bcm2835_spi *bs)
+{
+	u8 byte;
+
+	while ((bs->tx_len) &&
+	       (bcm2835_rd(bs, BCM2835_SPI_CS) & BCM2835_SPI_CS_TXD)) {
+		byte = bs->tx_buf ? *bs->tx_buf++ : 0;
+		bcm2835_wr(bs, BCM2835_SPI_FIFO, byte);
+		bs->tx_len--;
+	}
+}
+
+static void bcm2835_spi_reset_hw(struct spi_master *master)
 {
 	struct bcm2835_spi *bs = spi_master_get_devdata(master);
-	int cdiv;
-	unsigned long bus_hz;
-	u32 cs = 0;
+	u32 cs = bcm2835_rd(bs, BCM2835_SPI_CS);
 
-	bus_hz = clk_get_rate(bs->clk);
+	/* Disable SPI interrupts and transfer */
+	cs &= ~(BCM2835_SPI_CS_INTR |
+		BCM2835_SPI_CS_INTD |
+		BCM2835_SPI_CS_TA);
+	/* and reset RX/TX FIFOS */
+	cs |= BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX;
 
-	if (hz >= bus_hz) {
-		cdiv = 2; /* bus_hz / 2 is as fast as we can go */
-	} else if (hz) {
-		cdiv = DIV_ROUND_UP(bus_hz, hz);
-
-		if (cdiv > 65536) {
-			dev_err(dev,
-				"setup: %d Hz too slow, cdiv %u; min %ld Hz\n",
-				hz, cdiv, bus_hz / 65536);
-			return -EINVAL;
-		} else if (cdiv == 65536) {
-			cdiv = 0;
-		} else if (cdiv == 1) {
-			cdiv = 2; /* 1 gets rounded down to 0; == 65536 */
-		}
-	} else {
-		cdiv = 0;
-	}
-
-	switch (bpw) {
-	case 8:
-		break;
-	default:
-		dev_err(dev, "setup: invalid bits_per_word %u (must be 8)\n",
-			bpw);
-		return -EINVAL;
-	}
-
-	if (mode & SPI_CPOL)
-		cs |= SPI_CS_CPOL;
-	if (mode & SPI_CPHA)
-		cs |= SPI_CS_CPHA;
-
-	if (!(mode & SPI_NO_CS)) {
-		if (mode & SPI_CS_HIGH) {
-			cs |= SPI_CS_CSPOL;
-			cs |= SPI_CS_CSPOL0 << csel;
-		}
-		cs |= csel;
-	} else {
-		cs |= SPI_CS_CS_10 | SPI_CS_CS_01;
-	}
-
-	if (state) {
-		state->cs = cs;
-		state->cdiv = cdiv;
-	}
-
-	dev_dbg(dev, "%s(hz=%d, csel=%d, mode=0x%02X, bpw=%d) => "
-		"bus_hz=%lu / cdiv=%u == %lu Hz; cs 0x%08X\n",
-		__func__, hz, csel, mode, bpw, bus_hz, cdiv, bus_hz/cdiv, cs);
-
-	return 0;
+	/* and reset the SPI_HW */
+	bcm2835_wr(bs, BCM2835_SPI_CS, cs);
 }
 
-static int bcm2835_register_dma(struct platform_device *pdev,
-				struct bcm2835_spi_dma *d,
-				struct bcm2708_dma_cb *dmabuffer,
-				const char *name)
+static irqreturn_t bcm2835_spi_interrupt(int irq, void *dev_id)
 {
-	int ret;
-
-	/* register DMA channel */
-	ret = bcm_dma_chan_alloc(BCM_DMA_FEATURE_FAST, &d->base, &d->irq);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "couldn't allocate a DMA channel\n");
-		return ret;
-	}
-	d->chan = ret;
-	dev_info(&pdev->dev, "DMA channel %d at address 0x%08lx with irq %d\n",
-		d->chan, (unsigned long)d->base, d->irq);
-	return 0;
-}
-
-static int bcm2835_release_dma(struct platform_device *pdev,
-			struct bcm2835_spi_dma *d)
-{
-	if (!d->base)
-		return 0;
-	bcm_dma_chan_free(d->chan);
-	d->base = NULL;
-	d->chan = 0;
-	d->irq = 0;
-	return 0;
-}
-
-static int bcm2835_register_dmabuffer(struct platform_device *pdev,
-				struct bcm2835_spi *bs)
-{
-	/* for this to work you need to have set the following:
-	   in the bcm2835_spi_device definition:
-	   .dev = {
-	   .coherent_dma_mask = DMA_BIT_MASK(DMA_MASK_BITS_COMMON),
-	   },
-	   otherwise you get the message:
-	   coherent DMA mask is unset
-	   and the allocation fails...
-	   learned the hard way, so as a hint for all
-	   who take this as a base...
-	*/
-	bs->dma_buffer = dma_alloc_writecombine(&pdev->dev,
-					SZ_4K,
-					&bs->dma_buffer_handle,
-					GFP_KERNEL);
-	if (!bs->dma_buffer) {
-		dev_err(&pdev->dev, "cannot allocate DMA CBs\n");
-		return -ENOMEM;
-	}
-	/* allocate the dma bounce buffer */
-	bs->dma_bouncebuffer = dma_alloc_writecombine(&pdev->dev,
-					SZ_4K,
-					&bs->dma_bouncebuffer_handle,
-					GFP_KERNEL);
-	if (!bs->dma_bouncebuffer) {
-		dev_err(&pdev->dev, "cannot allocate DMA bounce-buffer\n");
-		dma_free_writecombine(&pdev->dev, SZ_4K,
-				bs->dma_buffer,
-				bs->dma_buffer_handle);
-		bs->dma_buffer = NULL;
-		bs->dma_buffer_handle = 0;
-		return -ENOMEM;
-	}
-	
-	return 0;
-}
-
-static int bcm2835_release_dmabuffer(struct platform_device *pdev,
-				struct bcm2835_spi *bs)
-{
-	/* release the dma buffer */
-	if (!bs->dma_buffer)
-		return 0;
-	dma_free_writecombine(&pdev->dev, SZ_4K,
-			bs->dma_buffer,
-			bs->dma_buffer_handle);
-	bs->dma_buffer = NULL;
-	bs->dma_buffer_handle = 0;
-	/* release also the DMA bounce buffer */
-	dma_free_writecombine(&pdev->dev, SZ_4K,
-			bs->dma_bouncebuffer,
-			bs->dma_bouncebuffer_handle);
-	bs->dma_bouncebuffer = NULL;
-	bs->dma_bouncebuffer_handle = 0;
-	return 0;
-}
-
-irqreturn_t bcm2835_transfer_one_message_dma_irqhandler(int irq, void *dev)
-{
-	struct spi_master *master = dev;
+	struct spi_master *master = dev_id;
 	struct bcm2835_spi *bs = spi_master_get_devdata(master);
 
-	/* mark the rx DMA-interrupt as handled
-	   - it will (level) trigger otherwise again */
-	writel(BCM2708_DMA_INT, bs->dma_rx.base+BCM2708_DMA_CS);
+	/* Read as many bytes as possible from FIFO */
+	bcm2835_rd_fifo(bs);
+	/* Write as many bytes as possible to FIFO */
+	bcm2835_wr_fifo(bs);
 
-	/* and wake up the thread to continue its work - returning ...*/
-	complete(&bs->done);
-	/* return IRQ handled */
+	/* based on flags decide if we can finish the transfer */
+	if (bcm2835_rd(bs, BCM2835_SPI_CS) & BCM2835_SPI_CS_DONE) {
+		/* Transfer complete - reset SPI HW */
+		bcm2835_spi_reset_hw(master);
+		/* wake up the framework */
+		complete(&master->xfer_completion);
+	}
+
 	return IRQ_HANDLED;
 }
 
-/* We could improve on DMA options, by chaining individual xfer messages
-   into a more complex CB chain that takes care of all the transfers in
-   one "go" resulting in only one interrupt getting delivered at the end of
-   the sequence. This would reduce the "gap" between transfers to virtually 0
-   (maybe one SPI clock lost) at the cost of possibly saturating the AXI bus.
-   Theoretically it would be possible to chain 63 requests together using
-   a single page that way we could run say 62 4KB DMA requests and by this
-   transfer 248 KB without a single CPU cycle needed - except for the final
-   notification IRQ (assuming that the driver requesting this is doing async
-   transfers). Assuming this, we could at a SPI bus speed of 15.625MHz
-   (core frequency of 250MHz with divider of 16) we could transfer about
-   1.953MB/s with just 7.8 interrupts (and Engine wakeups)
-   (250MHz/16(divider)/8(bit/byte)/(62(CBs we can chain)*4(kb/CB transfer))
-   But before adding this extra complexity to make this possible
-   the driver needing this needs to get written first...
-   Note: that this would also mean that the SPI bus is really dedicated
-   to this one device!!!
-
-   The other thing that could also help was (assuming that DMA in VideoCORE
-   does not have any errata - like on other arm platforms) if there was an
-   API that could map kernel addresses directly to BUS addresses independently
-   from if the xfer block has been allocated in the DMA region (the allocation
-   call of which returning also returns the bus address), then we could also
-   enable DMA by default on all transfers  and not only on selected ones.
-   This could help doing DMA transfers directly to user space without copying
-   - if there is an API allowing that...
-*/
-
-static int bcm2835_transfer_one_message_dma(struct spi_master *master,
-					struct bcm2835_spi_state *stp,
-					struct spi_transfer *xfer,
-					int flags)
+static int bcm2835_spi_transfer_one(struct spi_master *master,
+				    struct spi_device *spi,
+				    struct spi_transfer *tfr)
 {
 	struct bcm2835_spi *bs = spi_master_get_devdata(master);
-	struct bcm2708_dma_cb *cbs = bs->dma_buffer;
-	u32 cs = 0;
-	/* calculate dma transfer sizes - words */
-	int dmaleninitial = 4;
-	int dmalen = xfer->len;
+	unsigned long spi_hz, clk_hz, cdiv;
+	u32 cs = bcm2835_rd(bs, BCM2835_SPI_CS);
 
-	/* if size <=0 then return immediately and OK - nothing to do*/
-	if (xfer->len <= 0)
-		return 0;
+	/* set clock */
+	spi_hz = tfr->speed_hz;
+	clk_hz = clk_get_rate(bs->clk);
 
-	/* the length of the package may not be bigger than 64k */
-	if (xfer->len > 65536) {
-		dev_err(&master->dev, "Max allowed package size 64k exceeded");
-		return -EINVAL;
-	}
-	/* on first transfer reset the RX/TX */
-	cs = stp->cs | SPI_CS_DMAEN;
-	if (flags & FLAGS_FIRST_TRANSFER)
-		bcm2835_wr(bs, SPI_CS, cs | SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
-	/* auto deselect CS if it is the last */
-	if (flags & FLAGS_LAST_TRANSFER)
-		cs |= SPI_CS_ADCS;
+	if (spi_hz >= clk_hz / 2) {
+		cdiv = 2; /* clk_hz/2 is the fastest we can go */
+	} else if (spi_hz) {
+		/* CDIV must be a multiple of two */
+		cdiv = DIV_ROUND_UP(clk_hz, spi_hz);
+		cdiv += (cdiv % 2);
 
-	/* store data for interrupts and more */
-	bs->rx_buf = xfer->rx_buf;
-	bs->tx_buf = xfer->tx_buf;
-	bs->rx_len = xfer->len;
-	bs->tx_len = xfer->len;
-	bs->cs = cs;
-
-	/* now set up the Registers */
-	bcm2835_wr(bs, SPI_CLK, stp->cdiv);
-	bcm2835_wr(bs, SPI_CS, cs);
-
-	/* start filling in the CBs */
-	/* first set up the flags for the fifo
-	   - needs to be set 256 bit alligned, so abusing the first cb */
-	cbs[0].info = (xfer->len << 16) /* the length in bytes to transfer */
-		| (cs & 0xff) /* the bottom 8 bit flags for the SPI interface */
-		| SPI_CS_TA; /* and enable transfer */
-
-	/* tx info - set len/flags in the first CB */
-	cbs[1].info = BCM2708_DMA_PER_MAP(6) /* DREQ 6 = SPI TX in PERMAP */
-		| BCM2708_DMA_D_DREQ; /* destination DREQ trigger */
-	cbs[1].src = bs->dma_buffer_handle + 0*sizeof(struct bcm2708_dma_cb);
-	cbs[1].dst = (unsigned long)(DMA_SPI_BASE + SPI_FIFO);
-	cbs[1].length = dmaleninitial;
-	cbs[1].stride = 0;
-	cbs[1].next = bs->dma_buffer_handle + 2*sizeof(struct bcm2708_dma_cb);
-	/* and the tx-data in the second CB */
-	cbs[2].info = cbs[1].info | BCM2708_DMA_WAIT_RESP;
-	if (xfer->tx_buf) {
-		cbs[2].info |= BCM2708_DMA_S_INC; /* source increment by 4 */
-		cbs[2].src = (unsigned long)xfer->tx_dma;
+		if (cdiv >= 65536)
+			cdiv = 0; /* 0 is the slowest we can go */
 	} else {
-		cbs[3].info |= BCM2708_DMA_S_IGNORE; /* ignore source */
-		cbs[2].src = bs->dma_buffer_handle + 127*sizeof(struct bcm2708_dma_cb);
+		cdiv = 0; /* 0 is the slowest we can go */
 	}
-	cbs[2].dst = cbs[1].dst;
-	cbs[2].length = dmalen;
-	cbs[2].stride = 0;
-	cbs[2].next = (unsigned long)0;
-	/* and here the RX Data */
-	/* rx info - set bytes/clock */
-	cbs[3].info = BCM2708_DMA_PER_MAP(7) /* DREQ 7 = SPI RX in PERMAP */
-		| BCM2708_DMA_S_DREQ /* source DREQ trigger */
-		| BCM2708_DMA_INT_EN; /* enable interrupt */
-	if (xfer->rx_buf) {
-		cbs[3].info |= BCM2708_DMA_D_INC; /* destination inc by 4 */
-		cbs[3].dst = (unsigned long)xfer->rx_dma;
-	} else {
-		cbs[3].info |= BCM2708_DMA_D_IGNORE; /* ignore destination */
-	}
-	cbs[3].src = cbs[1].dst;
-	cbs[3].length = xfer->len;
-	cbs[3].stride = 0;
-	cbs[3].next = (unsigned long)0;
-	/* initialize done */
-	INIT_COMPLETION(bs->done);
-	/* write CB to process */
-	writel(
-		bs->dma_buffer_handle + 3*sizeof(struct bcm2708_dma_cb),
-		bs->dma_rx.base + BCM2708_DMA_ADDR
-		);
-	writel(
-		bs->dma_buffer_handle + 1*sizeof(struct bcm2708_dma_cb),
-		bs->dma_tx.base + BCM2708_DMA_ADDR
-		);
-	dsb();
-	/* start DMA - this should also enable the DMA */
-	writel(BCM2708_DMA_ACTIVE, bs->dma_tx.base + BCM2708_DMA_CS);
-	writel(BCM2708_DMA_ACTIVE, bs->dma_rx.base + BCM2708_DMA_CS);
+	bcm2835_wr(bs, BCM2835_SPI_CLK, cdiv);
 
-	/* now we are running - waiting to get woken by interrupt */
-	/* the timeout may be too short - depend on amount of data and freq. */
-	if (wait_for_completion_timeout(
-			&bs->done,
-			msecs_to_jiffies(SPI_TIMEOUT_MS*10)) == 0) {
-		/* clear cs */
+	/* handle all the modes */
+	if ((spi->mode & SPI_3WIRE) && (tfr->rx_buf))
+		cs |= BCM2835_SPI_CS_REN;
+	if (spi->mode & SPI_CPOL)
+		cs |= BCM2835_SPI_CS_CPOL;
+	if (spi->mode & SPI_CPHA)
+		cs |= BCM2835_SPI_CS_CPHA;
 
-		/* inform of event and return with error */
-		dev_err(&master->dev, "DMA transfer timed out");
-		/* need to abort Interrupts */
-		bcm_dma_abort(bs->dma_tx.base);
-		bcm_dma_abort(bs->dma_rx.base);
-		return -ETIMEDOUT;
-	}
-	/* and return */
-	return 0;
+	/* for gpio_cs set dummy CS so that no HW-CS get changed
+	 * we can not run this in bcm2835_spi_set_cs, as it does
+	 * not get called for cs_gpio cases, so we need to do it here
+	 */
+	if (gpio_is_valid(spi->cs_gpio) || (spi->mode & SPI_NO_CS))
+		cs |= BCM2835_SPI_CS_CS_10 | BCM2835_SPI_CS_CS_01;
+
+	/* set transmit buffers and length */
+	bs->tx_buf = tfr->tx_buf;
+	bs->rx_buf = tfr->rx_buf;
+	bs->tx_len = tfr->len;
+	bs->rx_len = tfr->len;
+
+	/*
+	 * Enable the HW block. This will immediately trigger a DONE (TX
+	 * empty) interrupt, upon which we will fill the TX FIFO with the
+	 * first TX bytes. Pre-filling the TX FIFO here to avoid the
+	 * interrupt doesn't work:-(
+	 */
+	cs |= BCM2835_SPI_CS_INTR | BCM2835_SPI_CS_INTD | BCM2835_SPI_CS_TA;
+	bcm2835_wr(bs, BCM2835_SPI_CS, cs);
+
+	/* signal that we need to wait for completion */
+	return 1;
 }
 
-static int bcm2835_transfer_one_message(struct spi_master *master,
-					struct spi_message *msg)
+static void bcm2835_spi_handle_err(struct spi_master *master,
+				   struct spi_message *msg)
 {
-	struct bcm2835_spi *bs = spi_master_get_devdata(master);
-	struct spi_transfer *xfer;
-	struct spi_device *spi = msg->spi;
-	struct bcm2835_spi_state state;
-	int status = 0;
-	int count = 0;
-	int transfers = 0;
+	bcm2835_spi_reset_hw(master);
+}
 
-	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
-		transfers++;
+static void bcm2835_spi_set_cs(struct spi_device *spi, bool gpio_level)
+{
+	/*
+	 * we can assume that we are "native" as per spi_set_cs
+	 *   calling us ONLY when cs_gpio is not set
+	 * we can also assume that we are CS < 3 as per bcm2835_spi_setup
+	 *   we would not get called because of error handling there.
+	 * the level passed is the electrical level not enabled/disabled
+	 *   so it has to get translated back to enable/disable
+	 *   see spi_set_cs in spi.c for the implementation
+	 */
+
+	struct spi_master *master = spi->master;
+	struct bcm2835_spi *bs = spi_master_get_devdata(master);
+	u32 cs = bcm2835_rd(bs, BCM2835_SPI_CS);
+	bool enable;
+
+	/* calculate the enable flag from the passed gpio_level */
+	enable = (spi->mode & SPI_CS_HIGH) ? gpio_level : !gpio_level;
+
+	/* set flags for "reverse" polarity in the registers */
+	if (spi->mode & SPI_CS_HIGH) {
+		/* set the correct CS-bits */
+		cs |= BCM2835_SPI_CS_CSPOL;
+		cs |= BCM2835_SPI_CS_CSPOL0 << spi->chip_select;
+	} else {
+		/* clean the CS-bits */
+		cs &= ~BCM2835_SPI_CS_CSPOL;
+		cs &= ~(BCM2835_SPI_CS_CSPOL0 << spi->chip_select);
 	}
 
-	/* loop all the transfer entries to check for transfer issues first */
-	list_for_each_entry(xfer, &msg->transfers, transfer_list) {
-		int use_bounce_buffer = 0;
-		int flags = 0;
-		count++;
-		/* calculate flags */
-		if (count == 1) {
-			/* clear the queues */
-			bcm2835_wr(bs, SPI_CS, bcm2835_rd(bs, SPI_CS) |
-					SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
-			flags |= FLAGS_FIRST_TRANSFER;
-		}
-		if (count == transfers)
-			flags |= FLAGS_LAST_TRANSFER;
-		/* check if elegable for DMA - bounce buffers are a bit bad - need a better way*/
-		if ((xfer->tx_buf) && (!xfer->tx_dma)) {
-			use_bounce_buffer = 1;
-		}
-		if ((xfer->rx_buf) && (!xfer->rx_dma)) {
-			use_bounce_buffer = 1;
-		}
-		/* this is quick & dirty - if one side needs a bounce buffer, then both sides need it... */
-		if (use_bounce_buffer) {
-			if (xfer->tx_buf) {
-				xfer->tx_dma=bs->dma_bouncebuffer_handle;
-				memcpy(bs->dma_bouncebuffer,xfer->tx_buf,xfer->len);
-			}
-			if (xfer->rx_buf) {
-				xfer->rx_dma=bs->dma_bouncebuffer_handle+2048;
-			}
-		}
-
-
-		/* configure SPI - use global settings if not explicitly set */
-		if (xfer->bits_per_word || xfer->speed_hz) {
-			status = bcm2835_setup_state(spi->master, &spi->dev,
-				&state,
-				xfer->speed_hz ? xfer->speed_hz :
-							spi->max_speed_hz,
-				spi->chip_select, spi->mode,
-				xfer->bits_per_word ? xfer->bits_per_word :
-							spi->bits_per_word);
+	/* select the correct chip_select depending on disabled/enabled */
+	if (enable) {
+		/* set cs correctly */
+		if (spi->mode & SPI_NO_CS) {
+			/* use the "undefined" chip-select */
+			cs |= BCM2835_SPI_CS_CS_10 | BCM2835_SPI_CS_CS_01;
 		} else {
-			state.cs = ((struct bcm2835_spi_state *)spi->controller_state)->cs;
-			state.cdiv = ((struct bcm2835_spi_state *)spi->controller_state)->cdiv;
+			/* set the chip select */
+			cs &= ~(BCM2835_SPI_CS_CS_10 | BCM2835_SPI_CS_CS_01);
+			cs |= spi->chip_select;
 		}
-		if (status)
-			goto exit;
-		/* keep Transfer active until we are triggering the last one */
-		if (!(flags & FLAGS_LAST_TRANSFER))
-			state.cs |= SPI_CS_TA;
-		/* now send the message over SPI using DMA only */
-		status = bcm2835_transfer_one_message_dma(
-			master, &state, xfer, flags
-			);
-		if (status)
-			goto exit;
-		/* again quick and dirty */
-		if (use_bounce_buffer) {
-			if (xfer->rx_buf) {
-				memcpy(xfer->rx_buf,bs->dma_bouncebuffer+2048,xfer->len);
-			}
-		}
-
-		if (unlikely(debugio)) {
-			if (unlikely(debugio&(1<<spi->chip_select))) {
-				printk(KERN_DEBUG "spi%i.%i: Transfer\n  Transfer Length=%i\n",
-					master->bus_num,spi->chip_select,
-					xfer->len
-					);
-				if (xfer->tx_buf) {
-					print_hex_dump(KERN_DEBUG,"  TXData=",DUMP_PREFIX_ADDRESS,
-						16,1,
-						xfer->tx_buf,xfer->len,
-						false);
-				}
-				if (xfer->rx_buf) {
-					print_hex_dump(KERN_DEBUG,"  RXData=",DUMP_PREFIX_ADDRESS,
-						16,1,
-						xfer->rx_buf,xfer->len,
-						false);
-				}
-			}
-		}
-
-		/* delay if given */
-		if (xfer->delay_usecs)
-			udelay(xfer->delay_usecs);
-		/* and add up the result */
-		msg->actual_length += xfer->len;
+	} else {
+		/* disable CSPOL which puts HW-CS into deselected state */
+		cs &= ~BCM2835_SPI_CS_CSPOL;
+		/* use the "undefined" chip-select as precaution */
+		cs |= BCM2835_SPI_CS_CS_10 | BCM2835_SPI_CS_CS_01;
 	}
-exit:
-	msg->status = status;
-	spi_finalize_current_message(master);
-	return status;
-}
 
-static int bcm2835_prepare_transfer(struct spi_master *master)
-{
-	return 0;
-}
-
-static int bcm2835_unprepare_transfer(struct spi_master *master)
-{
-	return 0;
+	/* finally set the calculated flags in SPI_CS */
+	bcm2835_wr(bs, BCM2835_SPI_CS, cs);
 }
 
 static int bcm2835_spi_setup(struct spi_device *spi)
 {
-	struct bcm2835_spi *bs = spi_master_get_devdata(spi->master);
-	struct bcm2835_spi_state *state;
-	int ret;
+	/*
+	 * sanity checking the native-chipselects
+	 */
+	if (spi->mode & SPI_NO_CS)
+		return 0;
+	if (gpio_is_valid(spi->cs_gpio))
+		return 0;
+	if (spi->chip_select < 3)
+		return 0;
 
-	/* configure master */
-
-	if (bs->stopping)
-		return -ESHUTDOWN;
-
-	if (!(spi->mode & SPI_NO_CS) &&
-		(spi->chip_select > spi->master->num_chipselect)) {
-		dev_err(&spi->dev,
-			"setup: invalid chipselect %u (%u defined)\n",
-			spi->chip_select, spi->master->num_chipselect);
-		return -EINVAL;
-	}
-
-	state = spi->controller_state;
-	if (!state) {
-		state = kzalloc(sizeof(*state), GFP_KERNEL);
-		if (!state)
-			return -ENOMEM;
-
-		spi->controller_state = state;
-	}
-
-	ret = bcm2835_setup_state(spi->master, &spi->dev, state,
-				spi->max_speed_hz, spi->chip_select, spi->mode,
-				spi->bits_per_word);
-	if (ret < 0) {
-		kfree(state);
-		spi->controller_state = NULL;
-		return ret;
-	}
-
-	return 0;
-}
-
-static void bcm2835_spi_cleanup(struct spi_device *spi)
-{
-	kfree(spi->controller_state);
-	spi->controller_state = NULL;
+	/* error in the case of Native CS requested with CS > 2 */
+	dev_err(&spi->dev,
+		"setup: only three native chip-selects are supported\n"
+		);
+	return -EINVAL;
 }
 
 static int bcm2835_spi_probe(struct platform_device *pdev)
 {
-	struct resource *regs;
-	int err = -ENOMEM;
-	struct clk *clk;
 	struct spi_master *master;
 	struct bcm2835_spi *bs;
-
-	regs = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!regs) {
-		dev_err(&pdev->dev, "could not get IO memory\n");
-		return -ENXIO;
-	}
-
-	clk = clk_get(&pdev->dev, NULL);
-	if (IS_ERR(clk)) {
-		dev_err(&pdev->dev, "could not find clk: %ld\n", PTR_ERR(clk));
-		return PTR_ERR(clk);
-	}
-
-	bcm2835_init_pinmode();
+	struct resource *res;
+	int err;
 
 	master = spi_alloc_master(&pdev->dev, sizeof(*bs));
 	if (!master) {
 		dev_err(&pdev->dev, "spi_alloc_master() failed\n");
-		goto out_clk_put;
+		return -ENOMEM;
 	}
-
-	/* the spi->mode bits understood by this driver: */
-	master->mode_bits = SPI_CPOL | SPI_CPHA | SPI_CS_HIGH | SPI_NO_CS;
-
-	master->bus_num = pdev->id;
-	master->num_chipselect = 3;
-	master->setup = bcm2835_spi_setup;
-	master->cleanup = bcm2835_spi_cleanup;
-	master->rt = realtime;
-
-	master->prepare_transfer_hardware       = bcm2835_prepare_transfer;
-	master->transfer_one_message            = bcm2835_transfer_one_message;
-	master->unprepare_transfer_hardware     = bcm2835_unprepare_transfer;
 
 	platform_set_drvdata(pdev, master);
 
-	bs = spi_master_get_devdata(master);
-	spin_lock_init(&bs->lock);
-	init_completion(&bs->done);
+	master->mode_bits = BCM2835_SPI_MODE_BITS;
+	master->bits_per_word_mask = SPI_BPW_MASK(8);
+	master->num_chipselect = 3;
+	master->setup = bcm2835_spi_setup;
+	master->set_cs = bcm2835_spi_set_cs;
+	master->transfer_one = bcm2835_spi_transfer_one;
+	//master->handle_err = bcm2835_spi_handle_err;
+	master->dev.of_node = pdev->dev.of_node;
 
-	/* get Register Map */
-	bs->base = ioremap(regs->start, resource_size(regs));
-	if (!bs->base) {
-		dev_err(&pdev->dev, "could not remap memory\n");
+	bs = spi_master_get_devdata(master);
+
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	bs->regs = devm_ioremap_resource(&pdev->dev, res);
+	if (IS_ERR(bs->regs)) {
+		err = PTR_ERR(bs->regs);
 		goto out_master_put;
 	}
 
-	bs->clk = clk;
-	bs->stopping = false;
+	bs->clk = devm_clk_get(&pdev->dev, NULL);
+	if (IS_ERR(bs->clk)) {
+		err = PTR_ERR(bs->clk);
+		dev_err(&pdev->dev, "could not get clk: %d\n", err);
+		goto out_master_put;
+	}
 
-	/* enable DMA */
-	/* register memory buffer for DMA */
-	err = bcm2835_register_dmabuffer(pdev, bs);
-	if (err)
-		goto out_iounmap;
+	bs->irq = irq_of_parse_and_map(pdev->dev.of_node, 0);
+	if (bs->irq <= 0) {
+		dev_err(&pdev->dev, "could not get IRQ: %d\n", bs->irq);
+		err = bs->irq ? bs->irq : -ENODEV;
+		goto out_master_put;
+	}
 
-	/* register channels and irq */
-	err = bcm2835_register_dma(pdev,
-						&bs->dma_rx,
-						bs->dma_buffer,
-						DRV_NAME "(rxDMA)"
-				);
-	if (err)
-		goto out_free_dma_buffer;
-	err = bcm2835_register_dma(pdev,
-						&bs->dma_tx,
-						bs->dma_buffer,
-						DRV_NAME "(txDMA)"
-				);
-	if (err)
-		goto out_free_dma_rx;
-	/* register IRQ for RX dma channel  */
-	err = request_irq(bs->dma_rx.irq,
-			bcm2835_transfer_one_message_dma_irqhandler,
-			0,
-			dev_name(&pdev->dev),
-			master);
+	clk_prepare_enable(bs->clk);
+
+	err = devm_request_irq(&pdev->dev, bs->irq, bcm2835_spi_interrupt, 0,
+			       dev_name(&pdev->dev), master);
 	if (err) {
 		dev_err(&pdev->dev, "could not request IRQ: %d\n", err);
-		goto out_free_dma_tx;
+		goto out_clk_disable;
 	}
 
-	/* initialise the hardware */
-	clk_enable(clk);
-	bcm2835_wr(bs, SPI_CS, SPI_CS_REN | SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
+	/* initialise the hardware with the default polarities */
+	bcm2835_wr(bs, BCM2835_SPI_CS,
+		   BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX);
 
-	err = spi_register_master(master);
+	err = devm_spi_register_master(&pdev->dev, master);
 	if (err) {
 		dev_err(&pdev->dev, "could not register SPI master: %d\n", err);
-		goto out_free_dma_irq;
+		goto out_clk_disable;
 	}
 
-	dev_info(&pdev->dev, "SPI Controller at 0x%08lx\n",
-		(unsigned long)regs->start);
-
-	dev_info(&pdev->dev, "SPI Controller running in DMA mode\n");
 	return 0;
-out_free_dma_irq:
-	free_irq(bs->dma_rx.irq, master);
-out_free_dma_tx:
-	bcm2835_release_dma(pdev, &bs->dma_tx);
-out_free_dma_rx:
-	bcm2835_release_dma(pdev, &bs->dma_rx);
-out_free_dma_buffer:
-	bcm2835_release_dmabuffer(pdev, bs);
-out_iounmap:
-	iounmap(bs->base);
+
+out_clk_disable:
+	clk_disable_unprepare(bs->clk);
 out_master_put:
 	spi_master_put(master);
-out_clk_put:
-	clk_put(clk);
 	return err;
 }
 
@@ -798,71 +374,31 @@ static int bcm2835_spi_remove(struct platform_device *pdev)
 	struct spi_master *master = platform_get_drvdata(pdev);
 	struct bcm2835_spi *bs = spi_master_get_devdata(master);
 
-	/* reset the hardware and block queue progress */
-	bs->stopping = true;
+	/* Clear FIFOs, and disable the HW block */
+	bcm2835_wr(bs, BCM2835_SPI_CS,
+		   BCM2835_SPI_CS_CLEAR_RX | BCM2835_SPI_CS_CLEAR_TX);
 
-	/* release interrupts */
-	free_irq(bs->dma_rx.irq, master);
-	/* release DMA - disabling RX and TX SPI*/
-	bcm2835_wr(bs, SPI_CS, SPI_CS_CLEAR_RX | SPI_CS_CLEAR_TX);
-	/* release buffers and memory */
-	bcm2835_release_dma(pdev, &bs->dma_tx);
-	bcm2835_release_dma(pdev, &bs->dma_rx);
-	bcm2835_release_dmabuffer(pdev, bs);
-
-	/* and unregister device */
-	spi_unregister_master(master);
-
-	/* disable clocks */
 	clk_disable_unprepare(bs->clk);
-	clk_put(bs->clk);
-
-	/* release master */
-	spi_master_put(master);
-	iounmap(bs->base);
-
 
 	return 0;
 }
 
-/* for Device tree matching */
 static const struct of_device_id bcm2835_spi_match[] = {
-        { .compatible = "bcrm,bcm2708_spi", },
-        {}
+	{ .compatible = "brcm,bcm2835-spi", },
+	{}
 };
 MODULE_DEVICE_TABLE(of, bcm2835_spi_match);
 
-/* and for "compatiblity" */
-static const struct platform_device_id bcm2835_id_table[] = {
-        { "bcm2708_spi",   2708 },
-        { "bcm2835_spi",   2835 },
-        { },
-};
-
 static struct platform_driver bcm2835_spi_driver = {
 	.driver		= {
-		.name	= DRV_NAME,
-		.owner	= THIS_MODULE,
-                .of_match_table = bcm2835_spi_match,
+		.name		= DRV_NAME,
+		.of_match_table	= bcm2835_spi_match,
 	},
-	.id_table       = bcm2835_id_table,
 	.probe		= bcm2835_spi_probe,
 	.remove		= bcm2835_spi_remove,
-
 };
-
-static int __init bcm2835_spi_init(void)
-{
-	return platform_driver_probe(&bcm2835_spi_driver, bcm2835_spi_probe);
-}
-module_init(bcm2835_spi_init);
-
-static void __exit bcm2835_spi_exit(void)
-{
-	platform_driver_unregister(&bcm2835_spi_driver);
-}
-module_exit(bcm2835_spi_exit);
+module_platform_driver(bcm2835_spi_driver);
 
 MODULE_DESCRIPTION("SPI controller driver for Broadcom BCM2835");
-MODULE_AUTHOR("Chris Boot <bootc@bootc.net>, Martin Sperl, Notro");
+MODULE_AUTHOR("Chris Boot <bootc@bootc.net>");
 MODULE_LICENSE("GPL v2");
